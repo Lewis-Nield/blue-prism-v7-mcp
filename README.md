@@ -22,7 +22,7 @@ gap over the documented, supported REST API.
 ```bash
 pip install blue-prism-mcp            # light base: MCP runtime + HTTP client
 pip install "blue-prism-mcp[pii]"     # + Presidio PII scrubbing
-python -m spacy download en_core_web_lg   # if using [pii]
+python -m spacy download en_core_web_sm   # if using [pii] (lg/_trf: better recall)
 ```
 
 ## Configuration
