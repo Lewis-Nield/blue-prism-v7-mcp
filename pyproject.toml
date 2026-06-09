@@ -32,6 +32,9 @@ dev = [
     "pytest==8.3.5",
     "pytest-cov==6.1.1",
     "ruff",
+    # Mutation testing — a periodic "are my tests real?" audit, not a per-commit
+    # gate. See CONTRIBUTING.md. Pinned because the config schema is version-tied.
+    "mutmut==3.6.0",
 ]
 
 [project.scripts]
@@ -46,3 +49,17 @@ testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 100
+
+[tool.ruff.lint]
+# E/F are ruff's defaults (pycodestyle errors, pyflakes). B adds flake8-bugbear,
+# which catches a class of latent bugs by static analysis — mutable default
+# args, calling a function in a default, except-without-bind, etc. — the kind of
+# edge that doesn't show on the happy path. See CONTRIBUTING.md.
+select = ["E", "F", "B"]
+
+[tool.mutmut]
+# Mutate the package only (not tests). mutmut copies the source into a mutants/
+# working dir and runs the suite against each mutant; survivors flag behaviour
+# the tests don't actually pin. Expect equivalent mutants in the survivor list —
+# triage by hand, don't chase a 100% kill rate.
+source_paths = ["src/blue_prism_mcp/"]

@@ -12,6 +12,10 @@ dist/
 htmlcov/
 coverage.xml
 
+# Mutation testing (mutmut copies source into a working dir + caches results)
+mutants/
+.mutmut-cache
+
 # Virtual envs
 .venv/
 venv/
