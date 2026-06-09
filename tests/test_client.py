@@ -212,6 +212,16 @@ class TestPagination:
         assert session.get.call_count == 2  # capped
         assert len(result) == 6
 
+    def test_auto_detects_token_paging_from_present_empty_token(self):
+        # A token endpoint marks its last page with an empty token. The page is
+        # full (== page_size), so a truthiness-based guess would misread it as
+        # offset and issue a spurious follow-up. Presence of the key → token,
+        # and the empty value stops the loop after a single request.
+        client, session = make_client(page_size=2)
+        session.get.return_value = _resp({"items": [{"id": 1}, {"id": 2}], "pagingToken": ""})
+        assert client._get_collection("/sessions") == [{"id": 1}, {"id": 2}]
+        assert session.get.call_count == 1  # not misclassified as offset
+
     def test_mode_none_single_request(self):
         client, session = make_client(paging_mode="none", page_size=3)
         session.get.return_value = _resp([{"id": i} for i in range(3)])
@@ -230,6 +240,210 @@ class TestPagination:
         client._get_collection("/sessions")
         second_call_params = session.get.call_args_list[1].kwargs["params"]
         assert second_call_params["startIndex"] == 2
+
+
+# --- Phase 2: extended reads (mocked HTTP) ------------------------------------
+
+
+class TestExtendedReads:
+    def test_get_processes(self):
+        client, session = make_client()
+        session.get.return_value = _resp([{"id": "p1", "name": "Proc"}])
+        assert client.get_processes() == [{"id": "p1", "name": "Proc"}]
+
+    def test_get_queue_items_hits_queue_path_with_filters(self):
+        client, session = make_client()
+        session.get.return_value = _resp([])
+        client.get_queue_items(
+            "Invoices",
+            status="Exceptioned",
+            start_date="2026-03-01",
+            end_date="2026-03-07",
+        )
+        call = session.get.call_args
+        assert call.args[0].endswith("/workqueues/Invoices/items")
+        params = call.kwargs["params"]
+        assert params["status"] == "Exceptioned"
+        assert params["completedafter"] == "2026-03-01"
+        assert params["completedbefore"] == "2026-03-07"
+
+    def test_get_queue_items_without_filters_sends_no_filter_params(self):
+        client, session = make_client()
+        session.get.return_value = _resp([{"id": "i1"}])
+        assert client.get_queue_items("Invoices") == [{"id": "i1"}]
+        params = session.get.call_args.kwargs["params"]  # paging adds pageSize only
+        assert "status" not in params
+        assert "completedafter" not in params
+        assert "completedbefore" not in params
+
+    def test_get_queue_items_caches_per_filter(self):
+        client, session = make_client()
+        session.get.return_value = _resp([{"id": "i1"}])
+        client.get_queue_items("Q", status="Pending")
+        client.get_queue_items("Q", status="Exceptioned")
+        assert session.get.call_count == 2  # distinct cache keys, not shared
+
+    def test_get_session_log(self):
+        client, session = make_client()
+        session.get.return_value = _resp([{"stage": "Start"}])
+        assert client.get_session_log("sess-1") == [{"stage": "Start"}]
+        assert session.get.call_args.args[0].endswith("/sessions/sess-1/logs")
+
+
+# --- Phase 2: Tier 3 writes (mocked HTTP) -------------------------------------
+
+
+class TestTierThreeWrites:
+    def test_retry_queue_item(self):
+        client, session = make_client()
+        client._token = "t"
+        session.post.return_value = _resp({"status": "Pending"})
+        assert client.retry_queue_item("Invoices", "item-1") == {"status": "Pending"}
+        assert session.post.call_args.args[0].endswith(
+            "/workqueues/Invoices/items/item-1/retry"
+        )
+
+    def test_defer_queue_item_sends_body(self):
+        client, session = make_client()
+        client._token = "t"
+        session.post.return_value = _resp({})
+        client.defer_queue_item("Invoices", "item-1", "2026-04-01T00:00:00")
+        assert session.post.call_args.kwargs["json"] == {
+            "deferUntil": "2026-04-01T00:00:00"
+        }
+        assert session.post.call_args.args[0].endswith(
+            "/workqueues/Invoices/items/item-1/defer"
+        )
+
+    def test_mark_exception_resolved(self):
+        client, session = make_client()
+        client._token = "t"
+        session.post.return_value = _resp({})
+        client.mark_exception_resolved("Q", "i1")
+        assert session.post.call_args.args[0].endswith("/workqueues/Q/items/i1/resolve")
+
+    def test_start_process_with_resource(self):
+        client, session = make_client()
+        client._token = "t"
+        session.post.return_value = _resp({"sessionId": "s1"})
+        client.start_process("proc-1", resource="BOT-01")
+        assert session.post.call_args.kwargs["json"] == {
+            "processId": "proc-1",
+            "resourceName": "BOT-01",
+        }
+
+    def test_start_process_without_resource_omits_it(self):
+        client, session = make_client()
+        client._token = "t"
+        session.post.return_value = _resp({})
+        client.start_process("proc-1")
+        assert session.post.call_args.kwargs["json"] == {"processId": "proc-1"}
+
+    def test_set_schedule_enabled_uses_put(self):
+        client, session = make_client()
+        client._token = "t"
+        session.put.return_value = _resp({})
+        client.set_schedule_enabled("sched-1", False)
+        assert session.put.call_args.kwargs["json"] == {"enabled": False}
+        assert session.put.call_args.args[0].endswith("/schedules/sched-1")
+
+    def test_trigger_schedule(self):
+        client, session = make_client()
+        client._token = "t"
+        session.post.return_value = _resp({})
+        client.trigger_schedule("sched-1")
+        assert session.post.call_args.args[0].endswith("/schedules/sched-1/run")
+
+    def test_write_invalidates_read_cache(self):
+        client, session = make_client()
+        session.get.return_value = _resp([{"name": "Q1"}])
+        client.get_queues()  # populate cache
+        client._token = "t"
+        session.post.return_value = _resp({})
+        client.trigger_schedule("s1")  # write must drop the cache
+        client.get_queues()
+        assert session.get.call_count == 2  # refetched after the write
+
+    def test_write_reauths_on_401(self):
+        client, session = make_client()
+        client._token = "expired"
+        session.post.side_effect = [
+            _resp(None, 401),  # write rejected — token expired
+            _auth_resp("new"),  # re-auth
+            _resp({"ok": True}),  # write retried
+        ]
+        assert client.trigger_schedule("s1") == {"ok": True}
+        assert client._token == "new"
+
+
+# --- Phase 2: mock client extensions ------------------------------------------
+
+
+class TestMockExtended:
+    def test_get_processes(self):
+        assert len(MockBPClient().get_processes()) > 0
+
+    def test_get_queue_items_filters_by_queue_status_and_dates(self):
+        client = MockBPClient()
+        items = client.get_queue_items(
+            "Invoices", status="Exceptioned", start_date="2026-03-01", end_date="2026-03-31"
+        )
+        assert items and all(i["queue"] == "Invoices" for i in items)
+        assert all(i["status"] == "Exceptioned" for i in items)
+
+    def test_get_queue_items_unknown_queue_is_empty(self):
+        assert MockBPClient().get_queue_items("Nope") == []
+
+    def test_get_session_log(self):
+        log = MockBPClient().get_session_log("sess-002")
+        assert any(e["result"] == "Exception" for e in log)
+
+    def test_get_session_log_unknown_session_is_empty(self):
+        assert MockBPClient().get_session_log("nope") == []
+
+    def test_retry_queue_item_flips_status(self):
+        client = MockBPClient()
+        client.retry_queue_item("Invoices", "item-002")
+        item = client.get_queue_items("Invoices", status="Pending")
+        assert any(i["id"] == "item-002" for i in item)
+
+    def test_defer_queue_item_records_defer_until(self):
+        client = MockBPClient()
+        client.defer_queue_item("Invoices", "item-001", "2026-04-01T00:00:00")
+        deferred = client.get_queue_items("Invoices", status="Deferred")
+        assert deferred[0]["deferUntil"] == "2026-04-01T00:00:00"
+
+    def test_mark_exception_resolved_clears_reason(self):
+        client = MockBPClient()
+        client.mark_exception_resolved("Invoices", "item-002")
+        resolved = [i for i in client.get_queue_items("Invoices") if i["id"] == "item-002"]
+        assert resolved[0]["status"] == "Completed"
+        assert resolved[0]["exceptionReason"] is None
+
+    def test_start_process_appends_session(self):
+        client = MockBPClient()
+        before = len(client.get_sessions())
+        result = client.start_process("Invoice Processing", resource="BOT-01")
+        assert result["status"] == "Pending"
+        assert len(client.get_sessions()) == before + 1
+
+    def test_set_schedule_enabled_flips_flag(self):
+        client = MockBPClient()
+        client.set_schedule_enabled("Daily Invoice Run", False)
+        sched = [s for s in client.get_schedules() if s["name"] == "Daily Invoice Run"][0]
+        assert sched["enabled"] is False
+
+    def test_trigger_schedule_records_outcome(self):
+        client = MockBPClient()
+        client.trigger_schedule("Daily Invoice Run")
+        sched = [s for s in client.get_schedules() if s["name"] == "Daily Invoice Run"][0]
+        assert sched["lastOutcome"] == "Triggered"
+
+    def test_write_on_unknown_target_is_safe(self):
+        client = MockBPClient()
+        # No matching item/schedule — returns an ack without raising or mutating.
+        assert client.retry_queue_item("Invoices", "ghost")["status"] == "Pending"
+        assert client.set_schedule_enabled("ghost", True)["enabled"] is True
 
 
 @pytest.fixture(autouse=True)

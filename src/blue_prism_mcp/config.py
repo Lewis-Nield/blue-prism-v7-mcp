@@ -46,6 +46,14 @@ class BPConfig:
     page_items_keys: tuple[str, ...] = ("items", "data", "results", "values")
     page_token_keys: tuple[str, ...] = ("pagingToken", "nextPageToken", "next")
 
+    def __post_init__(self) -> None:
+        # Strip trailing slashes so base_url + an absolute path ("/resources")
+        # can't produce '//'. Some deployments/proxies route '.../v7//resources'
+        # as a distinct path and fail it — including the auth call. Normalise
+        # once here, at the single boundary where the value enters, so every
+        # call site stays a plain concatenation. (frozen=True → object.__setattr__.)
+        object.__setattr__(self, "base_url", self.base_url.rstrip("/"))
+
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> "BPConfig":
         """Build config from environment variables (the deployment contract)."""

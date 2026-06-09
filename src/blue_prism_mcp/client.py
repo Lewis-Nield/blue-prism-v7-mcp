@@ -11,10 +11,12 @@ This is the dashboard's `data/bp_api_provider.py` after the Streamlit-ectomy:
 Everything that was process-global in the dashboard now lives on the instance,
 so two estates / two server instances never collide on a shared token or cache.
 
-Phase 1 lifts the reads the dashboard already proved against the live v7 API:
+Phase 1 lifted the reads the dashboard already proved against the live v7 API:
 resources, work queues, schedules, and sessions, with the auth/401-retry and
-pagination plumbing. Phase 2 extends the surface (queue-ITEM listing,
-/processes, the session stage-log, and the gated Tier 3 writes).
+pagination plumbing. Phase 2 extends the surface beyond what the dashboard
+needed: queue-ITEM listing, the /processes catalogue, the session stage-log,
+and the Tier 3 writes (present but exposed as tools only once Phase 5 wires the
+enable_actions gate around them).
 """
 from __future__ import annotations
 
@@ -49,7 +51,10 @@ class _TTLCache:
         if entry is None:
             return _MISS
         stored_at, value = entry
-        if time.monotonic() - stored_at > self._ttl:
+        if time.monotonic() - stored_at >= self._ttl:
+            # >= so an entry expires exactly at the TTL boundary, and ttl=0
+            # always misses regardless of clock resolution (no stale read can
+            # slip through on a tied monotonic() reading).
             del self._store[key]
             return _MISS
         return value
@@ -105,29 +110,46 @@ class BPClient:
 
     # --- HTTP ---------------------------------------------------------------
 
-    def _get(self, path: str, params: dict | None = None) -> list | dict:
-        """GET a path, re-authenticating once on a 401 and retrying."""
-        headers = {"Authorization": f"Bearer {self._get_token()}"}
-        resp = self._session.get(
-            f"{self._config.base_url}{path}",
-            headers=headers,
-            params=params,
-            verify=self._config.verify_ssl,
-            timeout=15,
-        )
-        if resp.status_code == 401:
-            # Token may have expired — re-auth once and retry.
-            self._invalidate_token()
+    def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict | None = None,
+        json: dict | None = None,
+    ) -> list | dict:
+        """Issue an authenticated request, re-authing once on a 401 and retrying.
+
+        Shared by every read and write so the bearer-token plumbing lives in one
+        place. Dispatches on the verb-specific session method (session.get/post/
+        put), which keeps the reused connection pool and lets tests stub a single
+        verb at a time.
+        """
+        send = getattr(self._session, method.lower())
+        url = f"{self._config.base_url}{path}"
+
+        def _send():
             headers = {"Authorization": f"Bearer {self._get_token()}"}
-            resp = self._session.get(
-                f"{self._config.base_url}{path}",
+            return send(
+                url,
                 headers=headers,
                 params=params,
+                json=json,
                 verify=self._config.verify_ssl,
                 timeout=15,
             )
+
+        resp = _send()
+        if resp.status_code == 401:
+            # Token may have expired — re-auth once and retry.
+            self._invalidate_token()
+            resp = _send()
         resp.raise_for_status()
         return resp.json()
+
+    def _get(self, path: str, params: dict | None = None) -> list | dict:
+        """GET a path through the shared request/auth/retry path."""
+        return self._request("GET", path, params=params)
 
     # --- Pagination ---------------------------------------------------------
     # Collection endpoints are fetched page-by-page so a large estate cannot
@@ -154,6 +176,19 @@ class BPClient:
                     break
             return items, token
         return [], None
+
+    def _has_token_key(self, body: Any) -> bool:
+        """True if the body carries any configured paging-token key.
+
+        Auto-detection keys off the *presence* of a token key, not its value: a
+        token endpoint signals its last page with an empty/null token, so a
+        truthiness test would misread that final page as offset-paged and issue
+        a spurious offset follow-up. An absent/empty token then means "no next
+        page" via _unpack_page, which stops the loop cleanly.
+        """
+        if not isinstance(body, dict):
+            return False
+        return any(key in body for key in self._config.page_token_keys)
 
     def _get_collection(self, path: str, base_params: dict | None = None) -> list:
         """Fetch every page of a collection endpoint and return a flat list.
@@ -182,11 +217,12 @@ class BPClient:
             elif detected == "offset" and page > 0:
                 params[cfg.page_offset_param] = len(collected)
 
-            page_items, next_token = self._unpack_page(self._get(path, params=params))
+            body = self._get(path, params=params)
+            page_items, next_token = self._unpack_page(body)
             collected.extend(page_items)
 
             if detected == "auto":
-                detected = "token" if next_token else "offset"
+                detected = "token" if self._has_token_key(body) else "offset"
 
             if detected == "token":
                 token = next_token
@@ -244,3 +280,103 @@ class BPClient:
             ("sessions", start_date, end_date),
             lambda: self._get_collection("/sessions", base_params=params or None),
         )
+
+    def get_processes(self) -> list[dict]:
+        """GET /processes — the published process catalogue."""
+        return self._cached("processes", lambda: self._get_collection("/processes"))
+
+    def get_queue_items(
+        self,
+        queue: str,
+        status: str | None = None,
+        start_date: str | None = None,
+        end_date: str | None = None,
+    ) -> list[dict]:
+        """GET /workqueues/{queue}/items — items in one queue, optionally filtered.
+
+        A single queue can hold millions of items, so the tool layer (Phase 4)
+        requires a status and a date window before calling this. The client stays
+        thin: it passes whatever filters it is given straight through and pages
+        the result. Date filters map to the v7 item params (verify the names
+        against your deployment's API spec on day one, as with pagination).
+        """
+        params: dict[str, str] = {}
+        if status:
+            params["status"] = status
+        if start_date:
+            params["completedafter"] = start_date
+        if end_date:
+            params["completedbefore"] = end_date
+        return self._cached(
+            ("queue_items", queue, status, start_date, end_date),
+            lambda: self._get_collection(
+                f"/workqueues/{queue}/items", base_params=params or None
+            ),
+        )
+
+    def get_session_log(self, session_id: str) -> list[dict]:
+        """GET /sessions/{id}/logs — the stage-level log for one session.
+
+        The highest-value agentic read ("why did this run fail?"). Stage data can
+        carry item payloads, so the tool layer routes the result through the PII
+        scrubber (Phase 3/4); the client returns it raw.
+        """
+        return self._cached(
+            ("session_log", session_id),
+            lambda: self._get_collection(f"/sessions/{session_id}/logs"),
+        )
+
+    # --- Tier 3 writes ------------------------------------------------------
+    # Designed in, shipped disabled: these issue real v7 writes, but no MCP tool
+    # exposes them until Phase 5 wires the enable_actions gate, capability
+    # resolver, audit log, and dry-run around them. Each mutates estate state, so
+    # _write drops the read cache afterwards to avoid serving a stale view. The
+    # endpoint paths/bodies follow v7 REST conventions; verify them against your
+    # deployment's API spec on day one (the same day-one contract as pagination).
+
+    def _write(
+        self, method: str, path: str, body: dict | None = None
+    ) -> list | dict:
+        """Issue a mutating request and invalidate the read cache on success."""
+        result = self._request(method, path, json=body)
+        self._cache.clear()
+        return result
+
+    def retry_queue_item(self, queue: str, item_id: str) -> list | dict:
+        """POST .../items/{id}/retry — re-queue a failed item for another attempt."""
+        return self._write("POST", f"/workqueues/{queue}/items/{item_id}/retry")
+
+    def defer_queue_item(
+        self, queue: str, item_id: str, defer_until: str
+    ) -> list | dict:
+        """POST .../items/{id}/defer — hold an item until `defer_until` (ISO 8601)."""
+        return self._write(
+            "POST",
+            f"/workqueues/{queue}/items/{item_id}/defer",
+            body={"deferUntil": defer_until},
+        )
+
+    def mark_exception_resolved(self, queue: str, item_id: str) -> list | dict:
+        """POST .../items/{id}/resolve — mark an exceptioned item as worked."""
+        return self._write("POST", f"/workqueues/{queue}/items/{item_id}/resolve")
+
+    def start_process(
+        self, process_id: str, resource: str | None = None
+    ) -> list | dict:
+        """POST /sessions — request a new run of `process_id`, optionally on `resource`."""
+        body: dict[str, str] = {"processId": process_id}
+        if resource:
+            body["resourceName"] = resource
+        return self._write("POST", "/sessions", body=body)
+
+    def set_schedule_enabled(
+        self, schedule_id: str, enabled: bool
+    ) -> list | dict:
+        """PUT /schedules/{id} — enable or disable a schedule."""
+        return self._write(
+            "PUT", f"/schedules/{schedule_id}", body={"enabled": bool(enabled)}
+        )
+
+    def trigger_schedule(self, schedule_id: str) -> list | dict:
+        """POST /schedules/{id}/run — start a schedule immediately."""
+        return self._write("POST", f"/schedules/{schedule_id}/run")

@@ -44,6 +44,14 @@ def test_from_env_reads_all_fields():
     assert cfg.enable_actions is True
 
 
+def test_base_url_trailing_slash_is_stripped():
+    # A trailing slash would otherwise yield '.../api/v7//resources' on every
+    # request (auth included), which some proxies route as a distinct 404.
+    assert BPConfig(base_url="https://bp.example/api/v7/").base_url == "https://bp.example/api/v7"
+    assert BPConfig(base_url="https://bp.example/api/v7//").base_url == "https://bp.example/api/v7"
+    assert BPConfig.from_env(env={"BP_API_BASE_URL": "https://bp.example/"}).base_url == "https://bp.example"
+
+
 def test_config_is_frozen():
     cfg = BPConfig.from_env(env={})
     try:
