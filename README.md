@@ -1,5 +1,7 @@
 # blue-prism-mcp
 
+[![CI](https://github.com/8m7nyv54n5-ux/blue-prism-v7-mcp/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/8m7nyv54n5-ux/blue-prism-v7-mcp/actions/workflows/ci.yml)
+
 A distributable **Model Context Protocol (MCP) server for Blue Prism v7
 Enterprise**. It gives an LLM agent governed access to a Blue Prism estate over
 the supported v7 REST API — work queues, sessions, schedules, resources,
