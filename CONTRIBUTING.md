@@ -75,4 +75,6 @@ mutmut show <id>      # see the exact surviving mutation
 - Phase-sized work gets a PR with a real description (what / why / trade-offs).
   Trivial changes (typo, dep bump) can go straight to a branch and merge — don't
   ceremony-wrap them.
+- **Landing a phase ticks its box** in the README "Status" roadmap, in the same
+  PR — so the roadmap always reflects what's actually merged to `main`.
 - Commit messages: plain, first-person, imperative. No `Co-Authored-By` trailers.
