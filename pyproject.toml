@@ -22,7 +22,8 @@ dependencies = [
 
 [project.optional-dependencies]
 # Presidio-backed PII scrubbing. Also requires a spaCy model installed
-# separately, e.g. `python -m spacy download en_core_web_lg`.
+# separately: `python -m spacy download en_core_web_sm` (matches CI; the larger
+# en_core_web_lg / _trf models give better PII recall in production).
 pii = [
     "presidio-analyzer==2.2.362",
     "presidio-anonymizer==2.2.362",
@@ -51,11 +52,13 @@ testpaths = ["tests"]
 line-length = 100
 
 [tool.ruff.lint]
-# E/F are ruff's defaults (pycodestyle errors, pyflakes). B adds flake8-bugbear,
-# which catches a class of latent bugs by static analysis — mutable default
-# args, calling a function in a default, except-without-bind, etc. — the kind of
-# edge that doesn't show on the happy path. See CONTRIBUTING.md.
-select = ["E", "F", "B"]
+# extend-select keeps ruff's curated defaults (E4/E7/E9 + F) and ADDS flake8-
+# bugbear (B) — static catches for a class of latent bugs (mutable default args,
+# calls in defaults, except-without-bind, …) that don't show on the happy path.
+# Using extend-select rather than select avoids pulling in the *full* E group
+# (e.g. E501 line-length), which ruff's defaults deliberately leave to the
+# formatter. See CONTRIBUTING.md.
+extend-select = ["B"]
 
 [tool.mutmut]
 # Mutate the package only (not tests). mutmut copies the source into a mutants/
