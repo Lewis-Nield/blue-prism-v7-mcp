@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install (with dev + pii extras)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,pii]"
+
+      # Required only by the [pii] Presidio backend.
+      - name: Download spaCy model
+        run: python -m spacy download en_core_web_sm
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Test
+        run: pytest --cov=blue_prism_mcp --cov-report=term-missing

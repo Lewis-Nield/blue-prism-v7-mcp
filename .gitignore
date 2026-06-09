@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.eggs/
+
+# Test / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+
+# Virtual envs
+.venv/
+venv/
+env/
+
+# Local deployment config — credentials & estate-specific settings must NEVER
+# be committed. Provide a redacted .env.example instead.
+.env
+*.local.yaml
+deployment.yaml
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
