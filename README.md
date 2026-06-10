@@ -17,7 +17,7 @@ Actively developed against the phased plan in [DESIGN.md](DESIGN.md):
 - [x] Phase 0 — Scaffold
 - [x] Phase 1 — Decouple the client into `BPClient`
 - [x] Phase 2 — Extend the client (queue items, processes, session log, Tier 3 writes)
-- [ ] Phase 3 — Pluggable PII (`Scrubber` protocol + Presidio backend)
+- [x] Phase 3 — Pluggable PII (`Scrubber` protocol; null / regex / Presidio tiers)
 - [ ] Phase 4 — Tier 1 + 2 tools (the envelope contract)
 - [ ] Phase 5 — Governance scaffold + Tier 3, shipped disabled
 - [ ] Phase 6 — Server + packaging
@@ -53,6 +53,9 @@ Per-deployment, via environment (see `.env.example` once published):
 | `BP_API_VERIFY_SSL` | TLS verification (default `true`) |
 | `BP_API_PAGING_MODE` | `token` (v7 default) / `offset` / `none` / `auto` |
 | `BP_ENABLE_ACTIONS` | gate the Tier 3 control tools (default `false`) |
+| `BP_PII_BACKEND` | `null` (default) / `regex` (zero-dep UK FS patterns) / `presidio` (needs `[pii]`) — fails loud at startup if the requested backend can't load |
+| `BP_PII_CUSTOM_PATTERNS` | JSON array of `{"name", "pattern"}` domain identifiers; they beat the built-ins on overlap |
+| `BP_PII_SPACY_MODEL` | spaCy model for `presidio` (default `en_core_web_sm`) |
 
 ## Tool surface
 
