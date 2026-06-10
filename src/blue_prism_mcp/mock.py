@@ -218,7 +218,10 @@ class MockBPClient:
         self, queue_id: str, item_id: str, attempt_id: int, defer_until: str
     ) -> None:
         item = self._find_item(queue_id, item_id)
-        if item is not None:
+        # Attempt-scoped like the live endpoint (.../attempts/{attemptId}):
+        # a wrong attempt id must not mutate the item, so tests catch callers
+        # passing a stale one.
+        if item is not None and attempt_id == int(item.get("attemptNumber", 0)):
             item["state"] = "Deferred"
             item["deferredDate"] = defer_until
         return None

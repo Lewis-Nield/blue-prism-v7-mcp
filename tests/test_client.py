@@ -369,6 +369,10 @@ class TestTierThreeWrites:
         assert call.kwargs["json"] == [
             {"op": "replace", "path": "/deferredDate", "value": "2026-04-01T00:00:00Z"}
         ]
+        # RFC 6902 media type — a patch list as plain application/json can be
+        # rejected — without clobbering the auth header it merges over.
+        assert call.kwargs["headers"]["Content-Type"] == "application/json-patch+json"
+        assert call.kwargs["headers"]["Authorization"].startswith("Bearer ")
 
     def test_start_process_creates_then_runs_the_session(self):
         client, session = make_client()
@@ -485,6 +489,24 @@ class TestMockExtended:
         assert client.defer_queue_item("Invoices", "item-001", 1, "2026-04-01T00:00:00Z") is None
         deferred = client.get_queue_items("Invoices", state="Deferred")
         assert deferred[0]["deferredDate"] == "2026-04-01T00:00:00Z"
+
+    def test_defer_queue_item_is_attempt_scoped(self):
+        # The live endpoint is .../attempts/{attemptId}; a stale attempt id
+        # must not mutate the item, so the mock refuses it too.
+        client = MockBPClient()
+        client.defer_queue_item("Invoices", "item-001", 99, "2026-04-01T00:00:00Z")
+        assert client.get_queue_items("Invoices", state="Deferred") == []
+
+    def test_defer_tracks_the_attempt_created_by_retry(self):
+        # retry bumps the attempt number; deferring must address the NEW
+        # attempt, and the old attempt id no longer works.
+        client = MockBPClient()
+        new_attempt = client.retry_queue_item("Invoices", "item-002")["attemptId"]
+        client.defer_queue_item("Invoices", "item-002", new_attempt - 1, "2026-04-01T00:00:00Z")
+        assert client.get_queue_items("Invoices", state="Deferred") == []
+        client.defer_queue_item("Invoices", "item-002", new_attempt, "2026-04-01T00:00:00Z")
+        deferred = client.get_queue_items("Invoices", state="Deferred")
+        assert [i["id"] for i in deferred] == ["item-002"]
 
     def test_start_process_appends_running_session(self):
         client = MockBPClient()
