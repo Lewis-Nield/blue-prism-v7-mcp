@@ -11,6 +11,7 @@ never stdout (stdio transport reserves stdout for JSON-RPC).
 TODO(Phase 3): implement PresidioScrubber (port utils/pii_scrubber.py); add the
 lru-cached per-message wrapper the dashboard server uses.
 """
+
 from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
@@ -20,8 +21,7 @@ from typing import Protocol, runtime_checkable
 class Scrubber(Protocol):
     """Removes personal data from free-text before it leaves the process."""
 
-    def scrub(self, text: str) -> str:
-        ...
+    def scrub(self, text: str) -> str: ...
 
 
 class NullScrubber:

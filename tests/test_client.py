@@ -7,6 +7,7 @@ instance's requests.Session. The wire contract pinned here — OAuth2
 client-credentials auth, token paging, deepObject filters, attempt-based item
 writes — follows the official v7 API specs (see DESIGN.md's ground truth).
 """
+
 from unittest.mock import MagicMock
 
 import pytest
@@ -355,9 +356,7 @@ class TestTierThreeWrites:
         prime_token(client)
         session.post.return_value = _resp({"attemptId": 2}, 201)
         assert client.retry_queue_item("q1", "item-1") == {"attemptId": 2}
-        assert session.post.call_args.args[0].endswith(
-            "/workqueues/q1/items/item-1/attempts"
-        )
+        assert session.post.call_args.args[0].endswith("/workqueues/q1/items/item-1/attempts")
 
     def test_defer_patches_the_attempt_with_json_patch(self):
         client, session = make_client()
@@ -407,9 +406,7 @@ class TestTierThreeWrites:
         prime_token(client)
         session.post.return_value = _resp({}, 202)
         client.trigger_schedule("sched-1", start_time="2026-06-10T09:00:00Z")
-        assert session.post.call_args.kwargs["json"] == {
-            "startTime": "2026-06-10T09:00:00Z"
-        }
+        assert session.post.call_args.kwargs["json"] == {"startTime": "2026-06-10T09:00:00Z"}
 
     def test_empty_response_body_returns_none(self):
         client, session = make_client()
@@ -519,9 +516,7 @@ class TestMockExtended:
         # A write on one instance must not leak into a fresh instance via the
         # module-level default fixtures.
         MockBPClient().set_schedule_enabled("Daily Invoice Run", False)
-        fresh = [
-            s for s in MockBPClient().get_schedules() if s["name"] == "Daily Invoice Run"
-        ][0]
+        fresh = [s for s in MockBPClient().get_schedules() if s["name"] == "Daily Invoice Run"][0]
         assert fresh["isRetired"] is False
 
 

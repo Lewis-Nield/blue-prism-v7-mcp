@@ -9,6 +9,7 @@ The connection contract follows the official v7 API OpenAPI specs (verified
 against 7.0.1–7.5.1, identical throughout): OAuth2 client-credentials against
 the Blue Prism Authentication Server, token paging via itemsPerPage/pagingToken.
 """
+
 from __future__ import annotations
 
 import os

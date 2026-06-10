@@ -21,6 +21,7 @@ specs (verified against 7.0.1–7.5.1; see the ground-truth section in DESIGN.md
 OAuth2 client-credentials auth, deepObject filter encoding, token paging, and
 the attempt-based item write model.
 """
+
 from __future__ import annotations
 
 import logging
@@ -82,9 +83,7 @@ class BPClient:
     (Phase 2/5) are only surfaced as MCP tools when config.enable_actions is True.
     """
 
-    def __init__(
-        self, config: BPConfig, session: requests.Session | None = None
-    ) -> None:
+    def __init__(self, config: BPConfig, session: requests.Session | None = None) -> None:
         self._config = config
         self._session = session or requests.Session()  # pools TCP connections
         self._token: str | None = None
@@ -382,9 +381,7 @@ class BPClient:
     # 7.2; session create/control from 7.1) — see DESIGN.md's ground-truth
     # section, including the two spots the spec underdocuments.
 
-    def _write(
-        self, method: str, path: str, body: list | dict | None = None
-    ) -> Any:
+    def _write(self, method: str, path: str, body: list | dict | None = None) -> Any:
         """Issue a mutating request and invalidate the read cache on success."""
         result = self._request(method, path, json=body)
         self._cache.clear()
@@ -396,9 +393,7 @@ class BPClient:
         The v7 item lifecycle is attempt-based: there is no retry verb, retrying
         IS creating an attempt. Answers 201 with {"attemptId": n}.
         """
-        return self._write(
-            "POST", f"/workqueues/{queue_id}/items/{item_id}/attempts"
-        )
+        return self._write("POST", f"/workqueues/{queue_id}/items/{item_id}/attempts")
 
     def defer_queue_item(
         self, queue_id: str, item_id: str, attempt_id: int, defer_until: str
@@ -428,9 +423,7 @@ class BPClient:
             "/sessions",
             body={"processId": process_id, "resourceId": resource_id},
         )
-        self._write(
-            "PATCH", f"/sessions/{session_id}", body={"status": "Running"}
-        )
+        self._write("PATCH", f"/sessions/{session_id}", body={"status": "Running"})
         return {"sessionId": session_id, "status": "Running"}
 
     def set_schedule_enabled(self, schedule_id: str, enabled: bool) -> Any:
@@ -447,9 +440,7 @@ class BPClient:
             body={"isRetired": not enabled},
         )
 
-    def trigger_schedule(
-        self, schedule_id: str, start_time: str | None = None
-    ) -> Any:
+    def trigger_schedule(self, schedule_id: str, start_time: str | None = None) -> Any:
         """POST /schedules/{id}/runs — run a schedule now, or at `start_time`."""
         body = {"startTime": start_time} if start_time else {}
         return self._write("POST", f"/schedules/{schedule_id}/runs", body=body)
