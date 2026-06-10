@@ -134,7 +134,7 @@ webhook plumbing.
 | `list_schedules` | `GET /schedules` | 7.0 |
 | `list_processes` | `GET /processes` | 7.1 |
 | `retry_queue_item` | `POST .../items/{id}/attempts` (201 → `{attemptId}`) | 7.2 |
-| `defer_queue_item` | `PATCH .../attempts/{attemptId}` (RFC 6902 JSON Patch) | 7.2 |
+| `defer_queue_item` | `PATCH .../attempts/{attemptId}` (RFC 6902 JSON Patch, sent as `application/json-patch+json`) | 7.2 |
 | `start_process` | `POST /sessions` → UUID, then `PATCH /sessions/{id}` `{status: Running}` | 7.1 |
 | `set_schedule_enabled` | `PUT /schedules/{id}` (retire/unretire) | 7.0 |
 | `trigger_schedule` | `POST /schedules/{id}/runs` (optional `startTime`) | 7.2 |

@@ -145,6 +145,7 @@ class BPClient:
         *,
         params: dict | None = None,
         json: list | dict | None = None,
+        headers: dict | None = None,
     ) -> Any:
         """Issue an authenticated request, re-authing once on a 401 and retrying.
 
@@ -161,10 +162,17 @@ class BPClient:
         url = f"{self._config.base_url}{path}"
 
         def _send():
-            headers = {"Authorization": f"Bearer {self._get_token()}"}
+            # Caller headers take precedence (the JSON Patch endpoint needs
+            # its own Content-Type; requests fills in application/json for
+            # json= bodies otherwise). The bearer token is only fetched when
+            # the caller didn't bring an Authorization of their own — an
+            # override must not trigger a needless auth round-trip.
+            send_headers = dict(headers or {})
+            if not any(k.lower() == "authorization" for k in send_headers):
+                send_headers["Authorization"] = f"Bearer {self._get_token()}"
             return send(
                 url,
-                headers=headers,
+                headers=send_headers,
                 params=params,
                 json=json,
                 verify=self._config.verify_ssl,
@@ -381,9 +389,15 @@ class BPClient:
     # 7.2; session create/control from 7.1) — see DESIGN.md's ground-truth
     # section, including the two spots the spec underdocuments.
 
-    def _write(self, method: str, path: str, body: list | dict | None = None) -> Any:
+    def _write(
+        self,
+        method: str,
+        path: str,
+        body: list | dict | None = None,
+        headers: dict | None = None,
+    ) -> Any:
         """Issue a mutating request and invalidate the read cache on success."""
-        result = self._request(method, path, json=body)
+        result = self._request(method, path, json=body, headers=headers)
         self._cache.clear()
         return result
 
@@ -400,14 +414,18 @@ class BPClient:
     ) -> Any:
         """PATCH .../attempts/{attemptId} — hold an attempt until `defer_until`.
 
-        The endpoint takes an RFC 6902 JSON Patch document. The spec does not
-        enumerate the patchable paths; /deferredDate mirrors the item schema's
-        field name and needs day-one verification against a live estate.
+        The endpoint takes an RFC 6902 JSON Patch document, sent with the
+        media type the RFC defines (application/json-patch+json) — servers
+        may reject a patch list arriving as plain application/json. The spec
+        does not enumerate the patchable paths; /deferredDate mirrors the item
+        schema's field name and needs day-one verification against a live
+        estate.
         """
         return self._write(
             "PATCH",
             f"/workqueues/{queue_id}/items/{item_id}/attempts/{attempt_id}",
             body=[{"op": "replace", "path": "/deferredDate", "value": defer_until}],
+            headers={"Content-Type": "application/json-patch+json"},
         )
 
     def start_process(self, process_id: str, resource_id: str) -> dict:
