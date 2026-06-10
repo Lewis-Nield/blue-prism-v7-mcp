@@ -15,6 +15,7 @@ real list endpoints do.
 
 Seed it with your own data, or accept the small built-in fixtures below.
 """
+
 from __future__ import annotations
 
 from typing import Any
@@ -244,9 +245,7 @@ class MockBPClient:
             schedule["isRetired"] = not enabled
         return None
 
-    def trigger_schedule(
-        self, schedule_id: str, start_time: str | None = None
-    ) -> dict | None:
+    def trigger_schedule(self, schedule_id: str, start_time: str | None = None) -> dict | None:
         schedule = self._find_schedule(schedule_id)
         if schedule is None:
             return None

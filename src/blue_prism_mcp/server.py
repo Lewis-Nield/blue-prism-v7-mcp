@@ -8,6 +8,7 @@ stdout.
 
 TODO(Phase 6): implement. `main()` is the `blue-prism-mcp` console entrypoint.
 """
+
 from __future__ import annotations
 
 

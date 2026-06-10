@@ -1,4 +1,5 @@
 """Tests for the environment-variable contract of BPConfig (Phase 1)."""
+
 from blue_prism_mcp.config import BPConfig
 
 
@@ -60,7 +61,10 @@ def test_url_trailing_slashes_are_stripped():
     assert BPConfig(base_url="https://bp.example/api/v7/").base_url == "https://bp.example/api/v7"
     assert BPConfig(base_url="https://bp.example/api/v7//").base_url == "https://bp.example/api/v7"
     assert BPConfig(auth_url="https://auth.example/").auth_url == "https://auth.example"
-    assert BPConfig.from_env(env={"BP_API_BASE_URL": "https://bp.example/"}).base_url == "https://bp.example"
+    assert (
+        BPConfig.from_env(env={"BP_API_BASE_URL": "https://bp.example/"}).base_url
+        == "https://bp.example"
+    )
 
 
 def test_config_is_frozen():
