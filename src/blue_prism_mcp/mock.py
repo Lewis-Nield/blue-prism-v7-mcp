@@ -8,6 +8,11 @@ in memory, so tool tests (Phase 4) and local runs need neither a Blue Prism
 server nor mocked HTTP. The writes mutate the in-memory fixtures, so a test can
 call retry/defer/trigger and then observe the effect on a subsequent read.
 
+Fixture fields follow the verified v7 API vocabulary (see DESIGN.md): items
+carry `state` (the lifecycle enum) alongside the free-text `status`, schedules
+carry `isRetired`, and list-shaped reads omit item payload data just as the
+real list endpoints do.
+
 Seed it with your own data, or accept the small built-in fixtures below.
 """
 from __future__ import annotations
@@ -26,8 +31,8 @@ _DEFAULT_QUEUES: list[dict] = [
 ]
 
 _DEFAULT_SCHEDULES: list[dict] = [
-    {"name": "Daily Invoice Run", "enabled": True, "lastOutcome": "Success"},
-    {"name": "Weekly Reconciliation", "enabled": False, "lastOutcome": "Failed"},
+    {"name": "Daily Invoice Run", "isRetired": False, "lastOutcome": "Success"},
+    {"name": "Weekly Reconciliation", "isRetired": True, "lastOutcome": "Failed"},
 ]
 
 _DEFAULT_SESSIONS: list[dict] = [
@@ -69,26 +74,31 @@ _DEFAULT_QUEUE_ITEMS: list[dict] = [
     {
         "queue": "Invoices",
         "id": "item-001",
-        "status": "Completed",
-        "process": "Invoice Processing",
-        "completed": "2026-03-01",
+        "state": "Completed",
+        "status": "",
+        "attemptNumber": 1,
+        "processName": "Invoice Processing",
+        "lastUpdated": "2026-03-01",
         "exceptionReason": None,
     },
     {
         "queue": "Invoices",
         "id": "item-002",
-        "status": "Exceptioned",
-        "process": "Invoice Processing",
-        "completed": "2026-03-02",
-        "exceptionType": "Business",
+        "state": "Exceptioned",
+        "status": "",
+        "attemptNumber": 1,
+        "processName": "Invoice Processing",
+        "lastUpdated": "2026-03-02",
         "exceptionReason": "Invoice total did not match purchase order",
     },
     {
         "queue": "Onboarding",
         "id": "item-003",
-        "status": "Pending",
-        "process": "Customer Onboarding",
-        "completed": "",
+        "state": "Pending",
+        "status": "",
+        "attemptNumber": 1,
+        "processName": "Customer Onboarding",
+        "lastUpdated": "2026-03-03",
         "exceptionReason": None,
     },
 ]
@@ -126,7 +136,9 @@ class MockBPClient:
     ) -> None:
         self._resources = resources if resources is not None else list(_DEFAULT_RESOURCES)
         self._queues = queues if queues is not None else list(_DEFAULT_QUEUES)
-        self._schedules = schedules if schedules is not None else list(_DEFAULT_SCHEDULES)
+        self._schedules = (
+            schedules if schedules is not None else [dict(s) for s in _DEFAULT_SCHEDULES]
+        )
         self._sessions = sessions if sessions is not None else list(_DEFAULT_SESSIONS)
         self._processes = processes if processes is not None else list(_DEFAULT_PROCESSES)
         self._queue_items = (
@@ -137,6 +149,7 @@ class MockBPClient:
             if session_logs is not None
             else {k: list(v) for k, v in _DEFAULT_SESSION_LOGS.items()}
         )
+        self._session_counter = 0
 
     def clear_cache(self) -> None:
         """No-op — the mock has no cache, but keeps the interface identical."""
@@ -150,7 +163,7 @@ class MockBPClient:
         return list(self._queues)
 
     def get_schedules(self) -> list[dict]:
-        return list(self._schedules)
+        return [dict(s) for s in self._schedules]
 
     def get_sessions(
         self, start_date: str | None = None, end_date: str | None = None
@@ -167,77 +180,84 @@ class MockBPClient:
 
     def get_queue_items(
         self,
-        queue: str,
+        queue_id: str,
+        state: str | None = None,
         status: str | None = None,
         start_date: str | None = None,
         end_date: str | None = None,
     ) -> list[dict]:
-        items = [i for i in self._queue_items if i.get("queue") == queue]
+        items = [i for i in self._queue_items if i.get("queue") == queue_id]
+        if state:
+            items = [i for i in items if i.get("state") == state]
         if status:
             items = [i for i in items if i.get("status") == status]
         if start_date:
-            items = [i for i in items if i.get("completed", "") >= start_date]
+            items = [i for i in items if i.get("lastUpdated", "") >= start_date]
         if end_date:
-            items = [i for i in items if i.get("completed", "") <= end_date]
+            items = [i for i in items if i.get("lastUpdated", "") <= end_date]
         return [dict(i) for i in items]
 
     def get_session_log(self, session_id: str) -> list[dict]:
         return [dict(e) for e in self._session_logs.get(session_id, [])]
 
     # --- Tier 3 writes (mutate the in-memory fixtures) ----------------------
+    # Return shapes mirror the live client: retry answers {"attemptId": n},
+    # defer and set_schedule_enabled answer None (the API's 204/empty),
+    # start_process answers the composed {"sessionId", "status"} dict.
 
-    def retry_queue_item(self, queue: str, item_id: str) -> dict:
-        item = self._find_item(queue, item_id)
+    def retry_queue_item(self, queue_id: str, item_id: str) -> dict | None:
+        item = self._find_item(queue_id, item_id)
+        if item is None:
+            return None
+        item["state"] = "Pending"
+        item["attemptNumber"] = int(item.get("attemptNumber", 1)) + 1
+        return {"attemptId": item["attemptNumber"]}
+
+    def defer_queue_item(
+        self, queue_id: str, item_id: str, attempt_id: int, defer_until: str
+    ) -> None:
+        item = self._find_item(queue_id, item_id)
         if item is not None:
-            item["status"] = "Pending"
-        return {"queue": queue, "id": item_id, "status": "Pending"}
+            item["state"] = "Deferred"
+            item["deferredDate"] = defer_until
+        return None
 
-    def defer_queue_item(self, queue: str, item_id: str, defer_until: str) -> dict:
-        item = self._find_item(queue, item_id)
-        if item is not None:
-            item["status"] = "Deferred"
-            item["deferUntil"] = defer_until
-        return {"queue": queue, "id": item_id, "status": "Deferred", "deferUntil": defer_until}
-
-    def mark_exception_resolved(self, queue: str, item_id: str) -> dict:
-        item = self._find_item(queue, item_id)
-        if item is not None:
-            item["status"] = "Completed"
-            item["exceptionReason"] = None
-        return {"queue": queue, "id": item_id, "status": "Completed"}
-
-    def start_process(self, process_id: str, resource: str | None = None) -> dict:
-        session_id = f"sess-{process_id}"
+    def start_process(self, process_id: str, resource_id: str) -> dict:
+        self._session_counter += 1
+        session_id = f"sess-{process_id}-{self._session_counter}"
         self._sessions.append(
             {
                 "id": session_id,
                 "date": "",
-                "resource": resource or "",
+                "resource": resource_id,
                 "process": process_id,
-                "status": "Pending",
+                "status": "Running",
                 "items_processed": 0,
                 "duration_secs": 0,
             }
         )
-        return {"sessionId": session_id, "status": "Pending"}
+        return {"sessionId": session_id, "status": "Running"}
 
-    def set_schedule_enabled(self, schedule_id: str, enabled: bool) -> dict:
+    def set_schedule_enabled(self, schedule_id: str, enabled: bool) -> None:
         schedule = self._find_schedule(schedule_id)
         if schedule is not None:
-            schedule["enabled"] = bool(enabled)
-        return {"schedule": schedule_id, "enabled": bool(enabled)}
+            schedule["isRetired"] = not enabled
+        return None
 
-    def trigger_schedule(self, schedule_id: str) -> dict:
+    def trigger_schedule(
+        self, schedule_id: str, start_time: str | None = None
+    ) -> dict | None:
         schedule = self._find_schedule(schedule_id)
-        if schedule is not None:
-            schedule["lastOutcome"] = "Triggered"
+        if schedule is None:
+            return None
+        schedule["lastOutcome"] = "Triggered"
         return {"schedule": schedule_id, "status": "Triggered"}
 
     # --- Lookup helpers -----------------------------------------------------
 
-    def _find_item(self, queue: str, item_id: str) -> dict | None:
+    def _find_item(self, queue_id: str, item_id: str) -> dict | None:
         for item in self._queue_items:
-            if item.get("queue") == queue and item.get("id") == item_id:
+            if item.get("queue") == queue_id and item.get("id") == item_id:
                 return item
         return None
 
