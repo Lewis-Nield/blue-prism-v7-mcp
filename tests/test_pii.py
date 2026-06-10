@@ -56,6 +56,11 @@ def test_luhn_rejects_digit_runs_outside_pan_lengths():
     assert not _luhn_ok("0" * 20)
 
 
+def test_luhn_accepts_the_13_and_19_digit_pan_length_bounds():
+    assert _luhn_ok("4222222222222")  # 13-digit Visa test PAN
+    assert _luhn_ok("6304950600000000007")  # 19-digit Maestro-length PAN
+
+
 # ------------------------------------------------------------ regex tier
 
 
@@ -109,6 +114,41 @@ def test_regex_scrubber_earlier_pattern_claims_overlapping_spans(regex_scrubber)
     result = regex_scrubber.scrub("holder QQ 12 34 56 C")
     assert result.entity_types == ("UK_NI_NUMBER",)
     assert "[UK_SORT_CODE]" not in result.text
+
+
+def test_regex_scrubber_keeps_scanning_past_a_luhn_rejected_card(regex_scrubber):
+    # A rejected candidate must not stop the scan: the valid card after the
+    # invalid one is still redacted.
+    result = regex_scrubber.scrub("bad 4111 1111 1111 1112 good 4111 1111 1111 1111")
+    assert result.entity_types == ("CARD_NUMBER",)
+    assert "4111 1111 1111 1111" not in result.text
+    assert "4111 1111 1111 1112" in result.text
+
+
+def test_regex_scrubber_keeps_scanning_past_an_overlapped_match():
+    # The first email is inside a span a custom pattern already claimed; the
+    # second, elsewhere, must still be redacted.
+    scrubber = RegexScrubber(custom_patterns=(("QUOTED_REF", r"<a@b\.com>"),))
+    result = scrubber.scrub("<a@b.com> then c@d.com")
+    assert result.text == "[QUOTED_REF] then [EMAIL_ADDRESS]"
+    assert result.entity_types == ("EMAIL_ADDRESS", "QUOTED_REF")
+
+
+def test_regex_scrubber_adjacent_spans_do_not_count_as_overlapping():
+    # Touching (end == start) is not overlap, whichever side claims first.
+    for patterns in ((("A", "AAA"), ("B", "BBB")), (("B", "BBB"), ("A", "AAA"))):
+        result = RegexScrubber(custom_patterns=patterns).scrub("xAAABBBx")
+        assert result.text == "x[A][B]x"
+        assert result.entity_types == ("A", "B")
+
+
+def test_regex_scrubber_audit_log_names_types_but_never_content(caplog):
+    # The audit-trail contract: entity types are logged, raw PII never is.
+    with caplog.at_level("INFO", logger="blue_prism_mcp.pii"):
+        RegexScrubber().scrub("mail maria@example.com about NI QQ 12 34 56 C")
+    messages = " ".join(r.getMessage() for r in caplog.records)
+    assert "EMAIL_ADDRESS" in messages and "UK_NI_NUMBER" in messages
+    assert "maria@example.com" not in messages and "QQ 12 34 56 C" not in messages
 
 
 def test_regex_scrubber_custom_patterns_beat_builtins():
