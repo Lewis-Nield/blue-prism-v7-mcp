@@ -151,6 +151,17 @@ class TestAuth:
         assert client.get_resources() == [{"name": "BOT-01"}]
         assert client._token == "new-token"
 
+    def test_a_caller_authorization_header_skips_the_token_fetch(self):
+        # An explicit Authorization override (any casing) must not trigger a
+        # needless token round-trip to the auth server.
+        for header_key in ("Authorization", "authorization"):
+            client, session = make_client()
+            session.get.return_value = _resp([{"name": "BOT-01"}])
+            result = client._request("GET", "/resources", headers={header_key: "Bearer ext"})
+            assert result == [{"name": "BOT-01"}]
+            session.post.assert_not_called()  # no call to the auth server
+            assert session.get.call_args.kwargs["headers"] == {header_key: "Bearer ext"}
+
     def test_two_clients_do_not_share_token(self):
         a, _ = make_client()
         b, _ = make_client()
@@ -495,6 +506,28 @@ class TestMockExtended:
         # must not mutate the item, so the mock refuses it too.
         client = MockBPClient()
         client.defer_queue_item("Invoices", "item-001", 99, "2026-04-01T00:00:00Z")
+        assert client.get_queue_items("Invoices", state="Deferred") == []
+
+    def test_defer_of_an_unknown_item_is_a_noop(self):
+        client = MockBPClient()
+        assert (
+            client.defer_queue_item("Invoices", "no-such-item", 1, "2026-04-01T00:00:00Z") is None
+        )
+        assert client.get_queue_items("Invoices", state="Deferred") == []
+
+    def test_defer_defaults_a_missing_attempt_number_to_one(self):
+        # A simplified fixture without attemptNumber means attempt 1 — the
+        # same default retry_queue_item uses when bumping.
+        client = MockBPClient()
+        del client._find_item("Invoices", "item-001")["attemptNumber"]
+        client.defer_queue_item("Invoices", "item-001", 1, "2026-04-01T00:00:00Z")
+        deferred = client.get_queue_items("Invoices", state="Deferred")
+        assert [i["id"] for i in deferred] == ["item-001"]
+
+    def test_defer_refuses_an_unparsable_attempt_number(self):
+        client = MockBPClient()
+        client._find_item("Invoices", "item-001")["attemptNumber"] = "soon"
+        client.defer_queue_item("Invoices", "item-001", 1, "2026-04-01T00:00:00Z")
         assert client.get_queue_items("Invoices", state="Deferred") == []
 
     def test_defer_tracks_the_attempt_created_by_retry(self):

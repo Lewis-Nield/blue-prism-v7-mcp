@@ -218,10 +218,18 @@ class MockBPClient:
         self, queue_id: str, item_id: str, attempt_id: int, defer_until: str
     ) -> None:
         item = self._find_item(queue_id, item_id)
+        if item is None:
+            return None
         # Attempt-scoped like the live endpoint (.../attempts/{attemptId}):
         # a wrong attempt id must not mutate the item, so tests catch callers
-        # passing a stale one.
-        if item is not None and attempt_id == int(item.get("attemptNumber", 0)):
+        # passing a stale one. A fixture without attemptNumber means attempt 1
+        # (the same default retry_queue_item uses); an unparsable value never
+        # matches anything.
+        try:
+            current = int(item.get("attemptNumber", 1))
+        except (TypeError, ValueError):
+            return None
+        if attempt_id == current:
             item["state"] = "Deferred"
             item["deferredDate"] = defer_until
         return None

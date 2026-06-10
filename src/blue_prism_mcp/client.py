@@ -162,10 +162,14 @@ class BPClient:
         url = f"{self._config.base_url}{path}"
 
         def _send():
-            # Caller headers merge over the auth header; requests fills in
-            # Content-Type: application/json for json= bodies unless a caller
-            # overrides it (the JSON Patch endpoint needs its own media type).
-            send_headers = {"Authorization": f"Bearer {self._get_token()}", **(headers or {})}
+            # Caller headers take precedence (the JSON Patch endpoint needs
+            # its own Content-Type; requests fills in application/json for
+            # json= bodies otherwise). The bearer token is only fetched when
+            # the caller didn't bring an Authorization of their own — an
+            # override must not trigger a needless auth round-trip.
+            send_headers = dict(headers or {})
+            if not any(k.lower() == "authorization" for k in send_headers):
+                send_headers["Authorization"] = f"Bearer {self._get_token()}"
             return send(
                 url,
                 headers=send_headers,
