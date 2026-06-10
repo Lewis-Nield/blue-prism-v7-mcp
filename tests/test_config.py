@@ -15,6 +15,9 @@ def test_from_env_defaults_with_empty_environment():
     assert cfg.page_size == 1000
     assert cfg.page_size_param == "itemsPerPage"
     assert cfg.enable_actions is False
+    assert cfg.pii_backend == "null"
+    assert cfg.pii_spacy_model == "en_core_web_sm"
+    assert cfg.pii_custom_patterns == ()
 
 
 def test_from_env_reads_all_fields():
@@ -35,6 +38,9 @@ def test_from_env_reads_all_fields():
             "BP_API_PAGE_TOKEN_PARAM": "cursor",
             "BP_API_PAGE_OFFSET_PARAM": "skip",
             "BP_ENABLE_ACTIONS": "true",
+            "BP_PII_BACKEND": "regex",
+            "BP_PII_SPACY_MODEL": "en_core_web_lg",
+            "BP_PII_CUSTOM_PATTERNS": '[{"name": "CLIENT_REF", "pattern": "CLT-\\\\d{8}"}]',
         }
     )
     assert cfg.base_url == "https://bp.example/api/v7"
@@ -52,6 +58,21 @@ def test_from_env_reads_all_fields():
     assert cfg.page_token_param == "cursor"
     assert cfg.page_offset_param == "skip"
     assert cfg.enable_actions is True
+    assert cfg.pii_backend == "regex"
+    assert cfg.pii_spacy_model == "en_core_web_lg"
+    assert cfg.pii_custom_patterns == (("CLIENT_REF", "CLT-\\d{8}"),)
+
+
+def test_malformed_pii_custom_patterns_fail_loudly():
+    # A deployment that configured extra redaction must not run without it:
+    # bad JSON, a non-object entry, and a missing key all raise.
+    for bad in ("not json", '{"name": "X"}', '[{"name": "X"}]', "[42]"):
+        try:
+            BPConfig.from_env(env={"BP_PII_CUSTOM_PATTERNS": bad})
+        except (ValueError, TypeError) as exc:
+            assert "BP_PII_CUSTOM_PATTERNS" in str(exc)
+        else:
+            raise AssertionError(f"expected {bad!r} to be rejected")
 
 
 def test_url_trailing_slashes_are_stripped():

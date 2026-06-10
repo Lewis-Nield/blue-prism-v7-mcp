@@ -49,9 +49,19 @@ library it was always implicitly built on.
   MI-oriented tools. Read-only management information is what a dashboard does;
   the differentiated value of an MCP server is a **governed action surface** on
   v7 Enterprise.
-- **Pluggable PII scrubbing.** A `Scrubber` protocol with a no-op default; a
-  Presidio-backed implementation behind the optional `[pii]` extra so the base
-  install stays light and teams can supply their own redaction.
+- **Pluggable PII scrubbing.** A `Scrubber` protocol returning a `ScrubResult`
+  (scrubbed text + entity types found — the audit trail records types, never
+  content), with three shipped tiers: a no-op `NullScrubber`; a zero-dependency
+  `RegexScrubber` covering the pattern-shaped entities that dominate UK FS
+  estates (NI numbers, sort codes, account numbers, PANs Luhn-checked, emails,
+  phones), so the *base* install has a credible redaction story; and a
+  Presidio-backed NER tier behind the optional `[pii]` extra, which reuses the
+  same patterns as score-1.0 recognizers so exact domain matches beat NER
+  guesses. Backend selection (`pii_backend = null | regex | presidio`) is
+  explicit config and **fails loud at startup** when the requested backend
+  cannot load — redaction must never silently degrade. Replacement is a
+  pluggable operator: typed tokens (`[UK_NI_NUMBER]`) by default, with a seam
+  for correlation-preserving numbered pseudonyms (`[PERSON_1]`) later.
 - **Insight views are separate tools**, not parameters on the primitives — tight,
   single-purpose tool descriptions drive better model tool-selection.
 - **Session-log read is in v1.** `get_session_log` is the highest-value agentic
@@ -168,9 +178,9 @@ permissions, but the published request schema omits the flag).
 2. **Config** (`config.py`) — a per-deployment object built from the environment
    (credentials, base URL, pagination, SSL verification, feature flags including
    `enable_actions`).
-3. **PII** (`pii.py`) — the `Scrubber` protocol, the no-op default, and the
-   optional Presidio backend. Applied at the exception-message and session-log
-   boundaries.
+3. **PII** (`pii.py`) — the `Scrubber` protocol (`scrub(text) -> ScrubResult`),
+   the null/regex/Presidio tiers, and the fail-loud `build_scrubber` factory.
+   Applied at the exception-message and session-log boundaries.
 4. **Tools** (`tools/`) — the three tiers over `BPClient`, carrying the envelope
    contract.
 5. **Governance** — capability gating, audit, and dry-run; gates Tier 3.
@@ -198,8 +208,9 @@ catalogue, the session stage-log, and (for Tier 3) the write endpoints.
   session stage-log; the Tier 3 write endpoints; align the whole surface (auth,
   paging, filter encoding, write paths) with the verified API ground truth
   above.
-- **Phase 3 — Pluggable PII**: the `Scrubber` protocol and Presidio backend,
-  wired at the exception-message and session-log boundaries.
+- **Phase 3 — Pluggable PII**: the `Scrubber` protocol, the null/regex/Presidio
+  tiers, and the fail-loud factory; wiring at the exception-message and
+  session-log boundaries (and the cached scrub) lands with the tools in Phase 4.
 - **Phase 4 — Tier 1 + 2 tools**: visibility primitives and the three insight
   tools, with the envelope, ISO validation, and cached scrub; tool tests.
 - **Phase 5 — Governance scaffold + Tier 3 (disabled)**: the `enable_actions`

@@ -12,6 +12,7 @@ the Blue Prism Authentication Server, token paging via itemsPerPage/pagingToken.
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass
 
@@ -60,6 +61,17 @@ class BPConfig:
     # Feature flags.
     enable_actions: bool = False  # gates the Tier 3 control tools
 
+    # PII scrubbing backend: "null" (pass-through, the light-install default),
+    # "regex" (zero-dependency UK FS patterns), or "presidio" (NER, needs the
+    # [pii] extra). Selection FAILS LOUD at scrubber construction — see
+    # pii.build_scrubber — never a silent fallback.
+    pii_backend: str = "null"
+    pii_spacy_model: str = "en_core_web_sm"
+    # Deployment-specific patterns, e.g. client reference formats. Prepended to
+    # the built-ins, so they win on overlapping spans (and run as score-1.0
+    # recognizers under Presidio). Tuples of (ENTITY_NAME, regex).
+    pii_custom_patterns: tuple[tuple[str, str], ...] = ()
+
     # Item-key / token-key candidates for unpacking paged responses.
     page_items_keys: tuple[str, ...] = ("items", "data", "results", "values")
     page_token_keys: tuple[str, ...] = ("pagingToken", "nextPageToken", "next")
@@ -93,4 +105,27 @@ class BPConfig:
             page_token_param=e.get("BP_API_PAGE_TOKEN_PARAM", "pagingToken"),
             page_offset_param=e.get("BP_API_PAGE_OFFSET_PARAM", "startIndex"),
             enable_actions=e.get("BP_ENABLE_ACTIONS", "false").lower() == "true",
+            pii_backend=e.get("BP_PII_BACKEND", "null"),
+            pii_spacy_model=e.get("BP_PII_SPACY_MODEL", "en_core_web_sm"),
+            pii_custom_patterns=_parse_pii_patterns(e.get("BP_PII_CUSTOM_PATTERNS", "")),
         )
+
+
+def _parse_pii_patterns(raw: str) -> tuple[tuple[str, str], ...]:
+    """Parse BP_PII_CUSTOM_PATTERNS: a JSON array of {"name", "pattern"}.
+
+    Mirrors the shape the dashboard used for its domain patterns. Malformed
+    input raises (with the offending reason) rather than being ignored — a
+    deployment that configured extra redaction must not run without it.
+    """
+    if not raw.strip():
+        return ()
+    try:
+        entries = json.loads(raw)
+        return tuple((str(p["name"]), str(p["pattern"])) for p in entries)
+    except (ValueError, TypeError, KeyError) as exc:
+        raise ValueError(
+            "BP_PII_CUSTOM_PATTERNS must be a JSON array of objects with "
+            f'"name" and "pattern" keys, e.g. [{{"name": "CLIENT_REF", '
+            f'"pattern": "CLT-\\\\d{{6}}"}}] — got {raw!r} ({exc})'
+        ) from exc
