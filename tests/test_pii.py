@@ -76,6 +76,8 @@ def regex_scrubber() -> RegexScrubber:
         ("applicant NI QQ 12 34 56 C on file", "[UK_NI_NUMBER]"),
         ("card 4111 1111 1111 1111 declined", "[CARD_NUMBER]"),
         ("sort code 20-45-67 missing", "[UK_SORT_CODE]"),
+        ("sort code 20 45 67 missing", "[UK_SORT_CODE]"),
+        ("sort code 204567 missing", "[UK_SORT_CODE]"),
         ("account 12345678 frozen", "[UK_ACCOUNT_NUMBER]"),
         ("call +44 7911 123456 before 5", "[UK_PHONE]"),
         ("call 07911 123456 before 5", "[UK_PHONE]"),
@@ -149,6 +151,19 @@ def test_regex_scrubber_audit_log_names_types_but_never_content(caplog):
     messages = " ".join(r.getMessage() for r in caplog.records)
     assert "EMAIL_ADDRESS" in messages and "UK_NI_NUMBER" in messages
     assert "maria@example.com" not in messages and "QQ 12 34 56 C" not in messages
+
+
+def test_regex_scrubber_phone_outranks_the_compact_sort_code(regex_scrubber):
+    # With sort-code separators optional, the trailing six digits of a phone
+    # number are a sort-code shape — the phone pattern must claim them first.
+    result = regex_scrubber.scrub("call 07911 123456 and quote 204567")
+    assert result.text == "call [UK_PHONE] and quote [UK_SORT_CODE]"
+    assert result.entity_types == ("UK_PHONE", "UK_SORT_CODE")
+
+
+def test_regex_scrubber_rejects_an_invalid_custom_pattern_loudly():
+    with pytest.raises(ScrubberUnavailableError, match=r"'BAD_REF'.*\(unclosed"):
+        RegexScrubber(custom_patterns=(("BAD_REF", "(unclosed"),))
 
 
 def test_regex_scrubber_custom_patterns_beat_builtins():
@@ -230,6 +245,12 @@ def test_presidio_custom_pattern_wins_at_score_one(presidio_scrubber):
     result = scrubber.scrub("see CLT-12345678 for details")
     assert "[CLIENT_REF]" in result.text
     assert "CLIENT_REF" in result.entity_types
+
+
+def test_presidio_rejects_an_invalid_custom_pattern_at_startup():
+    # Presidio compiles recognizer regexes lazily; the constructor must not.
+    with pytest.raises(ScrubberUnavailableError, match=r"'BAD_REF'"):
+        PresidioScrubber(custom_patterns=(("BAD_REF", "(unclosed"),))
 
 
 def test_presidio_leaves_clean_text_untouched(presidio_scrubber):

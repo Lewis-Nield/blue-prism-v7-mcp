@@ -63,6 +63,12 @@ def test_from_env_reads_all_fields():
     assert cfg.pii_custom_patterns == (("CLIENT_REF", "CLT-\\d{8}"),)
 
 
+def test_pii_backend_is_normalised_from_the_environment():
+    # Case/whitespace slips are config footguns, not deployment decisions;
+    # genuinely unknown values still refuse to start in build_scrubber.
+    assert BPConfig.from_env(env={"BP_PII_BACKEND": " ReGeX "}).pii_backend == "regex"
+
+
 def test_malformed_pii_custom_patterns_fail_loudly():
     # A deployment that configured extra redaction must not run without it:
     # bad JSON, a non-object entry, and a missing key all raise.

@@ -99,10 +99,33 @@ _BUILTIN_PATTERNS: tuple[tuple[str, str], ...] = (
     # Candidate PANs (13–19 digits, optional space/hyphen separators) are only
     # treated as cards when they pass the Luhn check — see _luhn_ok.
     ("CARD_NUMBER", r"\b(?:\d[ -]?){12,18}\d\b"),
-    ("UK_SORT_CODE", r"\b\d{2}[- ]\d{2}[- ]\d{2}\b"),
-    ("UK_ACCOUNT_NUMBER", r"\b\d{8}\b"),
+    # Phones before sort codes: a sort code's separators are optional (the
+    # compact 204567 form must scrub too), so the more specific phone pattern
+    # has to claim "07911 123456" before the sort-code one can take "123456".
     ("UK_PHONE", r"(?:\+44[\s-]?|\b0)\d{2,4}[\s-]?\d{3,4}[\s-]?\d{3,4}\b"),
+    ("UK_SORT_CODE", r"\b\d{2}[- ]?\d{2}[- ]?\d{2}\b"),
+    ("UK_ACCOUNT_NUMBER", r"\b\d{8}\b"),
 )
+
+
+def _compile_patterns(
+    patterns: tuple[tuple[str, str], ...],
+) -> list[tuple[str, re.Pattern[str]]]:
+    """Compile (name, regex) pairs, naming the entry that fails.
+
+    A broken deployment pattern is a startup error like any other backend
+    problem: raise the project's fail-loud type with enough context to fix
+    the config, not a bare re.error from somewhere inside a comprehension.
+    """
+    compiled: list[tuple[str, re.Pattern[str]]] = []
+    for name, pattern in patterns:
+        try:
+            compiled.append((name, re.compile(pattern)))
+        except re.error as exc:
+            raise ScrubberUnavailableError(
+                f"PII pattern {name!r} is not a valid regex: {pattern!r} ({exc})"
+            ) from exc
+    return compiled
 
 
 def _luhn_ok(candidate: str) -> bool:
@@ -133,9 +156,7 @@ class RegexScrubber:
         replacement: Replacement = typed_token,
     ) -> None:
         # Custom (deployment) patterns first: first-match-wins on overlap.
-        self._patterns = [
-            (name, re.compile(pattern)) for name, pattern in (*custom_patterns, *_BUILTIN_PATTERNS)
-        ]
+        self._patterns = _compile_patterns((*custom_patterns, *_BUILTIN_PATTERNS))
         self._replacement = replacement
 
     def scrub(self, text: str) -> ScrubResult:
@@ -223,6 +244,10 @@ class PresidioScrubber:
             }
         ).create_engine()
         self._analyzer = AnalyzerEngine(nlp_engine=nlp_engine)
+        # Presidio compiles recognizer regexes lazily, so a broken deployment
+        # pattern would otherwise surface at the first scrub — validate at
+        # startup instead, with the same fail-loud error the regex tier gives.
+        _compile_patterns(custom_patterns)
         for name, pattern in (*custom_patterns, *_BUILTIN_PATTERNS):
             # score=1.0: exact-regex domain patterns always win over spaCy NER
             # detections (e.g. LOCATION) on the same span.

@@ -105,7 +105,10 @@ class BPConfig:
             page_token_param=e.get("BP_API_PAGE_TOKEN_PARAM", "pagingToken"),
             page_offset_param=e.get("BP_API_PAGE_OFFSET_PARAM", "startIndex"),
             enable_actions=e.get("BP_ENABLE_ACTIONS", "false").lower() == "true",
-            pii_backend=e.get("BP_PII_BACKEND", "null"),
+            # Normalised: " ReGeX " is an obvious 'regex', and rejecting it
+            # would be pedantry, not fail-loud rigour. Unknown values still
+            # refuse to start in build_scrubber.
+            pii_backend=e.get("BP_PII_BACKEND", "null").strip().lower(),
             pii_spacy_model=e.get("BP_PII_SPACY_MODEL", "en_core_web_sm"),
             pii_custom_patterns=_parse_pii_patterns(e.get("BP_PII_CUSTOM_PATTERNS", "")),
         )
