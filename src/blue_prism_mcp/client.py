@@ -89,6 +89,9 @@ class BPClient:
         self._token: str | None = None
         self._token_expiry: float = 0.0  # monotonic deadline; 0 → no token
         self._cache = _TTLCache(config.cache_ttl)
+        # Session-log endpoint pin: None until /logs is proven the only option,
+        # then "logs" for the life of the instance (see get_session_log).
+        self._log_path: str | None = None
 
     def clear_cache(self) -> None:
         """Drop all cached reads (mirrors st.cache_data.clear())."""
@@ -283,7 +286,7 @@ class BPClient:
 
         return collected
 
-    def _cached(self, key: Any, produce: Callable[[], list]) -> list:
+    def _cached(self, key: Any, produce: Callable[[], Any]) -> Any:
         """Return a cached read for `key`, computing and storing it on a miss."""
         hit = self._cache.get(key)
         if hit is not _MISS:
@@ -301,6 +304,15 @@ class BPClient:
     def get_queues(self) -> list[dict]:
         """GET /workqueues — work-queue health."""
         return self._cached("queues", lambda: self._get_collection("/workqueues"))
+
+    def get_queue(self, queue_id: str) -> dict:
+        """GET /workqueues/{id} — one queue, with its per-state composition counts.
+
+        WorkQueueSummary already carries pending/completed/locked/exceptioned/
+        total counts and averageWorkTime, which is why the /dashboards/
+        workQueueCompositions aggregate is not consumed (see DESIGN.md).
+        """
+        return self._cached(("queue", queue_id), lambda: self._get(f"/workqueues/{queue_id}"))
 
     def get_schedules(self) -> list[dict]:
         """GET /schedules — schedules, next runs, last outcome."""
@@ -369,15 +381,46 @@ class BPClient:
         )
 
     def get_session_log(self, session_id: str) -> list[dict]:
-        """GET /sessions/{id}/logs — the stage-level log for one session.
+        """GET /sessions/{id}/logslight, falling back to /logs — the stage log.
 
-        The highest-value agentic read ("why did this run fail?"). Stage data can
-        carry item payloads, so the tool layer routes the result through the PII
-        scrubber (Phase 3/4); the client returns it raw.
+        The highest-value agentic read ("why did this run fail?"). Stage results
+        can carry item payloads, so the tool layer routes the result through the
+        PII scrubber; the client returns it raw.
+
+        logslight (7.4+) is shape-identical to /logs — same parameters, same
+        SessionLogSummary items (verified field-by-field against the 7.5.1
+        spec); the "light" is a cheaper server-side query. So probe it first
+        and fall back on a 404. The fallback only PINS /logs for the life of
+        the instance when /logs then succeeds: a 404 with a failing fallback
+        means the session id itself is unknown (both endpoints 404 on that),
+        and must not demote a 7.4+ estate to the slow path forever.
+        """
+
+        def produce() -> list:
+            if self._log_path == "logs":
+                return self._get_collection(f"/sessions/{session_id}/logs")
+            try:
+                return self._get_collection(f"/sessions/{session_id}/logslight")
+            except requests.HTTPError as exc:
+                if exc.response is None or exc.response.status_code != 404:
+                    raise
+                items = self._get_collection(f"/sessions/{session_id}/logs")
+                self._log_path = "logs"
+                return items
+
+        return self._cached(("session_log", session_id), produce)
+
+    def get_current_limits_and_usage(self) -> dict:
+        """GET /dashboards/currentLimitsAndUsage — licence limits vs usage.
+
+        The one /dashboards endpoint this server consumes (the others are
+        dashboard MI or redundant with /workqueues — see DESIGN.md). Limits are
+        nullable (null = unlimited); usages are current counts. Backs the
+        estate_health tool's licence block.
         """
         return self._cached(
-            ("session_log", session_id),
-            lambda: self._get_collection(f"/sessions/{session_id}/logs"),
+            "limits_and_usage",
+            lambda: self._get("/dashboards/currentLimitsAndUsage"),
         )
 
     # --- Tier 3 writes ------------------------------------------------------

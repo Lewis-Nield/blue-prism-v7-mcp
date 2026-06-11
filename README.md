@@ -18,7 +18,7 @@ Actively developed against the phased plan in [DESIGN.md](DESIGN.md):
 - [x] Phase 1 — Decouple the client into `BPClient`
 - [x] Phase 2 — Extend the client (queue items, processes, session log, Tier 3 writes)
 - [x] Phase 3 — Pluggable PII (`Scrubber` protocol; null / regex / Presidio tiers)
-- [ ] Phase 4 — Tier 1 + 2 tools (the envelope contract)
+- [x] Phase 4 — Tier 1 + 2 tools (the envelope contract)
 - [ ] Phase 5 — Governance scaffold + Tier 3, shipped disabled
 - [ ] Phase 6 — Server + packaging
 - [ ] Phase 7 — Validate (stdio handshake, end-to-end, coverage gate)

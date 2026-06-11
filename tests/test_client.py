@@ -11,6 +11,7 @@ writes — follows the official v7 API specs (see DESIGN.md's ground truth).
 from unittest.mock import MagicMock
 
 import pytest
+import requests
 
 from blue_prism_mcp.client import BPClient
 from blue_prism_mcp.config import BPConfig
@@ -38,6 +39,14 @@ def _resp(body, status_code: int = 200) -> MagicMock:
 
 def _auth_resp(token: str = "test-token", expires_in: int = 3600) -> MagicMock:
     return _resp({"access_token": token, "expires_in": expires_in})
+
+
+def _http_error_resp(status_code: int) -> MagicMock:
+    """A response whose raise_for_status raises like a real requests one."""
+    resp = MagicMock(status_code=status_code)
+    error = requests.HTTPError(f"{status_code} error", response=resp)
+    resp.raise_for_status = MagicMock(side_effect=error)
+    return resp
 
 
 def make_client(**config_overrides) -> tuple[BPClient, MagicMock]:
@@ -75,25 +84,29 @@ class TestMockClient:
     def test_get_sessions(self):
         sessions = MockBPClient().get_sessions()
         assert len(sessions) > 0
-        required = {"process", "status", "items_processed", "duration_secs"}
+        required = {"sessionId", "processName", "resourceName", "status", "startTime"}
         for s in sessions:
             assert required.issubset(s.keys())
 
     def test_get_sessions_with_date_filter(self):
         client = MockBPClient()
         all_sessions = client.get_sessions()
-        dates = sorted({s["date"] for s in all_sessions})
+        dates = sorted({s["startTime"][:10] for s in all_sessions})
         mid = dates[len(dates) // 2]
         filtered = client.get_sessions(start_date=mid)
-        assert all(s["date"] >= mid for s in filtered)
+        assert all(s["startTime"][:10] >= mid for s in filtered)
         assert len(filtered) <= len(all_sessions)
 
     def test_get_sessions_with_end_date_filter(self):
+        # A date-only end bound includes the whole day: a session at
+        # 2026-03-02T10:00 is within end_date 2026-03-02 even though the raw
+        # string compares greater.
         client = MockBPClient()
-        dates = sorted({s["date"] for s in client.get_sessions()})
+        dates = sorted({s["startTime"][:10] for s in client.get_sessions()})
         mid = dates[len(dates) // 2]
         filtered = client.get_sessions(end_date=mid)
-        assert all(s["date"] <= mid for s in filtered)
+        assert filtered
+        assert all(s["startTime"][:10] <= mid for s in filtered)
 
     def test_seeded_data_overrides_defaults(self):
         client = MockBPClient(queues=[{"name": "Only"}])
@@ -351,11 +364,87 @@ class TestExtendedReads:
         client.get_queue_items("Q", state="Exceptioned")
         assert session.get.call_count == 2  # distinct cache keys, not shared
 
-    def test_get_session_log(self):
+    def test_get_queue_hits_single_queue_path(self):
         client, session = make_client()
-        session.get.return_value = _resp([{"stage": "Start"}])
-        assert client.get_session_log("sess-1") == [{"stage": "Start"}]
+        session.get.return_value = _resp({"id": "q-uuid-1", "name": "Invoices"})
+        assert client.get_queue("q-uuid-1") == {"id": "q-uuid-1", "name": "Invoices"}
+        assert session.get.call_args.args[0].endswith("/workqueues/q-uuid-1")
+
+    def test_get_queue_is_cached_per_id(self):
+        client, session = make_client()
+        session.get.return_value = _resp({"id": "q1"})
+        client.get_queue("q1")
+        client.get_queue("q1")
+        session.get.assert_called_once()
+
+    def test_get_current_limits_and_usage(self):
+        client, session = make_client()
+        session.get.return_value = _resp({"concurrentSessionsUsed": 3})
+        assert client.get_current_limits_and_usage() == {"concurrentSessionsUsed": 3}
+        assert session.get.call_args.args[0].endswith("/dashboards/currentLimitsAndUsage")
+        client.get_current_limits_and_usage()
+        session.get.assert_called_once()  # cached
+
+
+# --- Session log: the logslight probe ------------------------------------------
+
+
+class TestSessionLogProbe:
+    """logslight (7.4+) is shape-identical to /logs, so the client probes it
+    first and only pins /logs when a 404 is corroborated by /logs succeeding —
+    a bare 404 may just mean an unknown session id."""
+
+    def test_logslight_is_preferred_when_available(self):
+        client, session = make_client()
+        session.get.return_value = _resp([{"stageName": "Start"}])
+        assert client.get_session_log("sess-1") == [{"stageName": "Start"}]
+        session.get.assert_called_once()
+        assert session.get.call_args.args[0].endswith("/sessions/sess-1/logslight")
+
+    def test_missing_logslight_falls_back_and_pins_logs(self):
+        client, session = make_client()
+        session.get.side_effect = [
+            _http_error_resp(404),  # logslight absent (pre-7.4 estate)
+            _resp([{"stageName": "Start"}]),  # /logs succeeds → pin
+            _resp([{"stageName": "Start"}]),  # next read goes straight to /logs
+        ]
+        assert client.get_session_log("sess-1") == [{"stageName": "Start"}]
+        fallback_url = session.get.call_args_list[1].args[0]
+        assert fallback_url.endswith("/sessions/sess-1/logs")
+        client.clear_cache()
+        client.get_session_log("sess-1")
+        assert session.get.call_count == 3  # no second probe after the pin
         assert session.get.call_args.args[0].endswith("/sessions/sess-1/logs")
+
+    def test_unknown_session_raises_and_does_not_pin(self):
+        # Both endpoints 404 on a bad session id; that must not demote a 7.4+
+        # estate to /logs forever.
+        client, session = make_client()
+        session.get.side_effect = [
+            _http_error_resp(404),  # logslight: session unknown
+            _http_error_resp(404),  # /logs: session unknown too
+            _resp([{"stageName": "Start"}]),  # later, a valid session
+        ]
+        with pytest.raises(requests.HTTPError):
+            client.get_session_log("ghost")
+        client.get_session_log("sess-1")  # probes logslight again
+        assert session.get.call_args.args[0].endswith("/sessions/sess-1/logslight")
+
+    def test_non_404_errors_propagate_without_fallback(self):
+        client, session = make_client()
+        session.get.side_effect = [_http_error_resp(500)]
+        with pytest.raises(requests.HTTPError):
+            client.get_session_log("sess-1")
+        session.get.assert_called_once()  # no fallback attempt on a 500
+
+    def test_an_httperror_without_a_response_propagates(self):
+        # requests can raise HTTPError with response=None (e.g. from an
+        # adapter); there is no status to inspect, so it must not be
+        # swallowed by the 404 fallback.
+        client, session = make_client()
+        session.get.side_effect = requests.HTTPError("boom")
+        with pytest.raises(requests.HTTPError, match="boom"):
+            client.get_session_log("sess-1")
 
 
 # --- Phase 2: Tier 3 writes (mocked HTTP) -------------------------------------
@@ -456,17 +545,51 @@ class TestTierThreeWrites:
 # --- Phase 2: mock client extensions ------------------------------------------
 
 
+def _queue_id(client: MockBPClient, name: str = "Invoices") -> str:
+    """The fixture queue's id — items are keyed by queue UUID, as on the API."""
+    return next(q["id"] for q in client.get_queues() if q["name"] == name)
+
+
 class TestMockExtended:
     def test_get_processes(self):
-        assert len(MockBPClient().get_processes()) > 0
+        processes = MockBPClient().get_processes()
+        assert processes
+        # Process is the one v7 entity keyed processId/processName, not id/name.
+        assert all({"processId", "processName"}.issubset(p) for p in processes)
+
+    def test_get_queue_returns_the_matching_queue(self):
+        client = MockBPClient()
+        qid = _queue_id(client)
+        assert client.get_queue(qid)["name"] == "Invoices"
+
+    def test_get_queue_unknown_id_raises(self):
+        # The live endpoint 404s; the mock fails loudly too rather than
+        # answering None.
+        with pytest.raises(LookupError):
+            MockBPClient().get_queue("no-such-queue")
+
+    def test_get_current_limits_and_usage(self):
+        usage = MockBPClient().get_current_limits_and_usage()
+        assert "concurrentSessionsUsed" in usage
+        assert "concurrentSessionsLimit" in usage
 
     def test_get_queue_items_filters_by_queue_state_and_dates(self):
         client = MockBPClient()
+        qid = _queue_id(client)
         items = client.get_queue_items(
-            "Invoices", state="Exceptioned", start_date="2026-03-01", end_date="2026-03-31"
+            qid, state="Exceptioned", start_date="2026-03-01", end_date="2026-03-31"
         )
-        assert items and all(i["queue"] == "Invoices" for i in items)
+        assert items and all(i["queue"] == qid for i in items)
         assert all(i["state"] == "Exceptioned" for i in items)
+
+    def test_get_queue_items_end_date_includes_the_whole_day(self):
+        # Items carry full timestamps; a date-only end bound must include
+        # items updated later that same day.
+        client = MockBPClient()
+        items = client.get_queue_items(
+            _queue_id(client), start_date="2026-03-02", end_date="2026-03-02"
+        )
+        assert [i["keyValue"] for i in items] == ["INV-1002"]
 
     def test_get_queue_items_filters_by_user_status_text(self):
         client = MockBPClient(
@@ -482,76 +605,101 @@ class TestMockExtended:
         assert MockBPClient().get_queue_items("Nope") == []
 
     def test_get_session_log(self):
-        log = MockBPClient().get_session_log("sess-002")
-        assert any(e["result"] == "Exception" for e in log)
+        client = MockBPClient()
+        failed = next(s for s in client.get_sessions() if s["status"] == "Terminated")
+        log = client.get_session_log(failed["sessionId"])
+        assert any(str(e.get("result", "")).startswith("ERROR") for e in log)
 
     def test_get_session_log_unknown_session_is_empty(self):
         assert MockBPClient().get_session_log("nope") == []
 
     def test_retry_queue_item_creates_attempt_and_flips_state(self):
         client = MockBPClient()
-        result = client.retry_queue_item("Invoices", "item-002")
+        qid = _queue_id(client)
+        exceptioned = client.get_queue_items(qid, state="Exceptioned")[0]
+        result = client.retry_queue_item(qid, exceptioned["id"])
         assert result == {"attemptId": 2}
-        pending = client.get_queue_items("Invoices", state="Pending")
-        assert any(i["id"] == "item-002" for i in pending)
+        pending = client.get_queue_items(qid, state="Pending")
+        assert any(i["id"] == exceptioned["id"] for i in pending)
 
     def test_defer_queue_item_records_deferred_date(self):
         client = MockBPClient()
-        assert client.defer_queue_item("Invoices", "item-001", 1, "2026-04-01T00:00:00Z") is None
-        deferred = client.get_queue_items("Invoices", state="Deferred")
+        qid = _queue_id(client)
+        item = client.get_queue_items(qid)[0]["id"]
+        assert client.defer_queue_item(qid, item, 1, "2026-04-01T00:00:00Z") is None
+        deferred = client.get_queue_items(qid, state="Deferred")
         assert deferred[0]["deferredDate"] == "2026-04-01T00:00:00Z"
 
     def test_defer_queue_item_is_attempt_scoped(self):
         # The live endpoint is .../attempts/{attemptId}; a stale attempt id
         # must not mutate the item, so the mock refuses it too.
         client = MockBPClient()
-        client.defer_queue_item("Invoices", "item-001", 99, "2026-04-01T00:00:00Z")
-        assert client.get_queue_items("Invoices", state="Deferred") == []
+        qid = _queue_id(client)
+        item = client.get_queue_items(qid)[0]["id"]
+        client.defer_queue_item(qid, item, 99, "2026-04-01T00:00:00Z")
+        assert client.get_queue_items(qid, state="Deferred") == []
 
     def test_defer_of_an_unknown_item_is_a_noop(self):
         client = MockBPClient()
-        assert (
-            client.defer_queue_item("Invoices", "no-such-item", 1, "2026-04-01T00:00:00Z") is None
-        )
-        assert client.get_queue_items("Invoices", state="Deferred") == []
+        qid = _queue_id(client)
+        assert client.defer_queue_item(qid, "no-such-item", 1, "2026-04-01T00:00:00Z") is None
+        assert client.get_queue_items(qid, state="Deferred") == []
 
     def test_defer_defaults_a_missing_attempt_number_to_one(self):
         # A simplified fixture without attemptNumber means attempt 1 — the
         # same default retry_queue_item uses when bumping.
         client = MockBPClient()
-        del client._find_item("Invoices", "item-001")["attemptNumber"]
-        client.defer_queue_item("Invoices", "item-001", 1, "2026-04-01T00:00:00Z")
-        deferred = client.get_queue_items("Invoices", state="Deferred")
-        assert [i["id"] for i in deferred] == ["item-001"]
+        qid = _queue_id(client)
+        item = client.get_queue_items(qid)[0]["id"]
+        del client._find_item(qid, item)["attemptNumber"]
+        client.defer_queue_item(qid, item, 1, "2026-04-01T00:00:00Z")
+        deferred = client.get_queue_items(qid, state="Deferred")
+        assert [i["id"] for i in deferred] == [item]
 
     def test_defer_refuses_an_unparsable_attempt_number(self):
         client = MockBPClient()
-        client._find_item("Invoices", "item-001")["attemptNumber"] = "soon"
-        client.defer_queue_item("Invoices", "item-001", 1, "2026-04-01T00:00:00Z")
-        assert client.get_queue_items("Invoices", state="Deferred") == []
+        qid = _queue_id(client)
+        item = client.get_queue_items(qid)[0]["id"]
+        client._find_item(qid, item)["attemptNumber"] = "soon"
+        client.defer_queue_item(qid, item, 1, "2026-04-01T00:00:00Z")
+        assert client.get_queue_items(qid, state="Deferred") == []
 
     def test_defer_tracks_the_attempt_created_by_retry(self):
         # retry bumps the attempt number; deferring must address the NEW
         # attempt, and the old attempt id no longer works.
         client = MockBPClient()
-        new_attempt = client.retry_queue_item("Invoices", "item-002")["attemptId"]
-        client.defer_queue_item("Invoices", "item-002", new_attempt - 1, "2026-04-01T00:00:00Z")
-        assert client.get_queue_items("Invoices", state="Deferred") == []
-        client.defer_queue_item("Invoices", "item-002", new_attempt, "2026-04-01T00:00:00Z")
-        deferred = client.get_queue_items("Invoices", state="Deferred")
-        assert [i["id"] for i in deferred] == ["item-002"]
+        qid = _queue_id(client)
+        item = client.get_queue_items(qid, state="Exceptioned")[0]["id"]
+        new_attempt = client.retry_queue_item(qid, item)["attemptId"]
+        client.defer_queue_item(qid, item, new_attempt - 1, "2026-04-01T00:00:00Z")
+        assert client.get_queue_items(qid, state="Deferred") == []
+        client.defer_queue_item(qid, item, new_attempt, "2026-04-01T00:00:00Z")
+        deferred = client.get_queue_items(qid, state="Deferred")
+        assert [i["id"] for i in deferred] == [item]
 
     def test_start_process_appends_running_session(self):
         client = MockBPClient()
         before = len(client.get_sessions())
         result = client.start_process("proc-001", "BOT-01")
         assert result["status"] == "Running"
-        assert len(client.get_sessions()) == before + 1
+        sessions = client.get_sessions()
+        assert len(sessions) == before + 1
+        assert sessions[-1]["status"] == "Running"
 
     def test_set_schedule_enabled_flips_retirement(self):
         client = MockBPClient()
         client.set_schedule_enabled("Daily Invoice Run", False)
         sched = [s for s in client.get_schedules() if s["name"] == "Daily Invoice Run"][0]
+        assert sched["isRetired"] is True
+
+    @pytest.mark.parametrize("schedule_id", ["1", 1], ids=["str", "int"])
+    def test_schedule_lookup_matches_ids_across_types(self, schedule_id):
+        # Fixture ids are integers (per ScheduleSummary), but the live client
+        # takes schedule_id as a str for the URL path — both forms must find
+        # the schedule rather than silently no-op.
+        client = MockBPClient()
+        client.set_schedule_enabled(schedule_id, False)
+        sched = [s for s in client.get_schedules() if s["id"] == 1][0]
         assert sched["isRetired"] is True
 
     def test_trigger_schedule_records_outcome(self):
@@ -563,7 +711,7 @@ class TestMockExtended:
     def test_write_on_unknown_target_is_safe(self):
         client = MockBPClient()
         # No matching item/schedule — answers None without raising or mutating.
-        assert client.retry_queue_item("Invoices", "ghost") is None
+        assert client.retry_queue_item(_queue_id(client), "ghost") is None
         assert client.set_schedule_enabled("ghost", True) is None
         assert client.trigger_schedule("ghost") is None
 

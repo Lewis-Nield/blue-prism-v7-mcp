@@ -84,13 +84,23 @@ library it was always implicitly built on.
 - `list_sessions` — run history; filter by process/resource/status/date
 - `get_session_log` — stage-level log for one session (PII-scrubbed, size-capped)
 - `list_resources` — digital workers + status
-- `list_schedules` — next runs, last outcome
+- `list_schedules` — the schedule catalogue + retirement state. (The API holds
+  no next-run field anywhere, and last-outcome lives in the schedule run logs —
+  see the ground truth below; run-history enrichment is deferred.)
 - `list_processes` — published process catalogue
 
 ### Tier 2 — Insight (separate derived tools)
-- `exception_summary` — grouped exception counts
-- `throughput_summary` — straight-through-processing rate / items processed
-- `estate_health` — resource status rollup
+- `exception_summary` — exceptioned items for one queue + window, grouped by
+  *scrubbed* exception reason (grouping after scrubbing folds messages that
+  differ only in personal data into one bucket)
+- `throughput_summary` — per-process session outcomes over a window: status
+  counts, completion rate, and the terminationReason breakdown
+- `estate_health` — resource status rollup + the licence limits-vs-usage block
+  from `GET /dashboards/currentLimitsAndUsage`
+
+No v7 endpoint aggregates exceptions or throughput (see the `/dashboards/*`
+verdict below), so the first two are client-side aggregations over the Tier 1
+reads, scoped by the same required-window rules.
 
 ### Tier 3 — Control (designed in, shipped disabled)
 Gated behind `enable_actions=False`. Governance, capability-gating, audit, and
@@ -155,6 +165,34 @@ Wire-level contract (identical across versions):
 - **The items list returns `WorkQueueItemNoData`** — the API itself excludes
   item payload `data` from list responses; only the single-item GET carries it.
   `exceptionReason` *is* present in lists and remains a scrub target.
+- **`SessionSummary` carries `exceptionMessage`** (plus `exceptionType` and a
+  `terminationReason` enum: None/ProcessError/InternalError), so session
+  *lists* are an exception-message scrub boundary exactly like item lists'
+  `exceptionReason`. Its `status` enum is
+  Pending/Running/Terminated/Stopped/Completed/Stopping/Warning.
+- **`/sessions/{id}/logslight` (7.4+) is shape-identical to `/logs`** — same
+  parameters, same `SessionLogsPage`/`SessionLogSummary` response (verified
+  field-by-field on 7.5.1); the "light" is a cheaper server-side query, not a
+  reduced payload. The client therefore probes `logslight` first and falls
+  back to `/logs`; it only *pins* `/logs` for the life of the instance when
+  the fallback succeeds, because a bare 404 may equally mean the session id
+  itself is unknown and must not demote a 7.4+ estate.
+- **`/dashboards/*` (all five present at the 7.2 floor; verified on 7.2.0 and
+  7.5.1):** `currentLimitsAndUsage` (licence limits vs current usage —
+  concurrent sessions, runtime resources, published processes) backs
+  `estate_health`'s licence block and is the only dashboards endpoint this
+  server consumes. `workQueueCompositions` is redundant here —
+  `GET /workqueues` already returns the same per-state counts on
+  `WorkQueueSummary` (pending/completed/locked/exceptioned/total plus
+  `averageWorkTime`). The two resource-utilization endpoints are dashboard MI
+  (and the API's only page-*number*-paged reads); utilisation stays out of the
+  reusable surface. Nothing under `/dashboards` aggregates exceptions or
+  throughput.
+- **`ScheduleSummary` is the schedule definition only** (interval fields,
+  `isRetired`; its `id` is an *integer*, unlike every other entity's UUID).
+  No next-run field exists anywhere in the API; per-run history (a status
+  enum, start/end, duration) lives in `GET /schedules/logs`. v1
+  `list_schedules` returns definitions; run-log enrichment is deferred.
 - **`GET /user/permissions` (7.1+)** returns the service account's Blue Prism
   permissions; the Phase 5 capability resolver queries it at startup and
   registers only the action tools the account can actually execute.
