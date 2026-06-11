@@ -313,6 +313,39 @@ class TestListQueueItems:
         result = tier1(client)["list_queue_items"]("Q", "Pending", **WINDOW)
         assert [i["id"] for i in result["items"]] == ["new", "old"]
 
+    def test_window_bounds_are_forwarded_to_the_client(self):
+        # The Invoices fixtures hold a Completed item on 03-01 and an
+        # Exceptioned one on 03-02; each bound must actually reach the client
+        # or the tool silently reads outside its stated window.
+        items = tier1()["list_queue_items"]
+        assert items("Invoices", "Exceptioned", "2026-03-03", "2026-03-31")["items"] == []
+        assert items("Invoices", "Completed", "2026-03-01", "2026-03-01")["meta"]["total"] == 1
+
+    def test_status_text_filter_is_forwarded_to_the_client(self):
+        client = MockBPClient(
+            queues=[{"id": "q", "name": "Q"}],
+            queue_items=[
+                {
+                    "queue": "q",
+                    "id": "i1",
+                    "state": "Pending",
+                    "status": "awaiting review",
+                    "lastUpdated": "2026-03-02",
+                },
+                {
+                    "queue": "q",
+                    "id": "i2",
+                    "state": "Pending",
+                    "status": "",
+                    "lastUpdated": "2026-03-02",
+                },
+            ],
+        )
+        result = tier1(client)["list_queue_items"](
+            "Q", "Pending", **WINDOW, status="awaiting review"
+        )
+        assert [i["id"] for i in result["items"]] == ["i1"]
+
 
 class TestListSessions:
     def test_requires_the_window(self):
@@ -323,6 +356,13 @@ class TestListSessions:
         result = tier1()["list_sessions"](**WINDOW)
         starts = [s["startTime"] for s in result["items"]]
         assert starts == sorted(starts, reverse=True)
+
+    def test_window_bounds_are_forwarded_to_the_client(self):
+        # Fixture sessions start 03-01, 03-02, and 03-05; a 03-02..03-04
+        # window must exclude both outer ones — each bound has to actually
+        # reach the client.
+        result = tier1()["list_sessions"]("2026-03-02", "2026-03-04")
+        assert [s["sessionNumber"] for s in result["items"]] == [2]
 
     def test_filters_by_process_name_case_insensitively(self):
         result = tier1()["list_sessions"](**WINDOW, process="invoice processing")
@@ -471,7 +511,37 @@ class TestExceptionSummary:
             ],
         )
         result = tier2(client)["exception_summary"]("Q", **WINDOW)
-        assert result["items"][0]["reason"] == "(no reason recorded)"
+        [group] = result["items"]
+        assert group["reason"] == "(no reason recorded)"
+        # No exceptionedDate on the row → the timestamps fall back to
+        # lastUpdated rather than vanishing.
+        assert group["first_seen"] == "2026-03-02"
+        assert group["last_seen"] == "2026-03-02"
+
+    def test_most_frequent_reason_first(self):
+        items = [
+            {
+                "queue": "q",
+                "id": f"i{n}",
+                "state": "Exceptioned",
+                "lastUpdated": "2026-03-02",
+                "exceptionReason": reason,
+            }
+            for n, reason in enumerate(["Twice", "Twice", "Once"])
+        ]
+        client = MockBPClient(queues=[{"id": "q", "name": "Q"}], queue_items=items)
+        result = tier2(client)["exception_summary"]("Q", **WINDOW)
+        assert [(g["reason"], g["count"]) for g in result["items"]] == [
+            ("Twice", 2),
+            ("Once", 1),
+        ]
+
+    def test_window_bounds_are_forwarded_to_the_client(self):
+        # The fixture exception sits on 03-02; a window on either side of it
+        # must come back empty — each bound has to actually reach the client.
+        summary = tier2()["exception_summary"]
+        assert summary("Invoices", "2026-03-03", "2026-03-31")["items"] == []
+        assert summary("Invoices", "2026-03-01", "2026-03-01")["items"] == []
 
 
 class TestThroughputSummary:
@@ -496,6 +566,37 @@ class TestThroughputSummary:
     def test_scopes_to_one_process(self):
         result = tier2()["throughput_summary"](**WINDOW, process="customer onboarding")
         assert [r["process"] for r in result["items"]] == ["Customer Onboarding"]
+
+    def test_window_bounds_are_forwarded_to_the_client(self):
+        # Fixture sessions start 03-01, 03-02, and 03-05; a 03-02..03-04
+        # window must keep only the middle one.
+        result = tier2()["throughput_summary"]("2026-03-02", "2026-03-04")
+        rows = {r["process"]: r["total_sessions"] for r in result["items"]}
+        assert rows == {"Customer Onboarding": 1}
+
+    def test_outcome_counts_over_a_mixed_bag(self):
+        # One of each outcome: the completion rate divides by FINISHED runs
+        # (completed + terminated + stopped), the still-running one lands in
+        # `other`, and the termination cause is split out.
+        client = MockBPClient(
+            sessions=[
+                {"processName": "P", "status": "Completed", "startTime": "2026-03-02T09:00:00Z"},
+                {
+                    "processName": "P",
+                    "status": "Terminated",
+                    "terminationReason": "InternalError",
+                    "startTime": "2026-03-02T10:00:00Z",
+                },
+                {"processName": "P", "status": "Stopped", "startTime": "2026-03-02T11:00:00Z"},
+                {"processName": "P", "status": "Running", "startTime": "2026-03-02T12:00:00Z"},
+            ]
+        )
+        [row] = tier2(client)["throughput_summary"](**WINDOW)["items"]
+        assert row["total_sessions"] == 4
+        assert (row["completed"], row["terminated"], row["stopped"], row["other"]) == (1, 1, 1, 1)
+        assert row["completion_rate_pct"] == 33.3  # 1 of 3 finished, one decimal
+        assert row["terminated_internal_errors"] == 1
+        assert row["terminated_process_errors"] == 0
 
     def test_requires_the_window(self):
         with pytest.raises(ValueError, match="required"):

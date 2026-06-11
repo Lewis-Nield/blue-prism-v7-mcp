@@ -409,6 +409,8 @@ class TestSessionLogProbe:
             _resp([{"stageName": "Start"}]),  # next read goes straight to /logs
         ]
         assert client.get_session_log("sess-1") == [{"stageName": "Start"}]
+        fallback_url = session.get.call_args_list[1].args[0]
+        assert fallback_url.endswith("/sessions/sess-1/logs")
         client.clear_cache()
         client.get_session_log("sess-1")
         assert session.get.call_count == 3  # no second probe after the pin
