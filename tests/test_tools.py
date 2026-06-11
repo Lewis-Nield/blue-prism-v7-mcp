@@ -653,16 +653,26 @@ class TestEstateHealth:
         assert result["attention_meta"]["total"] == 3
         assert result["attention_meta"]["truncated"] is True
 
-    def test_licence_read_failure_degrades_visibly_not_fatally(self):
-        # A service account without dashboard permission keeps worker health;
-        # the licence block says why it is missing.
+    @pytest.mark.parametrize(
+        "error",
+        [
+            requests.HTTPError("403 Forbidden"),
+            requests.Timeout("read timed out"),
+            requests.ConnectionError("connection refused"),
+        ],
+        ids=["denied", "timeout", "connection"],
+    )
+    def test_licence_read_failure_degrades_visibly_not_fatally(self, error):
+        # A denied, timed-out, or dropped licence read keeps worker health;
+        # the licence block says why it is missing. Transport errors are just
+        # as likely as a 403 on this one extra request.
         class NoLicenceClient(MockBPClient):
             def get_current_limits_and_usage(self):
-                raise requests.HTTPError("403 Forbidden")
+                raise error
 
         result = tier2(NoLicenceClient())["estate_health"]()
         assert result["workers_total"] == 3
-        assert "403 Forbidden" in result["license_usage"]["unavailable"]
+        assert str(error) in result["license_usage"]["unavailable"]
 
     def test_a_worker_without_a_status_is_counted_as_unknown(self):
         client = MockBPClient(resources=[{"name": "B-1"}])

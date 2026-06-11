@@ -692,6 +692,16 @@ class TestMockExtended:
         sched = [s for s in client.get_schedules() if s["name"] == "Daily Invoice Run"][0]
         assert sched["isRetired"] is True
 
+    @pytest.mark.parametrize("schedule_id", ["1", 1], ids=["str", "int"])
+    def test_schedule_lookup_matches_ids_across_types(self, schedule_id):
+        # Fixture ids are integers (per ScheduleSummary), but the live client
+        # takes schedule_id as a str for the URL path — both forms must find
+        # the schedule rather than silently no-op.
+        client = MockBPClient()
+        client.set_schedule_enabled(schedule_id, False)
+        sched = [s for s in client.get_schedules() if s["id"] == 1][0]
+        assert sched["isRetired"] is True
+
     def test_trigger_schedule_records_outcome(self):
         client = MockBPClient()
         client.trigger_schedule("Daily Invoice Run")

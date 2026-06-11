@@ -175,9 +175,11 @@ def build_tier2_tools(client, scrubber: Scrubber) -> list[Callable]:
         )
         try:
             license_usage = client.get_current_limits_and_usage()
-        except requests.HTTPError as exc:
-            # A service account without dashboard permission shouldn't lose
-            # worker health too — degrade this block, visibly.
+        except requests.RequestException as exc:
+            # A service account without dashboard permission — or a timeout /
+            # connection drop on this one extra read — shouldn't lose worker
+            # health too. RequestException is the root of every error requests
+            # raises (HTTPError, Timeout, ConnectionError). Degrade visibly.
             license_usage = {"unavailable": f"licence read failed: {exc}"}
         return {
             "workers_total": len(resources),

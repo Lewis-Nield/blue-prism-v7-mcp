@@ -432,8 +432,13 @@ class MockBPClient:
         return None
 
     def _find_schedule(self, schedule_id) -> dict | None:
+        # Schedule ids are integers (the one non-UUID id in the API), but the
+        # live client takes schedule_id as a str and interpolates it into the
+        # URL — so callers naturally pass "1". Compare ids as strings so the
+        # mock doesn't silently no-op on a type mismatch; name matches stay
+        # exact.
         for schedule in self._schedules:
-            if schedule_id in (schedule.get("id"), schedule.get("name")):
+            if str(schedule.get("id")) == str(schedule_id) or schedule.get("name") == schedule_id:
                 return schedule
         return None
 
