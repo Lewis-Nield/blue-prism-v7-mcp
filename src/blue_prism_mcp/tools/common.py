@@ -1,0 +1,206 @@
+"""Shared tool-layer plumbing: the envelope, loud validation, name→UUID
+resolution, and the cached scrub boundary.
+
+These are the contracts every tool carries (see DESIGN.md "Shared contract"):
+list tools return a relevance-sorted, honestly-truncated envelope; dated
+parameters fail loudly on malformed input; entity names resolve to UUIDs via
+the (cached) list endpoints; and per-message PII scrubbing is cached because an
+LLM client re-reads the same rows across calls.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime
+from difflib import get_close_matches
+from functools import lru_cache
+from typing import Any, Callable
+from uuid import UUID
+
+from ..pii import Scrubber
+
+# Default cap on list-tool results. A large estate (200+ processes, months of
+# data) would otherwise blow the model's context and token budget on a single
+# call. The list tools sort server-side by relevance first, then return the top
+# N inside an envelope whose meta tells the model exactly how much it did NOT
+# see — so it can raise the limit or narrow the scope rather than reason over
+# an arbitrary truncated slice (which gives confidently-wrong answers).
+DEFAULT_LIMIT = 50
+
+_SCRUB_CACHE_SIZE = 512
+
+# Most-urgent-first ranking for resource display status: down beats degraded
+# beats working. Unknown statuses sort last, alphabetically, then by name.
+_STATUS_URGENCY = {"Missing": 0, "Offline": 1, "Warning": 2}
+_URGENCY_DEFAULT = 3
+
+
+def resource_urgency(resource: dict) -> tuple:
+    """Sort key putting the most broken digital workers first."""
+    status = resource.get("displayStatus") or ""
+    return (
+        _STATUS_URGENCY.get(status, _URGENCY_DEFAULT),
+        status,
+        resource.get("name") or "",
+    )
+
+
+def envelope(
+    rows: list[dict],
+    sort_key: Callable[[dict], Any],
+    sorted_by: str,
+    limit: int | None = DEFAULT_LIMIT,
+    reverse: bool = False,
+) -> dict:
+    """Wrap a list of records in a relevance-sorted, honestly-paginated envelope.
+
+    Returns ``{"items": [...], "meta": {...}}`` where meta carries the full
+    ``total``, the number ``returned``, whether the list was ``truncated``, and
+    the ``sorted_by`` description so an LLM client knows it saw the top N of M.
+
+    ``limit`` of None (or negative) returns every row; otherwise the first
+    ``limit`` rows after sorting. Sort keys use ``.get`` defaults so a row
+    missing the sort field never raises.
+    """
+    total = len(rows)
+    ordered = sorted(rows, key=sort_key, reverse=reverse)
+    items = ordered if limit is None or limit < 0 else ordered[:limit]
+    return {
+        "items": items,
+        "meta": {
+            "total": total,
+            "returned": len(items),
+            "truncated": len(items) < total,
+            "sorted_by": sorted_by,
+        },
+    }
+
+
+def validate_iso(value: str | None, field: str, required: bool = False) -> None:
+    """Raise ValueError unless *value* is a parseable ISO date or datetime.
+
+    LLM clients can pass malformed dates; the v7 filters would reject them
+    server-side with an opaque 400 (and the mock would silently return an
+    empty result). Failing loudly here tells the model exactly what it got
+    wrong instead. Accepts anything datetime.fromisoformat does — a plain
+    date, a full timestamp, a trailing Z.
+    """
+    if value is None:
+        if required:
+            raise ValueError(f"{field} is required (ISO format, e.g. 2026-03-01).")
+        return
+    try:
+        datetime.fromisoformat(value)
+    except (ValueError, TypeError):
+        raise ValueError(
+            f"{field} must be an ISO date or datetime (e.g. 2026-03-01 or "
+            f"2026-03-01T09:00:00); got {value!r}."
+        ) from None
+
+
+def require_window(start_date: str | None, end_date: str | None) -> None:
+    """Validate a mandatory, correctly-ordered date window.
+
+    The high-volume reads (queue items, sessions) refuse to run unbounded —
+    queues run to millions of items — so the window is required, and a
+    reversed window fails loudly rather than silently returning nothing.
+    """
+    validate_iso(start_date, "start_date", required=True)
+    validate_iso(end_date, "end_date", required=True)
+    # tzinfo is stripped for the ordering check only: comparing an aware bound
+    # with a naive one raises TypeError, and a loud-but-wrong crash on a valid
+    # window is worse than ignoring offsets in this sanity check. The values
+    # themselves pass through to the API untouched.
+    start = datetime.fromisoformat(start_date).replace(tzinfo=None)
+    end = datetime.fromisoformat(end_date).replace(tzinfo=None)
+    if start > end:
+        raise ValueError(
+            f"start_date {start_date!r} is after end_date {end_date!r} — swap the bounds."
+        )
+
+
+def validate_choice(value: str, field: str, allowed: frozenset[str]) -> str:
+    """Return the canonical casing of an enum value, or fail listing the choices.
+
+    Case-insensitive and whitespace-tolerant on the way in ("exceptioned" is an
+    obvious Exceptioned), canonical on the way out — the v7 filters are exact.
+    """
+    canonical = {choice.lower(): choice for choice in allowed}
+    match = canonical.get(value.strip().lower()) if isinstance(value, str) else None
+    if match is None:
+        raise ValueError(f"{field} must be one of {', '.join(sorted(allowed))}; got {value!r}.")
+    return match
+
+
+def resolve_id(
+    value: str,
+    records: list[dict],
+    entity: str,
+    id_key: str = "id",
+    name_key: str = "name",
+) -> str:
+    """Resolve a human name to the entity's id ("names in, UUIDs underneath").
+
+    Agents speak in names ("the Invoices queue"); every v7 entity id is a UUID.
+    A value that already parses as a UUID — or equals a record's id — passes
+    straight through. Otherwise match the name case-insensitively and exactly:
+    a miss fails loudly with the closest known names (so the model can correct
+    itself instead of guessing), and a duplicate name fails listing every
+    match's id (silently picking one would act on the wrong entity).
+    """
+    candidate = value.strip() if isinstance(value, str) else value
+    if not candidate:
+        raise ValueError(f"{entity} must be a name or id; got {value!r}.")
+    try:
+        UUID(str(candidate))
+        return str(candidate)
+    except ValueError:
+        pass
+    for record in records:
+        if str(record.get(id_key)) == str(candidate):
+            return str(candidate)
+
+    wanted = str(candidate).casefold()
+    matches = [r for r in records if str(r.get(name_key, "")).casefold() == wanted]
+    if len(matches) == 1:
+        return str(matches[0][id_key])
+    if matches:
+        listed = ", ".join(f"{m[name_key]} ({m[id_key]})" for m in matches)
+        raise ValueError(
+            f"{entity} name {value!r} is ambiguous — {len(matches)} match: "
+            f"{listed}. Pass the id instead."
+        )
+
+    names = sorted({str(r[name_key]) for r in records if r.get(name_key)})
+    close = get_close_matches(str(candidate), names, n=5, cutoff=0.6)
+    hint = (
+        f" Did you mean: {', '.join(close)}?"
+        if close
+        else f" Known {entity}s: {', '.join(names)}."
+        if names
+        else ""
+    )
+    raise ValueError(f"No {entity} named {value!r}.{hint}")
+
+
+def make_cached_scrub(
+    scrubber: Scrubber, maxsize: int = _SCRUB_CACHE_SIZE
+) -> Callable[[str | None], str | None]:
+    """An lru-cached, None-safe text scrub for the tool boundary.
+
+    Scrubbing is deterministic and an LLM client typically re-reads the same
+    rows across calls, so each distinct message runs through the backend (NER
+    under Presidio) once. None and "" pass through untouched — item rows carry
+    ``exceptionReason: null`` by design, and that must survive as null rather
+    than becoming a scrubbed empty string.
+    """
+
+    @lru_cache(maxsize=maxsize)
+    def _scrub(text: str) -> str:
+        return scrubber.scrub(text).text
+
+    def scrub_text(text: str | None) -> str | None:
+        if not text:
+            return text
+        return _scrub(text)
+
+    return scrub_text
