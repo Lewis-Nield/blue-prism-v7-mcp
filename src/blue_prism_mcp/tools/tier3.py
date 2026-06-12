@@ -20,20 +20,26 @@ are underdocumented, which shipping-disabled tolerates — verify both against
 a live estate before ever enabling actions.
 
 Audit args carry ids, names, and dates only — never item payloads or
-exception text (the audit log records entity types, not content).
+exception text (the audit log records entity types, not content); error
+lines record the exception class and HTTP status via audit_detail, never
+the message.
 """
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Callable
 
 from ..governance import (
     UNRETIRE_EXTRA_PERMISSION,
     AuditLog,
+    audit_detail,
     holds,
     resolve_capabilities,
 )
 from .common import resolve_id, validate_iso, validate_uuid
+
+_log = logging.getLogger("blue_prism_mcp.tier3")
 
 _ITEM_ID_HINT = "Use list_queue_items to find the item's id (not its key value)."
 
@@ -54,14 +60,28 @@ def build_tier3_tools(client, audit: AuditLog, permissions: list[str]) -> list[C
             return {"action": action, "dry_run": True, "would": args}
         # The attempt line lands before the write, so no estate mutation can
         # outrun its audit record; an unwritable audit file blocks the action.
+        # Once the write is issued the calculus inverts: the audit can no
+        # longer prevent anything, only misreport it, so post-write audit
+        # failures are logged (stderr — stdout is JSON-RPC) and surfaced
+        # without masking what actually happened to the estate.
         audit.record(action, args, status="attempt")
         try:
             result = execute()
         except Exception as exc:
-            audit.record(action, args, status="error", detail=str(exc))
+            try:
+                audit.record(action, args, status="error", detail=audit_detail(exc))
+            except Exception:
+                _log.exception("audit error line failed for %s", action)
             raise
-        audit.record(action, args, status="success")
-        return {"action": action, "dry_run": False, "result": result}
+        response = {"action": action, "dry_run": False, "result": result}
+        try:
+            audit.record(action, args, status="success")
+        except Exception:
+            # The mutation already happened; raising here would make a
+            # completed action look failed and invite an unsafe retry.
+            _log.exception("audit success line failed for %s", action)
+            response["audit_status"] = "success_line_failed"
+        return response
 
     def retry_queue_item(queue: str, item_id: str, dry_run: bool = True) -> dict:
         """Retry a failed (exceptioned) work queue item by creating a new attempt.

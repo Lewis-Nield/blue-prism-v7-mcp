@@ -428,13 +428,31 @@ class BPClient:
 
         Answers a flat JSON array of permission-name strings (verified against
         the 7.5.1 spec; the endpoint exists from 7.1, so the whole 7.2+ floor
-        has it). The Phase 5 capability resolver reads this once at startup and
-        registers only the action tools the account can actually execute.
+        has it). The Phase 5 capability resolver reads this once at startup
+        and registers only the action tools the account can actually execute,
+        so the shape is validated strictly: a gateway envelope, an error page,
+        or a future schema change must refuse loudly rather than gate the
+        action surface on garbage (a dict would silently iterate as its keys).
         """
-        return self._cached(
-            "user_permissions",
-            lambda: [str(p) for p in self._get("/user/permissions")],
-        )
+
+        def fetch() -> list[str]:
+            body = self._get("/user/permissions")
+            if not isinstance(body, list):
+                raise ValueError(
+                    f"GET /user/permissions returned {type(body).__name__}, "
+                    "expected a JSON array of permission-name strings: "
+                    f"{str(body)[:120]!r}"
+                )
+            bad = [p for p in body if not isinstance(p, str) or not p.strip()]
+            if bad:
+                raise ValueError(
+                    "GET /user/permissions returned entries that are not "
+                    f"non-empty strings: {bad[:5]!r} — expected a JSON array "
+                    "of permission-name strings"
+                )
+            return body
+
+        return self._cached("user_permissions", fetch)
 
     # --- Tier 3 writes ------------------------------------------------------
     # Designed in, shipped disabled: these issue real v7 writes, and the MCP

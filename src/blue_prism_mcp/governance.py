@@ -17,7 +17,10 @@ Two pieces gate every action tool:
    audit record. Audit goes to a file and never stdout (stdio transport:
    stdout is JSON-RPC only), and must never receive message content that
    has not been scrubbed — record entity types, ids, names, and dates,
-   never payload or exception text.
+   never payload or exception text. Error lines therefore carry
+   `audit_detail(exc)` — the exception class and, for HTTP errors, the
+   status code — because exception *messages* can echo request/response
+   content, and estate exception text is a scrub target.
 
 Both fail loud: actions enabled without an audit path, an unwritable audit
 file, or a failed permissions call refuse to start rather than running an
@@ -114,6 +117,20 @@ class AuditLog:
             entry["detail"] = detail
         with self.path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(entry, default=str) + "\n")
+
+
+def audit_detail(exc: BaseException) -> str:
+    """A safe audit `detail` for *exc*: the class name, never the message.
+
+    Exception messages can echo request/response content (estate exception
+    text is a scrub target), so the audit records only the exception class
+    plus, when the exception carries an HTTP response (requests.HTTPError
+    shape, probed duck-typed), the status code.
+    """
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    if status is not None:
+        return f"{type(exc).__name__} (HTTP {status})"
+    return type(exc).__name__
 
 
 def build_audit_log(config) -> AuditLog:

@@ -9,6 +9,7 @@ fixtures — so "the dry run changed nothing" is a real read-back assertion.
 """
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -17,6 +18,7 @@ from blue_prism_mcp.governance import (
     TOOL_PERMISSIONS,
     UNRETIRE_EXTRA_PERMISSION,
     AuditLog,
+    audit_detail,
     build_audit_log,
     holds,
     resolve_capabilities,
@@ -46,12 +48,27 @@ def read_audit(audit: AuditLog) -> list[dict]:
     return [json.loads(line) for line in audit.path.read_text().splitlines()]
 
 
-def tier3(tmp_path, client=None, permissions=None) -> tuple[dict, AuditLog, MockBPClient]:
+def tier3(
+    tmp_path, client=None, permissions=None, audit=None
+) -> tuple[dict, AuditLog, MockBPClient]:
     client = client or MockBPClient()
-    audit = make_audit(tmp_path)
+    audit = audit or make_audit(tmp_path)
     perms = permissions if permissions is not None else list(_DEFAULT_PERMISSIONS)
     tools = build_tier3_tools(client, audit=audit, permissions=perms)
     return {t.__name__: t for t in tools}, audit, client
+
+
+def flaky_audit(tmp_path, fail_on: str) -> AuditLog:
+    """An AuditLog whose write starts failing at a chosen lifecycle status —
+    the disk filling up (or rotation snatching the file) mid-action."""
+
+    class FlakyAudit(AuditLog):
+        def record(self, tool, args, status, detail=None):
+            if status == fail_on:
+                raise OSError("disk full")
+            super().record(tool, args, status, detail)
+
+    return FlakyAudit(tmp_path / "audit.jsonl")
 
 
 # --- Capability resolution ------------------------------------------------------
@@ -335,9 +352,69 @@ class TestRetryQueueItem:
         attempt, error = read_audit(audit)
         assert attempt["status"] == "attempt"
         assert error["status"] == "error"
-        assert error["detail"] == "estate said no"
+        # The detail is the exception class, never the message: estate error
+        # text can echo response content, which is a scrub target.
+        assert error["detail"] == "RuntimeError"
+        assert "estate said no" not in audit.path.read_text()
         assert error["tool"] == "retry_queue_item"
         assert error["args"]["item_id"] == item["id"]
+
+
+class TestAuditDetail:
+    """Error lines carry the exception class (and HTTP status), never the
+    message — exception text can echo response content, a scrub target."""
+
+    def test_records_the_class_name_never_the_message(self):
+        assert audit_detail(RuntimeError("ref AB123456C was rejected")) == "RuntimeError"
+
+    def test_http_errors_add_the_status_code(self):
+        exc = RuntimeError("409 Conflict for url: ...")
+        exc.response = SimpleNamespace(status_code=409)
+        assert audit_detail(exc) == "RuntimeError (HTTP 409)"
+
+    def test_a_response_without_a_status_code_is_just_the_class(self):
+        exc = RuntimeError("boom")
+        exc.response = object()
+        assert audit_detail(exc) == "RuntimeError"
+
+
+class TestPostWriteAuditFailures:
+    """The attempt line is fail-closed (no audit, no write). After the write
+    the calculus inverts: an audit failure can only misreport the estate, so
+    it must never mask what actually happened."""
+
+    def test_a_failing_attempt_line_blocks_the_write(self, tmp_path):
+        tools, _, client = tier3(tmp_path, audit=flaky_audit(tmp_path, "attempt"))
+        item = _exceptioned_item(client)
+        with pytest.raises(OSError, match="disk full"):
+            tools["retry_queue_item"]("Invoices", item["id"], dry_run=False)
+        assert _exceptioned_item(client)["state"] == "Exceptioned"  # unsent
+
+    def test_a_failing_success_line_does_not_mask_a_completed_action(self, tmp_path, caplog):
+        tools, audit, client = tier3(tmp_path, audit=flaky_audit(tmp_path, "success"))
+        item = _exceptioned_item(client)
+        result = tools["retry_queue_item"]("Invoices", item["id"], dry_run=False)
+        # The mutation happened and the result says so — flagged, not raised:
+        # raising would invite a retry of an action that already succeeded.
+        assert result["dry_run"] is False
+        assert result["audit_status"] == "success_line_failed"
+        assert "audit success line failed" in caplog.text
+        (attempt,) = read_audit(audit)
+        assert attempt["status"] == "attempt"
+
+    def test_a_failing_error_line_does_not_mask_the_original_error(self, tmp_path, caplog):
+        class FailingClient(MockBPClient):
+            def retry_queue_item(self, queue_id, item_id):
+                raise RuntimeError("estate said no")
+
+        client = FailingClient()
+        tools, audit, _ = tier3(tmp_path, client=client, audit=flaky_audit(tmp_path, "error"))
+        item = _exceptioned_item(client)
+        with pytest.raises(RuntimeError, match="estate said no"):
+            tools["retry_queue_item"]("Invoices", item["id"], dry_run=False)
+        assert "audit error line failed" in caplog.text
+        (attempt,) = read_audit(audit)
+        assert attempt["status"] == "attempt"
 
 
 class TestDeferQueueItem:

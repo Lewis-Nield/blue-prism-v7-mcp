@@ -125,8 +125,12 @@ a write, and every one fails loud rather than degrading:
   (UTC timestamp, tool, args, status: startup/dry_run/attempt/success/error),
   and the *attempt* line is written before the write is issued, so no estate
   mutation can outrun its audit record. Audit args carry ids, names, and
-  dates only — never payloads or exception text — and the file is touched at
-  startup so an unwritable path fails before the first action. Never stdout.
+  dates only — never payloads or exception text (error lines record the
+  exception class and HTTP status, not the message) — and the file is touched
+  at startup so an unwritable path fails before the first action. Never
+  stdout. Post-write audit failures are flagged and logged to stderr rather
+  than raised: once the write is issued an audit failure can only misreport
+  the estate, and a completed action must never look failed.
 - **Dry-run by default.** Every action tool takes `dry_run: bool = True`: the
   default call resolves names, validates inputs, and returns the exact write
   it *would* issue without sending anything. Mutating the estate requires an

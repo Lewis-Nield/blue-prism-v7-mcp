@@ -386,8 +386,8 @@ class TestExtendedReads:
         session.get.assert_called_once()  # cached
 
     def test_get_user_permissions(self):
-        # A flat array of permission-name strings (7.5.1 spec) — coerced to
-        # str defensively, cached like every read, consumed by the Phase 5
+        # A flat array of permission-name strings (7.5.1 spec) — validated
+        # strictly, cached like every read, consumed by the Phase 5
         # capability resolver at startup.
         client, session = make_client()
         session.get.return_value = _resp(["Execute Process", "Control Resource"])
@@ -395,6 +395,21 @@ class TestExtendedReads:
         assert session.get.call_args.args[0].endswith("/user/permissions")
         client.get_user_permissions()
         session.get.assert_called_once()  # cached
+
+    def test_user_permissions_must_be_a_json_array(self):
+        # Capability gating must never run over garbage: a gateway envelope
+        # (or any dict) would silently iterate as its keys, so the shape
+        # refuses loudly instead.
+        client, session = make_client()
+        session.get.return_value = _resp({"permissions": ["Edit Schedule"]})
+        with pytest.raises(ValueError, match="returned dict"):
+            client.get_user_permissions()
+
+    def test_user_permissions_entries_must_be_non_empty_strings(self):
+        client, session = make_client()
+        session.get.return_value = _resp([{"name": "Edit Schedule"}, "  "])
+        with pytest.raises(ValueError, match="non-empty strings"):
+            client.get_user_permissions()
 
 
 # --- Session log: the logslight probe ------------------------------------------
