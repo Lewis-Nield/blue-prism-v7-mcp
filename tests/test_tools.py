@@ -10,6 +10,7 @@ HTTP. Scrub assertions use a marker scrubber that stamps every message, so
 import pytest
 import requests
 
+from blue_prism_mcp.config import BPConfig
 from blue_prism_mcp.mock import MockBPClient
 from blue_prism_mcp.pii import NullScrubber, ScrubResult
 from blue_prism_mcp.tools import (
@@ -707,7 +708,7 @@ class FakeApp:
 class TestRegisterTools:
     def test_registers_all_eleven_tools_by_name(self):
         app = FakeApp()
-        names = register_tools(app, MockBPClient(), NullScrubber())
+        names = register_tools(app, MockBPClient(), NullScrubber(), config=BPConfig())
         assert names == [
             "list_queues",
             "get_queue",
@@ -726,7 +727,7 @@ class TestRegisterTools:
     def test_every_tool_carries_a_description(self):
         # The docstring IS the tool description an LLM client selects on.
         app = FakeApp()
-        register_tools(app, MockBPClient(), NullScrubber())
+        register_tools(app, MockBPClient(), NullScrubber(), config=BPConfig())
         for fn in app.registered:
             assert fn.__doc__ and len(fn.__doc__.strip()) > 80, fn.__name__
 

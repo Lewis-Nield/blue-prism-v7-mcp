@@ -8,6 +8,7 @@ All tool tests run over MockBPClient, whose writes mutate the in-memory
 fixtures — so "the dry run changed nothing" is a real read-back assertion.
 """
 
+import inspect
 import json
 from types import SimpleNamespace
 
@@ -54,7 +55,7 @@ def tier3(
     client = client or MockBPClient()
     audit = audit or make_audit(tmp_path)
     perms = permissions if permissions is not None else list(_DEFAULT_PERMISSIONS)
-    tools = build_tier3_tools(client, audit=audit, permissions=perms)
+    tools, _ = build_tier3_tools(client, audit=audit, permissions=perms)
     return {t.__name__: t for t in tools}, audit, client
 
 
@@ -229,6 +230,29 @@ class TestBuildTier3Tools:
 
     def test_permission_map_covers_exactly_the_built_tools(self):
         assert set(TOOL_PERMISSIONS) == ALL_ACTION_TOOLS
+
+    def test_every_action_tool_defaults_to_dry_run(self, tmp_path):
+        # Structural, not per-tool: a future action tool that forgets the
+        # dry-run default fails here, not in a post-incident review.
+        tools, _, _ = tier3(tmp_path)
+        for name, fn in tools.items():
+            assert inspect.signature(fn).parameters["dry_run"].default is True, name
+
+    def test_the_withheld_map_names_each_missing_clause(self, tmp_path):
+        # The factory derives the allowed/withheld split once; the withheld
+        # half is what register_tools puts on the startup audit line.
+        tools, withheld = build_tier3_tools(
+            MockBPClient(), audit=make_audit(tmp_path), permissions=QUEUE_ONLY
+        )
+        assert {t.__name__ for t in tools} == {"retry_queue_item", "defer_queue_item"}
+        assert withheld == {
+            "set_schedule_enabled": ["Edit Schedule", "Retire Schedule"],
+            "start_process": [
+                "Create Process | Edit Process | Execute Process",
+                "Control Resource",
+            ],
+            "trigger_schedule": ["Edit Schedule"],
+        }
 
 
 # --- The dry-run / audit contract --------------------------------------------------
@@ -430,6 +454,18 @@ class TestDeferQueueItem:
         with pytest.raises(ValueError, match="defer_until is required"):
             tools["defer_queue_item"]("Invoices", _exceptioned_item(client)["id"], 1, None)
 
+    @pytest.mark.parametrize("bad", [0, -1, "3", 1.5, True, None])
+    def test_attempt_number_must_be_a_positive_integer(self, bad, tmp_path):
+        # Deferral is attempt-scoped; a malformed attempt number must fail
+        # here naming the field, not surface as an opaque API 400 — and must
+        # never look valid inside a dry-run "would" payload.
+        tools, audit, client = tier3(tmp_path)
+        with pytest.raises(ValueError, match="attempt_number"):
+            tools["defer_queue_item"](
+                "Invoices", _exceptioned_item(client)["id"], bad, "2026-04-01T09:00:00"
+            )
+        assert read_audit(audit) == []  # validation failures never reach the audit
+
     def test_dry_run_returns_the_full_call_unsent(self, tmp_path):
         tools, audit, client = tier3(tmp_path)
         item = _exceptioned_item(client)
@@ -578,9 +614,16 @@ READ_TOOLS = [
 
 
 class TestRegisterToolsGate:
-    def test_no_config_registers_reads_only(self):
-        names = register_tools(FakeApp(), MockBPClient(), NullScrubber())
+    def test_default_config_registers_reads_only(self):
+        names = register_tools(FakeApp(), MockBPClient(), NullScrubber(), config=BPConfig())
         assert names == READ_TOOLS
+
+    def test_config_is_required_not_optional(self):
+        # A server entrypoint that forgot the config must fail at startup —
+        # not silently register a read-only surface with BP_ENABLE_ACTIONS
+        # ignored.
+        with pytest.raises(TypeError):
+            register_tools(FakeApp(), MockBPClient(), NullScrubber())
 
     def test_actions_disabled_registers_reads_only(self, tmp_path):
         config = BPConfig(enable_actions=False, audit_log_path=str(tmp_path / "a.jsonl"))

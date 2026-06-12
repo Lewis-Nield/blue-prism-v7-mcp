@@ -31,22 +31,35 @@ import logging
 from typing import Any, Callable
 
 from ..governance import (
+    TOOL_PERMISSIONS,
     UNRETIRE_EXTRA_PERMISSION,
     AuditLog,
     audit_detail,
     holds,
-    resolve_capabilities,
+    unsatisfied_clauses,
 )
-from .common import resolve_id, validate_iso, validate_uuid
+from .common import resolve_id, validate_iso, validate_positive_int, validate_uuid
 
 _log = logging.getLogger("blue_prism_mcp.tier3")
 
 _ITEM_ID_HINT = "Use list_queue_items to find the item's id (not its key value)."
 
 
-def build_tier3_tools(client, audit: AuditLog, permissions: list[str]) -> list[Callable]:
-    """Build the action tools the account's *permissions* allow, audited via *audit*."""
-    allowed = resolve_capabilities(permissions)
+def build_tier3_tools(
+    client, audit: AuditLog, permissions: list[str]
+) -> tuple[list[Callable], dict[str, list[str]]]:
+    """Build the action tools *permissions* allow, audited via *audit*.
+
+    Returns the allowed tools plus the withheld map — every withheld tool's
+    unsatisfied permission clauses. The split is derived once, here, so what
+    registers and what the startup audit line reports can never disagree.
+    """
+    clauses_missing = {tool: unsatisfied_clauses(tool, permissions) for tool in TOOL_PERMISSIONS}
+    allowed = {tool for tool, missing in clauses_missing.items() if not missing}
+    withheld = {tool: missing for tool, missing in sorted(clauses_missing.items()) if missing}
+    # Resolved once at build time: a tool's behavior is fixed at registration,
+    # never coupled to later mutation of the shared permissions list.
+    can_unretire = holds(permissions, UNRETIRE_EXTRA_PERMISSION)
 
     def _run(
         action: str,
@@ -132,6 +145,11 @@ def build_tier3_tools(client, audit: AuditLog, permissions: list[str]) -> list[C
         relied on (see DESIGN.md "Needs day-one verification").
         """
         validate_iso(defer_until, "defer_until", required=True)
+        attempt_number = validate_positive_int(
+            attempt_number,
+            "attempt_number",
+            hint="Use the item's current attempt number from list_queue_items.",
+        )
         queue_id = resolve_id(queue, client.get_queues(), entity="queue")
         item_id = validate_uuid(item_id, "item_id", hint=_ITEM_ID_HINT)
         args = {
@@ -201,7 +219,7 @@ def build_tier3_tools(client, audit: AuditLog, permissions: list[str]) -> list[C
         before this tool is relied on (see DESIGN.md "Needs day-one
         verification").
         """
-        if enabled and not holds(permissions, UNRETIRE_EXTRA_PERMISSION):
+        if enabled and not can_unretire:
             raise ValueError(
                 "Unretiring a schedule requires the Create Schedule permission, "
                 "which this service account does not hold — set_schedule_enabled "
@@ -248,4 +266,4 @@ def build_tier3_tools(client, audit: AuditLog, permissions: list[str]) -> list[C
         set_schedule_enabled,
         trigger_schedule,
     ]
-    return [tool for tool in tools if tool.__name__ in allowed]
+    return [tool for tool in tools if tool.__name__ in allowed], withheld
