@@ -423,10 +423,42 @@ class BPClient:
             lambda: self._get("/dashboards/currentLimitsAndUsage"),
         )
 
+    def get_user_permissions(self) -> list[str]:
+        """GET /user/permissions — the service account's Blue Prism permissions.
+
+        Answers a flat JSON array of permission-name strings (verified against
+        the 7.5.1 spec; the endpoint exists from 7.1, so the whole 7.2+ floor
+        has it). The Phase 5 capability resolver reads this once at startup
+        and registers only the action tools the account can actually execute,
+        so the shape is validated strictly: a gateway envelope, an error page,
+        or a future schema change must refuse loudly rather than gate the
+        action surface on garbage (a dict would silently iterate as its keys).
+        """
+
+        def fetch() -> list[str]:
+            body = self._get("/user/permissions")
+            if not isinstance(body, list):
+                raise ValueError(
+                    f"GET /user/permissions returned {type(body).__name__}, "
+                    "expected a JSON array of permission-name strings: "
+                    f"{str(body)[:120]!r}"
+                )
+            bad = [p for p in body if not isinstance(p, str) or not p.strip()]
+            if bad:
+                raise ValueError(
+                    "GET /user/permissions returned entries that are not "
+                    f"non-empty strings: {bad[:5]!r} — expected a JSON array "
+                    "of permission-name strings"
+                )
+            return body
+
+        return self._cached("user_permissions", fetch)
+
     # --- Tier 3 writes ------------------------------------------------------
-    # Designed in, shipped disabled: these issue real v7 writes, but no MCP tool
-    # exposes them until Phase 5 wires the enable_actions gate, capability
-    # resolver, audit log, and dry-run around them. Each mutates estate state, so
+    # Designed in, shipped disabled: these issue real v7 writes, and the MCP
+    # tools over them (tools/tier3.py) register only behind the enable_actions
+    # gate, capability resolver, audit log, and dry-run default (see
+    # governance.py). Each mutates estate state, so
     # _write drops the read cache afterwards to avoid serving a stale view.
     # Paths and bodies follow the verified 7.5.1 spec (all writes exist from
     # 7.2; session create/control from 7.1) — see DESIGN.md's ground-truth

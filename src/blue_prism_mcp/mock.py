@@ -249,6 +249,18 @@ _DEFAULT_SESSION_LOGS: dict[str, list[dict]] = {
     ],
 }
 
+# The documented permission names for every Tier 3 write (see DESIGN.md's
+# ground truth). The default account can do everything, so tool tests exercise
+# the full action surface; pass a narrower list to test capability gating.
+_DEFAULT_PERMISSIONS: list[str] = [
+    "Full Access to Queue Management",
+    "Execute Process",
+    "Control Resource",
+    "Edit Schedule",
+    "Retire Schedule",
+    "Create Schedule",
+]
+
 _DEFAULT_LIMITS_AND_USAGE: dict = {
     "publishedProcessesLimit": None,  # null = unlimited, per the spec
     "publishedProcessesUsed": 2,
@@ -274,6 +286,7 @@ class MockBPClient:
         queue_items: list[dict] | None = None,
         session_logs: dict[str, list[dict]] | None = None,
         limits_and_usage: dict | None = None,
+        permissions: list[str] | None = None,
     ) -> None:
         self._resources = resources if resources is not None else list(_DEFAULT_RESOURCES)
         self._queues = queues if queues is not None else [dict(q) for q in _DEFAULT_QUEUES]
@@ -293,6 +306,7 @@ class MockBPClient:
         self._limits_and_usage = (
             limits_and_usage if limits_and_usage is not None else dict(_DEFAULT_LIMITS_AND_USAGE)
         )
+        self._permissions = permissions if permissions is not None else list(_DEFAULT_PERMISSIONS)
         self._session_counter = 0
 
     def clear_cache(self) -> None:
@@ -355,6 +369,9 @@ class MockBPClient:
 
     def get_current_limits_and_usage(self) -> dict:
         return dict(self._limits_and_usage)
+
+    def get_user_permissions(self) -> list[str]:
+        return list(self._permissions)
 
     # --- Tier 3 writes (mutate the in-memory fixtures) ----------------------
     # Return shapes mirror the live client: retry answers {"attemptId": n},

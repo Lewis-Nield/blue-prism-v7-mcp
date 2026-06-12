@@ -131,6 +131,39 @@ def validate_choice(value: str, field: str, allowed: frozenset[str]) -> str:
     return match
 
 
+def validate_uuid(value: str, field: str, hint: str = "") -> str:
+    """Return *value* if it parses as a UUID; fail loudly with *hint* otherwise.
+
+    For ids that cannot be name-resolved — queue items have no unscoped
+    listing to resolve names against — the tool can still catch a model
+    passing a key value or display text where the API needs the UUID.
+    """
+    try:
+        UUID(str(value).strip())
+    except (ValueError, AttributeError, TypeError):
+        raise ValueError(
+            f"{field} must be a UUID; got {value!r}.{f' {hint}' if hint else ''}"
+        ) from None
+    return str(value).strip()
+
+
+def validate_positive_int(value: Any, field: str, hint: str = "") -> int:
+    """Return *value* if it is an integer of 1 or higher; fail loudly otherwise.
+
+    Counts like attempt numbers arrive as whatever JSON carried — a float, a
+    quoted "3", a stray boolean — and the API would reject them server-side
+    with an opaque 400. bool is excluded explicitly (True is an int in
+    Python): a model passing true where a count belongs made a mistake worth
+    naming, not coercing.
+    """
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(
+            f"{field} must be a positive integer (1 or higher); got {value!r}."
+            f"{f' {hint}' if hint else ''}"
+        )
+    return value
+
+
 def resolve_id(
     value: str,
     records: list[dict],

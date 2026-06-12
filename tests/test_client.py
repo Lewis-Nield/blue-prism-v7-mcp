@@ -385,6 +385,32 @@ class TestExtendedReads:
         client.get_current_limits_and_usage()
         session.get.assert_called_once()  # cached
 
+    def test_get_user_permissions(self):
+        # A flat array of permission-name strings (7.5.1 spec) — validated
+        # strictly, cached like every read, consumed by the Phase 5
+        # capability resolver at startup.
+        client, session = make_client()
+        session.get.return_value = _resp(["Execute Process", "Control Resource"])
+        assert client.get_user_permissions() == ["Execute Process", "Control Resource"]
+        assert session.get.call_args.args[0].endswith("/user/permissions")
+        client.get_user_permissions()
+        session.get.assert_called_once()  # cached
+
+    def test_user_permissions_must_be_a_json_array(self):
+        # Capability gating must never run over garbage: a gateway envelope
+        # (or any dict) would silently iterate as its keys, so the shape
+        # refuses loudly instead.
+        client, session = make_client()
+        session.get.return_value = _resp({"permissions": ["Edit Schedule"]})
+        with pytest.raises(ValueError, match="returned dict"):
+            client.get_user_permissions()
+
+    def test_user_permissions_entries_must_be_non_empty_strings(self):
+        client, session = make_client()
+        session.get.return_value = _resp([{"name": "Edit Schedule"}, "  "])
+        with pytest.raises(ValueError, match="non-empty strings"):
+            client.get_user_permissions()
+
 
 # --- Session log: the logslight probe ------------------------------------------
 
@@ -572,6 +598,16 @@ class TestMockExtended:
         usage = MockBPClient().get_current_limits_and_usage()
         assert "concurrentSessionsUsed" in usage
         assert "concurrentSessionsLimit" in usage
+
+    def test_get_user_permissions_defaults_to_the_full_action_surface(self):
+        permissions = MockBPClient().get_user_permissions()
+        assert "Full Access to Queue Management" in permissions
+        assert "Edit Schedule" in permissions
+
+    def test_get_user_permissions_returns_a_copy_and_accepts_seeding(self):
+        client = MockBPClient(permissions=["Edit Schedule"])
+        client.get_user_permissions().append("INJECTED")
+        assert client.get_user_permissions() == ["Edit Schedule"]
 
     def test_get_queue_items_filters_by_queue_state_and_dates(self):
         client = MockBPClient()

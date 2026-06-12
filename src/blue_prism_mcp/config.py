@@ -61,6 +61,11 @@ class BPConfig:
     # Feature flags.
     enable_actions: bool = False  # gates the Tier 3 control tools
 
+    # JSON-lines audit file for the action surface. REQUIRED when
+    # enable_actions is true (build_audit_log fails loud without it) — an
+    # enabled action surface must never run unaudited. Never stdout.
+    audit_log_path: str = ""
+
     # PII scrubbing backend: "null" (pass-through, the light-install default),
     # "regex" (zero-dependency UK FS patterns), or "presidio" (NER, needs the
     # [pii] extra). Selection FAILS LOUD at scrubber construction — see
@@ -84,6 +89,10 @@ class BPConfig:
         # site stays a plain concatenation. (frozen=True → object.__setattr__.)
         object.__setattr__(self, "base_url", self.base_url.rstrip("/"))
         object.__setattr__(self, "auth_url", self.auth_url.rstrip("/"))
+        # Same rule for the audit path: whitespace a human pastes around an
+        # env value must not change which file the audit lands in (or make a
+        # space-only value look configured).
+        object.__setattr__(self, "audit_log_path", self.audit_log_path.strip())
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> "BPConfig":
@@ -105,6 +114,7 @@ class BPConfig:
             page_token_param=e.get("BP_API_PAGE_TOKEN_PARAM", "pagingToken"),
             page_offset_param=e.get("BP_API_PAGE_OFFSET_PARAM", "startIndex"),
             enable_actions=e.get("BP_ENABLE_ACTIONS", "false").lower() == "true",
+            audit_log_path=e.get("BP_AUDIT_LOG_PATH", ""),
             # Normalised: " ReGeX " is an obvious 'regex', and rejecting it
             # would be pedantry, not fail-loud rigour. Unknown values still
             # refuse to start in build_scrubber.
