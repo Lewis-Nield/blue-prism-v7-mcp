@@ -20,7 +20,7 @@ Actively developed against the phased plan in [DESIGN.md](DESIGN.md):
 - [x] Phase 3 — Pluggable PII (`Scrubber` protocol; null / regex / Presidio tiers)
 - [x] Phase 4 — Tier 1 + 2 tools (the envelope contract)
 - [x] Phase 5 — Governance scaffold + Tier 3, shipped disabled
-- [ ] Phase 6 — Server + packaging
+- [x] Phase 6 — Server + packaging
 - [ ] Phase 7 — Validate (stdio handshake, end-to-end, coverage gate)
 
 ## Why v7 Enterprise
@@ -41,15 +41,33 @@ pip install "blue-prism-mcp[pii]"     # + Presidio PII scrubbing
 python -m spacy download en_core_web_sm   # if using [pii] (lg/_trf: better recall)
 ```
 
+## Run
+
+The `blue-prism-mcp` console script speaks the MCP stdio transport — point any
+MCP client at it (see [DEPLOYMENT.md](DEPLOYMENT.md) for a Claude Desktop
+config example and the full rollout guide). To try the entire tool surface
+with no estate and no credentials:
+
+```bash
+BP_DATA_SOURCE=mock blue-prism-mcp
+```
+
+Live mode fails loud at startup — missing connection settings, an unloadable
+PII backend, or a missing audit path refuse to start rather than serve a
+degraded surface.
+
 ## Configuration
 
-Per-deployment, via environment (see `.env.example` once published):
+Per-deployment, via environment ([.env.example](.env.example) is the annotated
+template; [DEPLOYMENT.md](DEPLOYMENT.md) covers service-account permissions and
+day-one verification):
 
 | Variable | Purpose |
 |----------|---------|
 | `BP_API_BASE_URL` | v7 API base, e.g. `https://<server>/api/v7` |
 | `BP_AUTH_URL` | Blue Prism Authentication Server, e.g. `https://<auth-server>` |
 | `BP_CLIENT_ID` / `BP_CLIENT_SECRET` | OAuth2 client-credentials (service account) |
+| `BP_DATA_SOURCE` | `live` (default) / `mock` — in-memory fixtures, no estate needed |
 | `BP_API_VERIFY_SSL` | TLS verification (default `true`) |
 | `BP_API_PAGING_MODE` | `token` (v7 default) / `offset` / `none` / `auto` |
 | `BP_ENABLE_ACTIONS` | gate the Tier 3 control tools (default `false`) |

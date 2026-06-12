@@ -8,4 +8,4 @@ Layer map (see DESIGN.md for the full design):
     server.py   — FastMCP stdio server + console entrypoint (Phase 6)
 """
 
-__version__ = "0.0.0"
+__version__ = "0.1.0"

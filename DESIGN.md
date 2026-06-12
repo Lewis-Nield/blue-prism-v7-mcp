@@ -64,6 +64,14 @@ library it was always implicitly built on.
   for correlation-preserving numbered pseudonyms (`[PERSON_1]`) later.
 - **Insight views are separate tools**, not parameters on the primitives — tight,
   single-purpose tool descriptions drive better model tool-selection.
+- **Mock mode is a first-class run mode** (`BP_DATA_SOURCE=mock`): the server
+  runs the full tool surface over `MockBPClient`'s in-memory fixtures with no
+  estate and no credentials. It exists so the artifact can be evaluated
+  end-to-end in any MCP client risk-free (and so Phase 7's validation needs no
+  live estate). Live mode validates connection settings at startup — the
+  client is lazy, so without that check a misconfigured server would register
+  a tool surface where every call fails. Governance does not relax in mock
+  mode: enabling actions still requires the audit path.
 - **Session-log read is in v1.** `get_session_log` is the highest-value agentic
   read ("why did this run fail?"). It is a second PII vector beyond exception
   messages (stage data can carry item payloads) and therefore routes through the

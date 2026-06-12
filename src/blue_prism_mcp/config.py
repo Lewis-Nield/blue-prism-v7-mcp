@@ -61,6 +61,13 @@ class BPConfig:
     # Feature flags.
     enable_actions: bool = False  # gates the Tier 3 control tools
 
+    # What the server runs against: "live" (BPClient over the v7 REST API) or
+    # "mock" (MockBPClient — in-memory fixtures, no estate, no credentials).
+    # Mock mode exists so the server can be evaluated end-to-end in an MCP
+    # client with zero estate access. Unknown values fail loud in the server's
+    # client factory, mirroring how pii_backend fails in build_scrubber.
+    data_source: str = "live"
+
     # JSON-lines audit file for the action surface. REQUIRED when
     # enable_actions is true (build_audit_log fails loud without it) — an
     # enabled action surface must never run unaudited. Never stdout.
@@ -87,8 +94,15 @@ class BPConfig:
         # '.../v7//resources' as a distinct path and fail it. Normalise once
         # here, at the single boundary where the values enter, so every call
         # site stays a plain concatenation. (frozen=True → object.__setattr__.)
-        object.__setattr__(self, "base_url", self.base_url.rstrip("/"))
-        object.__setattr__(self, "auth_url", self.auth_url.rstrip("/"))
+        object.__setattr__(self, "base_url", self.base_url.strip().rstrip("/"))
+        object.__setattr__(self, "auth_url", self.auth_url.strip().rstrip("/"))
+        # Credentials: whitespace around a pasted value is never part of an
+        # OAuth client id/secret, but it IS truthy — left in place it would
+        # sail past the server's missing-settings check and fail only at the
+        # first token fetch. Stripped here, a space-only value is correctly
+        # reported as missing at startup.
+        object.__setattr__(self, "client_id", self.client_id.strip())
+        object.__setattr__(self, "client_secret", self.client_secret.strip())
         # Same rule for the audit path: whitespace a human pastes around an
         # env value must not change which file the audit lands in (or make a
         # space-only value look configured).
@@ -114,6 +128,9 @@ class BPConfig:
             page_token_param=e.get("BP_API_PAGE_TOKEN_PARAM", "pagingToken"),
             page_offset_param=e.get("BP_API_PAGE_OFFSET_PARAM", "startIndex"),
             enable_actions=e.get("BP_ENABLE_ACTIONS", "false").lower() == "true",
+            # Normalised like pii_backend below: casing/whitespace noise is
+            # forgiven, unknown values still refuse to start in build_client.
+            data_source=e.get("BP_DATA_SOURCE", "live").strip().lower(),
             audit_log_path=e.get("BP_AUDIT_LOG_PATH", ""),
             # Normalised: " ReGeX " is an obvious 'regex', and rejecting it
             # would be pedantry, not fail-loud rigour. Unknown values still
