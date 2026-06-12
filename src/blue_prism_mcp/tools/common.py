@@ -131,6 +131,22 @@ def validate_choice(value: str, field: str, allowed: frozenset[str]) -> str:
     return match
 
 
+def validate_uuid(value: str, field: str, hint: str = "") -> str:
+    """Return *value* if it parses as a UUID; fail loudly with *hint* otherwise.
+
+    For ids that cannot be name-resolved — queue items have no unscoped
+    listing to resolve names against — the tool can still catch a model
+    passing a key value or display text where the API needs the UUID.
+    """
+    try:
+        UUID(str(value).strip())
+    except (ValueError, AttributeError, TypeError):
+        raise ValueError(
+            f"{field} must be a UUID; got {value!r}.{f' {hint}' if hint else ''}"
+        ) from None
+    return str(value).strip()
+
+
 def resolve_id(
     value: str,
     records: list[dict],

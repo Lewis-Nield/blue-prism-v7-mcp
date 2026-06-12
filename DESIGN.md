@@ -110,6 +110,28 @@ actions are enabled.
 - `start_process`
 - `set_schedule_enabled` / `trigger_schedule`
 
+**The governance contract (Phase 5).** Three layers sit between the model and
+a write, and every one fails loud rather than degrading:
+- **Capability gating.** At registration the resolver reads
+  `GET /user/permissions` and registers only the action tools the service
+  account's permissions satisfy (the per-endpoint requirements are in the
+  ground truth below) — a tool the account cannot execute does not exist as
+  far as the model is concerned. A failed permissions call refuses to start.
+  Unretiring a schedule needs `Create Schedule` on top of the retire pair;
+  that extra is enforced at call time so accounts that can only retire still
+  get the tool.
+- **Audit.** Enabling actions requires `audit_log_path` (`BP_AUDIT_LOG_PATH`)
+  — there is no default and no opt-out. Every invocation appends a JSON line
+  (UTC timestamp, tool, args, status: startup/dry_run/attempt/success/error),
+  and the *attempt* line is written before the write is issued, so no estate
+  mutation can outrun its audit record. Audit args carry ids, names, and
+  dates only — never payloads or exception text — and the file is touched at
+  startup so an unwritable path fails before the first action. Never stdout.
+- **Dry-run by default.** Every action tool takes `dry_run: bool = True`: the
+  default call resolves names, validates inputs, and returns the exact write
+  it *would* issue without sending anything. Mutating the estate requires an
+  explicit `dry_run=False`.
+
 The originally planned `mark_exception_resolved` is **dropped**: the v7 item
 lifecycle is attempt-based (retry creates a new attempt; PATCH/DELETE modify
 one) and the API has no "resolve" semantic to map it to.
@@ -193,18 +215,32 @@ Wire-level contract (identical across versions):
   No next-run field exists anywhere in the API; per-run history (a status
   enum, start/end, duration) lives in `GET /schedules/logs`. v1
   `list_schedules` returns definitions; run-log enrichment is deferred.
-- **`GET /user/permissions` (7.1+)** returns the service account's Blue Prism
-  permissions; the Phase 5 capability resolver queries it at startup and
-  registers only the action tools the account can actually execute.
-- Every endpoint documents required Blue Prism user permissions (e.g. queue
-  writes need *Full Access to Queue Management*) — deployment docs (Phase 6)
-  must cover service-account permission mapping.
+- **`GET /user/permissions` (7.1+) answers a flat JSON array of
+  permission-name strings** — no envelope, no paging (verified on 7.5.1; the
+  spec's example shows placeholder names). The Phase 5 capability resolver
+  queries it at startup and registers only the action tools the account can
+  actually execute.
+- **Per-write permission requirements** (from the endpoint descriptions —
+  the spec defines no permissions enum, so these display names are prose):
+
+  | Action | Documented requirement |
+  |--------|------------------------|
+  | `retry_queue_item` / `defer_queue_item` | `Full Access to Queue Management` |
+  | `start_process` (session create + control) | one of `Create Process` \| `Edit Process` \| `Execute Process`, **and** `Control Resource` |
+  | `set_schedule_enabled` — retire | `Edit Schedule` **and** `Retire Schedule` |
+  | `set_schedule_enabled` — unretire | retire pair **and** `Create Schedule` |
+  | `trigger_schedule` | `Edit Schedule` |
+
+  Deployment docs (Phase 6) must cover service-account permission mapping.
 
 **Needs day-one verification against a live estate** (the spec underdocuments
-both): the JSON Patch paths accepted by the attempt PATCH (`/deferredDate` is
-inferred from the item schema), and the retire/unretire body for the schedule
-PUT (`ScheduleSummary` carries `isRetired` and the PUT documents retire
-permissions, but the published request schema omits the flag).
+all three): the JSON Patch paths accepted by the attempt PATCH
+(`/deferredDate` is inferred from the item schema); the retire/unretire body
+for the schedule PUT (`ScheduleSummary` carries `isRetired` and the PUT
+documents retire permissions, but the published request schema omits the
+flag); and the exact permission strings `GET /user/permissions` returns —
+the capability resolver matches the documented display names
+case-insensitively, but the spec never shows a real response.
 
 ---
 
@@ -221,7 +257,8 @@ permissions, but the published request schema omits the flag).
    Applied at the exception-message and session-log boundaries.
 4. **Tools** (`tools/`) — the three tiers over `BPClient`, carrying the envelope
    contract.
-5. **Governance** — capability gating, audit, and dry-run; gates Tier 3.
+5. **Governance** (`governance.py`) — capability gating, audit, and dry-run;
+   gates Tier 3.
 6. **Server** (`server.py`) — the FastMCP stdio server and console entrypoint.
 
 ### The client decoupling

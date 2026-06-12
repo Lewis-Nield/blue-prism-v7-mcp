@@ -15,6 +15,7 @@ def test_from_env_defaults_with_empty_environment():
     assert cfg.page_size == 1000
     assert cfg.page_size_param == "itemsPerPage"
     assert cfg.enable_actions is False
+    assert cfg.audit_log_path == ""
     assert cfg.pii_backend == "null"
     assert cfg.pii_spacy_model == "en_core_web_sm"
     assert cfg.pii_custom_patterns == ()
@@ -38,6 +39,7 @@ def test_from_env_reads_all_fields():
             "BP_API_PAGE_TOKEN_PARAM": "cursor",
             "BP_API_PAGE_OFFSET_PARAM": "skip",
             "BP_ENABLE_ACTIONS": "true",
+            "BP_AUDIT_LOG_PATH": "/var/log/blue-prism-mcp/audit.jsonl",
             "BP_PII_BACKEND": "regex",
             "BP_PII_SPACY_MODEL": "en_core_web_lg",
             "BP_PII_CUSTOM_PATTERNS": '[{"name": "CLIENT_REF", "pattern": "CLT-\\\\d{8}"}]',
@@ -58,6 +60,7 @@ def test_from_env_reads_all_fields():
     assert cfg.page_token_param == "cursor"
     assert cfg.page_offset_param == "skip"
     assert cfg.enable_actions is True
+    assert cfg.audit_log_path == "/var/log/blue-prism-mcp/audit.jsonl"
     assert cfg.pii_backend == "regex"
     assert cfg.pii_spacy_model == "en_core_web_lg"
     assert cfg.pii_custom_patterns == (("CLIENT_REF", "CLT-\\d{8}"),)
@@ -91,6 +94,19 @@ def test_url_trailing_slashes_are_stripped():
     assert (
         BPConfig.from_env(env={"BP_API_BASE_URL": "https://bp.example/"}).base_url
         == "https://bp.example"
+    )
+
+
+def test_audit_log_path_whitespace_is_stripped():
+    # Pasted whitespace must not change which file the audit lands in, and a
+    # space-only value must read as unconfigured (build_audit_log fails loud).
+    assert BPConfig(audit_log_path=" /var/log/audit.jsonl ").audit_log_path == (
+        "/var/log/audit.jsonl"
+    )
+    assert BPConfig(audit_log_path="   ").audit_log_path == ""
+    assert (
+        BPConfig.from_env(env={"BP_AUDIT_LOG_PATH": " audit.jsonl "}).audit_log_path
+        == "audit.jsonl"
     )
 
 
