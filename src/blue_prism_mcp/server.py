@@ -37,6 +37,10 @@ _log = logging.getLogger("blue_prism_mcp.server")
 
 SERVER_NAME = "blue-prism-mcp"
 
+# Marks the stderr handler _configure_logging installs, so a re-entrant call
+# recognises its own handler and stays idempotent instead of stacking more.
+_OUR_HANDLER_MARK = "_blue_prism_mcp_handler"
+
 # Connection settings a LIVE deployment cannot run without, as (config
 # attribute, environment variable) pairs — the error names the env vars
 # because the environment is the deployment contract (BPConfig.from_env).
@@ -50,10 +54,17 @@ _REQUIRED_CONNECTION_SETTINGS = (
 # Expected startup misconfigurations, converted by main() into a clean
 # one-line SystemExit instead of a traceback: config errors and the strict
 # permissions-shape check (ValueError), an unknown/unloadable PII backend
-# (ScrubberUnavailableError), an untouchable audit file (OSError), and a
-# failed GET /user/permissions (RequestException). Anything else is a bug
-# and tracebacks normally.
-_STARTUP_ERRORS = (ValueError, ScrubberUnavailableError, OSError, requests.RequestException)
+# (ScrubberUnavailableError), an untouchable audit file (OSError), a failed
+# GET /user/permissions (RequestException), and an incompatible mcp release
+# that no longer exposes the serverInfo.version seam (RuntimeError, raised by
+# _apply_server_version). Anything else is a bug and tracebacks normally.
+_STARTUP_ERRORS = (
+    ValueError,
+    ScrubberUnavailableError,
+    OSError,
+    requests.RequestException,
+    RuntimeError,
+)
 
 
 def build_client(config: BPConfig) -> BPClient | MockBPClient:
@@ -90,12 +101,7 @@ def build_server(config: BPConfig) -> FastMCP:
     scrubber = build_scrubber(config)
     client = build_client(config)
     app = FastMCP(SERVER_NAME)
-    # The handshake's serverInfo.version must identify THIS artifact, not the
-    # framework. FastMCP (1.x) takes no version and defaults to the mcp
-    # library's own; `version` is a plain public attribute on the underlying
-    # lowlevel Server, so set it there — the `_mcp_server` handle is the only
-    # private seam crossed, and the wiring is pinned by a test.
-    app._mcp_server.version = __version__
+    _apply_server_version(app, __version__)
     names = register_tools(app, client, scrubber, config)
     _log.info(
         "%s ready: %d tools (%s) | data_source=%s pii_backend=%s actions=%s",
@@ -109,6 +115,31 @@ def build_server(config: BPConfig) -> FastMCP:
     return app
 
 
+def _apply_server_version(app: FastMCP, version: str) -> None:
+    """Stamp THIS artifact's version into the handshake's serverInfo.
+
+    FastMCP (1.x) exposes no public way to set serverInfo.version — its
+    constructor takes no version and builds its lowlevel Server without one,
+    so the handshake would otherwise report the mcp library's own version. The
+    value lives on that lowlevel Server, reachable only through the private
+    `_mcp_server` handle.
+
+    We cross that seam deliberately, but guard it: the relaxed `mcp` range
+    means a future-compatible release could rename or restructure the handle.
+    Rather than AttributeError-tracebacking (or silently reporting the wrong
+    version in every handshake), fail loud at startup with a message the
+    operator can act on.
+    """
+    server = getattr(app, "_mcp_server", None)
+    if server is None or not hasattr(server, "version"):
+        raise RuntimeError(
+            "Cannot set serverInfo.version: this 'mcp' release does not expose "
+            "FastMCP._mcp_server.version. Pin 'mcp' to a tested version "
+            "(developed against 1.27) or update the version wiring in server.py."
+        )
+    server.version = version
+
+
 def _configure_logging() -> None:
     """Pin logging to stderr; our own startup lines at INFO, libraries at WARNING.
 
@@ -116,11 +147,17 @@ def _configure_logging() -> None:
     logging.basicConfig with its own (stderr-bound, rich) handler, and
     basicConfig is a no-op once the root logger already has a handler — so
     claiming root first leaves exactly one predictable handler in place.
+
+    Idempotent: main() may run more than once in a single process (tests,
+    embedding, re-entry). Our handler is tagged so a second call reuses it
+    instead of stacking another and duplicating every line.
     """
-    handler = logging.StreamHandler(sys.stderr)
-    handler.setFormatter(logging.Formatter("%(asctime)s %(name)s %(levelname)s %(message)s"))
     root = logging.getLogger()
-    root.addHandler(handler)
+    if not any(getattr(h, _OUR_HANDLER_MARK, False) for h in root.handlers):
+        handler = logging.StreamHandler(sys.stderr)
+        handler.setFormatter(logging.Formatter("%(asctime)s %(name)s %(levelname)s %(message)s"))
+        setattr(handler, _OUR_HANDLER_MARK, True)
+        root.addHandler(handler)
     root.setLevel(logging.WARNING)
     logging.getLogger("blue_prism_mcp").setLevel(logging.INFO)
 

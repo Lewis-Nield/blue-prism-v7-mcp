@@ -152,6 +152,31 @@ class TestBuildServer:
         app = build_server(BPConfig(data_source="mock"))
         assert app._mcp_server.version == blue_prism_mcp.__version__
 
+    def test_version_wiring_fails_loud_when_the_private_seam_is_gone(self):
+        # The mcp pins are ranges: a future-compatible release could rename or
+        # drop FastMCP._mcp_server.version. Better a loud, actionable startup
+        # error than a silently wrong version in every handshake.
+        from blue_prism_mcp.server import _apply_server_version
+
+        class NoSeam:  # FastMCP-shaped enough to call, missing the version seam
+            pass
+
+        with pytest.raises(RuntimeError, match="mcp"):
+            _apply_server_version(NoSeam(), "9.9.9")
+
+    def test_version_wiring_happy_path_sets_the_lowlevel_version(self):
+        from blue_prism_mcp.server import _apply_server_version
+
+        class Seam:
+            version = None
+
+        class App:
+            _mcp_server = Seam()
+
+        app = App()
+        _apply_server_version(app, "9.9.9")
+        assert app._mcp_server.version == "9.9.9"
+
     def test_actions_enabled_registers_tier3(self, tmp_path):
         config = BPConfig(
             data_source="mock",
@@ -230,6 +255,36 @@ class TestMain:
         )
         with pytest.raises(SystemExit, match="rot13"):
             main()
+
+    def test_incompatible_mcp_exits_cleanly(self, bare_env, clean_logging, monkeypatch):
+        # A seam failure in build_server routes through main()'s startup-error
+        # net: an operator sees a one-line message, not an AttributeError
+        # traceback, and the transport never starts.
+        from blue_prism_mcp import server
+
+        bare_env.setenv("BP_DATA_SOURCE", "mock")
+
+        def _raise(app, version):
+            raise RuntimeError("serverInfo.version seam gone")
+
+        monkeypatch.setattr(server, "_apply_server_version", _raise)
+        monkeypatch.setattr(
+            FastMCP, "run", lambda self, *a, **kw: pytest.fail("transport must not start")
+        )
+        with pytest.raises(SystemExit, match="serverInfo.version seam gone") as exc:
+            server.main()
+        assert str(exc.value).startswith(f"{SERVER_NAME}:")
+
+    def test_repeated_configuration_does_not_stack_handlers(self, clean_logging):
+        # main() may run more than once in-process; logging setup must be
+        # idempotent or every line would duplicate per extra handler.
+        from blue_prism_mcp.server import _configure_logging
+
+        _configure_logging()
+        after_first = len(logging.getLogger().handlers)
+        _configure_logging()
+        _configure_logging()
+        assert len(logging.getLogger().handlers) == after_first
 
     def test_logging_lands_on_stderr_never_stdout(self, bare_env, clean_logging, monkeypatch):
         bare_env.setenv("BP_DATA_SOURCE", "mock")
