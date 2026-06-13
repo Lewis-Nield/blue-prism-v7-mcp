@@ -6,6 +6,7 @@ Layer map (see DESIGN.md for the full design):
     pii.py      — pluggable Scrubber protocol + Presidio backend (Phase 3)
     tools/      — Tier 1 Visibility, Tier 2 Insight, Tier 3 Control (Phase 4-5)
     server.py   — FastMCP stdio server + console entrypoint (Phase 6)
+    __main__.py — `python -m blue_prism_mcp` entrypoint (Phase 7)
 """
 
 __version__ = "0.1.0"

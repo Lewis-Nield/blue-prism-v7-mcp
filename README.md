@@ -21,7 +21,7 @@ Actively developed against the phased plan in [DESIGN.md](DESIGN.md):
 - [x] Phase 4 — Tier 1 + 2 tools (the envelope contract)
 - [x] Phase 5 — Governance scaffold + Tier 3, shipped disabled
 - [x] Phase 6 — Server + packaging
-- [ ] Phase 7 — Validate (stdio handshake, end-to-end, coverage gate)
+- [x] Phase 7 — Validate (stdio handshake, end-to-end, coverage gate)
 
 ## Why v7 Enterprise
 
