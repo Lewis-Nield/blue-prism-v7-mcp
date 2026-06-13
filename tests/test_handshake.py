@@ -47,8 +47,10 @@ READ_TOOLS = {
 # resolution of the console script never enters the picture.
 _LAUNCH = [sys.executable, "-m", "blue_prism_mcp"]
 
-# A window for a local subprocess handshake. Generous: a cold import (FastMCP +
-# our package) on a loaded CI runner should never approach this.
+# A window bounding both end-to-end paths — the raw subprocess and the real
+# client session — so a deadlock or protocol mismatch fails loudly instead of
+# hanging the suite. Generous: a cold import (FastMCP + our package) on a loaded
+# CI runner should never approach this.
 _TIMEOUT = 30
 
 
@@ -88,7 +90,11 @@ class TestRealClientHandshake:
         params = StdioServerParameters(
             command=_LAUNCH[0], args=_LAUNCH[1:], env=_mock_env(BP_PII_BACKEND="regex")
         )
-        init, tools, result = asyncio.run(_drive_client(params))
+        # Bound the client drive with the same window the raw subprocess test
+        # uses: a regression, deadlock, or protocol mismatch must fail loudly,
+        # never hang the suite. wait_for cancels the coroutine on timeout, so
+        # stdio_client/ClientSession unwind and the spawned server is torn down.
+        init, tools, result = asyncio.run(asyncio.wait_for(_drive_client(params), timeout=_TIMEOUT))
 
         # serverInfo identifies THIS artifact and THIS version (the guarded
         # _mcp_server.version seam, now observed through a real client).
@@ -140,6 +146,14 @@ class TestStdoutHygiene:
             text=True,
             env=_mock_env(),
             timeout=_TIMEOUT,
+        )
+
+        # Closing stdin (EOF after the frames) ends the stdio session, so a
+        # clean run exits zero. A non-zero code means app.run() crashed after
+        # the ready line — output the framing checks below would still accept —
+        # so assert it explicitly, surfacing both streams for diagnosis.
+        assert proc.returncode == 0, (
+            f"server exited {proc.returncode}\nSTDERR:\n{proc.stderr}\nSTDOUT:\n{proc.stdout}"
         )
 
         # Every non-blank stdout line is a JSON-RPC message — no log line, no
