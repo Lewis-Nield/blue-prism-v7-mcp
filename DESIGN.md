@@ -308,6 +308,39 @@ catalogue, the session stage-log, and (for Tier 3) the write endpoints.
 - **Phase 7 — Validate**: a byte-clean stdio handshake, end-to-end validation in
   an MCP client, and the coverage gate.
 
+Phases 0–7 are **v0.1.0** — the shipped surface described above. What follows is
+the next cycle: it does not change v0.1.0's behaviour, it deepens the v7 coverage
+and opens the core to hosts that embed it beyond the single stdio process.
+
+### Beyond v1 (phases 8+)
+- **Phase 8 — Embeddable core.** A tool's logic and its presentation are one body
+  today: each closure resolves names, scrubs, sorts, and wraps the result in the
+  LLM-shaped top-N envelope in a single pass. Split them — a pure domain function
+  returning the full ranked records, with the envelope as one adapter over it — so
+  a host embedding the engine in-process can consume the records and apply its own
+  representation instead of re-deriving the logic. The cache gets the same
+  treatment: the per-instance dict suits one stdio process, but a long-lived,
+  multi-threaded host sharing a client across workers needs a **thread-safe,
+  injectable cache** behind a small protocol, with the in-process implementation
+  kept as the default. No tool gains or loses behaviour; the v0.1 surface is
+  unchanged.
+- **Phase 9 — Fuller v7 read coverage.** Push the filtering the v7 API already
+  supports down into the reads the envelope currently caps client-side.
+  `get_session_log` gains an errors-only filter and a time window, and exposes the
+  API's token paging rather than top-N only (the client already probes `logslight`
+  on 7.4+). `list_schedules` gains last-outcome enrichment from
+  `GET /schedules/logs` — the run-history read v1 deferred — so a schedule carries
+  its last result, not just its definition. `exception_summary` gains an
+  estate-wide variant grouped across queues, so the dominant failure mode is one
+  call rather than a loop over every queue.
+- **Phase 10 — `stop_session` (Tier 3).** The missing control sibling of
+  `start_process`: `PATCH /sessions/{id}` with `{status: Stopped}`, the same
+  endpoint `start_process` already drives for `{status: Running}`. Capability-
+  gated, audited, and dry-run by default like every Tier 3 tool. Its exact
+  permission (expected `Control Resource`, mirroring `start_process`'s control
+  clause) and the Stopped transition are day-one live-verification items — the
+  same posture as the v1 writes the spec underdocuments.
+
 ## Conventions
 - The stdio transport speaks JSON-RPC over stdout; nothing else may write there.
   Silence noisy library loggers before and after importing heavy dependencies.
