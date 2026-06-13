@@ -15,6 +15,7 @@ def test_from_env_defaults_with_empty_environment():
     assert cfg.page_size == 1000
     assert cfg.page_size_param == "itemsPerPage"
     assert cfg.enable_actions is False
+    assert cfg.data_source == "live"
     assert cfg.audit_log_path == ""
     assert cfg.pii_backend == "null"
     assert cfg.pii_spacy_model == "en_core_web_sm"
@@ -39,6 +40,7 @@ def test_from_env_reads_all_fields():
             "BP_API_PAGE_TOKEN_PARAM": "cursor",
             "BP_API_PAGE_OFFSET_PARAM": "skip",
             "BP_ENABLE_ACTIONS": "true",
+            "BP_DATA_SOURCE": "mock",
             "BP_AUDIT_LOG_PATH": "/var/log/blue-prism-mcp/audit.jsonl",
             "BP_PII_BACKEND": "regex",
             "BP_PII_SPACY_MODEL": "en_core_web_lg",
@@ -60,6 +62,7 @@ def test_from_env_reads_all_fields():
     assert cfg.page_token_param == "cursor"
     assert cfg.page_offset_param == "skip"
     assert cfg.enable_actions is True
+    assert cfg.data_source == "mock"
     assert cfg.audit_log_path == "/var/log/blue-prism-mcp/audit.jsonl"
     assert cfg.pii_backend == "regex"
     assert cfg.pii_spacy_model == "en_core_web_lg"
@@ -70,6 +73,12 @@ def test_pii_backend_is_normalised_from_the_environment():
     # Case/whitespace slips are config footguns, not deployment decisions;
     # genuinely unknown values still refuse to start in build_scrubber.
     assert BPConfig.from_env(env={"BP_PII_BACKEND": " ReGeX "}).pii_backend == "regex"
+
+
+def test_data_source_is_normalised_from_the_environment():
+    # Same rule as pii_backend: forgive casing/whitespace noise here; unknown
+    # values still refuse to start in the server's build_client.
+    assert BPConfig.from_env(env={"BP_DATA_SOURCE": " MoCk "}).data_source == "mock"
 
 
 def test_malformed_pii_custom_patterns_fail_loudly():
@@ -95,6 +104,17 @@ def test_url_trailing_slashes_are_stripped():
         BPConfig.from_env(env={"BP_API_BASE_URL": "https://bp.example/"}).base_url
         == "https://bp.example"
     )
+
+
+def test_credential_whitespace_is_stripped():
+    # Whitespace around a pasted client id/secret is never part of the value,
+    # but it is truthy — unstripped, a space-only credential would pass the
+    # server's missing-settings check and fail only at the first token fetch.
+    cfg = BPConfig(client_id=" svc-mcp ", client_secret=" s3cret\n")
+    assert cfg.client_id == "svc-mcp"
+    assert cfg.client_secret == "s3cret"
+    assert BPConfig(client_id="   ").client_id == ""
+    assert BPConfig(base_url=" https://bp.example/api/v7 ").base_url == "https://bp.example/api/v7"
 
 
 def test_audit_log_path_whitespace_is_stripped():
