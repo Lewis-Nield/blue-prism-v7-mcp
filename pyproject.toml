@@ -52,6 +52,16 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
+[tool.coverage.run]
+source = ["blue_prism_mcp"]
+# The `python -m blue_prism_mcp` shim is a three-line delegate to server.main.
+# It is exercised by the end-to-end tests (which launch the module as a
+# subprocess), but subprocess execution is invisible to in-process coverage,
+# so measuring it would force a permanent false gap. Omit it; the E2E proves it.
+# (Coverage's own defaults already exclude pragma lines, `...` stub bodies, and
+# `if TYPE_CHECKING:` blocks — left untouched here so they keep applying.)
+omit = ["*/__main__.py"]
+
 [tool.ruff]
 line-length = 100
 
