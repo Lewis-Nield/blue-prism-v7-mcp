@@ -104,20 +104,28 @@ class BPClient:
 
         v7 auth is OAuth2 client-credentials against the Blue Prism
         Authentication Server — a form-encoded POST to <auth_url>/connect/token
-        with scope bp-api, returning a JWT (the only scheme the API documents;
-        identical across 7.0–7.5). expires_in is honoured with a skew so the
-        token is refreshed before the server would reject it.
+        returning a JWT (the only scheme the API documents; identical across
+        7.0–7.5). The API's security requires the "bp-api bpserver" scope pair;
+        an empty token_scope omits the param so the server issues all scopes the
+        client registration allows (the auth guide's documented request shape).
+        expires_in is honoured with a skew so the token is refreshed before the
+        server would reject it.
         """
         if self._token and time.monotonic() < self._token_expiry:
             return self._token
+        data = {
+            "grant_type": "client_credentials",
+            "client_id": self._config.client_id,
+            "client_secret": self._config.client_secret,
+        }
+        # Empty scope → omit the param (documented fallback); otherwise send the
+        # cleaned value so stray whitespace never reaches the token endpoint.
+        scope = self._config.token_scope.strip()
+        if scope:
+            data["scope"] = scope
         resp = self._session.post(
             f"{self._config.auth_url}/connect/token",
-            data={
-                "grant_type": "client_credentials",
-                "client_id": self._config.client_id,
-                "client_secret": self._config.client_secret,
-                "scope": self._config.token_scope,
-            },
+            data=data,
             verify=self._config.verify_ssl,
             timeout=self._config.request_timeout,
         )

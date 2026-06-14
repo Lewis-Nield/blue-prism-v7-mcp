@@ -133,8 +133,15 @@ class TestAuth:
             "grant_type": "client_credentials",
             "client_id": "svc-client",
             "client_secret": "s3cret",
-            "scope": "bp-api",
+            "scope": "bp-api bpserver",
         }
+
+    def test_empty_token_scope_omits_the_scope_param(self):
+        # An empty scope falls back to the auth guide's documented request shape:
+        # no scope param, so the server issues the client's full allowed scope set.
+        client, session = make_client(token_scope="")
+        client._get_token()
+        assert "scope" not in session.post.call_args.kwargs["data"]
 
     def test_token_caches_until_expiry(self):
         client, session = make_client()

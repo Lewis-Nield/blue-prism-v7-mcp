@@ -7,7 +7,7 @@ def test_from_env_defaults_with_empty_environment():
     cfg = BPConfig.from_env(env={})
     assert cfg.base_url == ""
     assert cfg.auth_url == ""
-    assert cfg.token_scope == "bp-api"
+    assert cfg.token_scope == "bp-api bpserver"
     assert cfg.verify_ssl is True
     assert cfg.request_timeout == 30.0
     assert cfg.cache_ttl == 30.0
