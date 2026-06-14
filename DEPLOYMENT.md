@@ -41,6 +41,7 @@ there is no permission model of its own to misconfigure. Two rules follow:
   |-------------|----------------------|
   | `retry_queue_item` / `defer_queue_item` | Full Access to Queue Management |
   | `start_process` | one of Create Process / Edit Process / Execute Process, **and** Control Resource |
+  | `stop_session` | same as `start_process` (one process permission **and** Control Resource) |
   | `set_schedule_enabled` (retire) | Edit Schedule **and** Retire Schedule |
   | `set_schedule_enabled` (unretire) | the retire pair **and** Create Schedule (enforced at call time, so retire-only accounts keep the tool) |
   | `trigger_schedule` | Edit Schedule |
@@ -140,7 +141,14 @@ Verify them against *your* estate (7.2+) before allowing `dry_run=false`:
 
 A fourth, lower-stakes check: `start_process` uses the create-then-run flow
 (`POST /sessions`, then `PATCH /sessions/{id}` to `Running`) — confirm it
-end-to-end with a harmless utility process.
+end-to-end with a harmless utility process. When called with `parameters`, a
+`PUT /sessions/{id}/parameters` is issued between the two (while the session is
+Pending); verify on a process with declared inputs that the values land before
+it runs. Note a session can be created and started against a logged-out worker —
+it is the *process* that fails at run time if it depends on an interactive
+desktop/login session on the resource, not the start call itself. `stop_session`
+drives the same endpoint with `{status: Stopped}`; confirm against a running
+session that the stop request is accepted and the run winds down.
 
 ## Operational notes
 

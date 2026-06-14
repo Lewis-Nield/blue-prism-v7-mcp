@@ -34,6 +34,7 @@ ALL_ACTION_TOOLS = {
     "retry_queue_item",
     "defer_queue_item",
     "start_process",
+    "stop_session",
     "set_schedule_enabled",
     "trigger_schedule",
 }
@@ -202,12 +203,13 @@ class TestBuildAuditLog:
 
 
 class TestBuildTier3Tools:
-    def test_full_permissions_build_all_five_in_order(self, tmp_path):
+    def test_full_permissions_build_all_six_in_order(self, tmp_path):
         tools, _, _ = tier3(tmp_path)
         assert list(tools) == [
             "retry_queue_item",
             "defer_queue_item",
             "start_process",
+            "stop_session",
             "set_schedule_enabled",
             "trigger_schedule",
         ]
@@ -251,6 +253,10 @@ class TestBuildTier3Tools:
                 "Create Process | Edit Process | Execute Process",
                 "Control Resource",
             ],
+            "stop_session": [
+                "Create Process | Edit Process | Execute Process",
+                "Control Resource",
+            ],
             "trigger_schedule": ["Edit Schedule"],
         }
 
@@ -270,9 +276,10 @@ class TestDryRunContract:
     def test_every_tool_names_its_action_and_audits_the_same_args(self, tmp_path):
         # The action name in the result is what the model reasons over, and
         # the audit line must carry the same tool name and the resolved args
-        # the result previews — one contract across all five tools.
+        # the result previews — one contract across all six tools.
         tools, audit, client = tier3(tmp_path)
         item = _exceptioned_item(client)
+        session_id = client.get_sessions()[0]["sessionId"]
         calls = [
             ("retry_queue_item", lambda: tools["retry_queue_item"]("Invoices", item["id"])),
             (
@@ -280,6 +287,7 @@ class TestDryRunContract:
                 lambda: tools["defer_queue_item"]("Invoices", item["id"], 1, "2026-04-01T09:00:00"),
             ),
             ("start_process", lambda: tools["start_process"]("Invoice Processing", "BOT-01")),
+            ("stop_session", lambda: tools["stop_session"](session_id)),
             (
                 "set_schedule_enabled",
                 lambda: tools["set_schedule_enabled"]("Daily Invoice Run", False),
@@ -312,6 +320,7 @@ class TestDryRunContract:
                 "resource": "BOT-01",
                 "resource_id": resource["id"],
             },
+            {"session_id": session_id},
             {"schedule": "Daily Invoice Run", "schedule_id": "1", "enabled": False},
             {"schedule": "Daily Invoice Run", "schedule_id": "1", "start_time": None},
         ]
@@ -522,6 +531,160 @@ class TestStartProcess:
         with pytest.raises(ValueError, match="Invoice Processing"):
             tools["start_process"]("Invoice Processin", "BOT-01")
 
+    def test_dry_run_echoes_parameter_types_only_never_values(self, tmp_path):
+        tools, audit, _ = tier3(tmp_path)
+        result = tools["start_process"](
+            "Invoice Processing",
+            "BOT-01",
+            parameters={
+                "Login": {"valueType": "Password", "value": "s3cr3t-pw"},
+                "Amount": {"valueType": "number", "value": 123},
+            },
+        )
+        # Names + canonicalised types surface; the values do not.
+        assert result["would"]["parameter_types"] == {"Login": "Password", "Amount": "Number"}
+        assert "s3cr3t-pw" not in json.dumps(result)
+        assert "s3cr3t-pw" not in audit.path.read_text()
+        assert "123" not in str(result["would"].get("parameter_types"))
+
+    def test_live_run_forwards_validated_parameters_to_the_client(self, tmp_path):
+        tools, audit, client = tier3(tmp_path)
+        result = tools["start_process"](
+            "Invoice Processing",
+            "BOT-01",
+            parameters={"InvoiceDate": {"valueType": "date", "value": "2026-03-01"}},
+            dry_run=False,
+        )
+        session_id = result["result"]["sessionId"]
+        # The PUT body the client received: canonical type, value intact.
+        assert client._session_parameters[session_id] == {
+            "InvoiceDate": {"valueType": "Date", "value": "2026-03-01"}
+        }
+        # Audit still records types only, even on the live attempt line.
+        attempt = next(e for e in read_audit(audit) if e["status"] == "attempt")
+        assert attempt["args"]["parameter_types"] == {"InvoiceDate": "Date"}
+        assert "2026-03-01" not in audit.path.read_text()
+
+    def test_unknown_value_type_fails_loudly(self, tmp_path):
+        tools, _, _ = tier3(tmp_path)
+        with pytest.raises(ValueError, match="valueType"):
+            tools["start_process"](
+                "Invoice Processing",
+                "BOT-01",
+                parameters={"X": {"valueType": "Spreadsheet", "value": "x"}},
+            )
+
+    def test_malformed_parameter_spec_fails_loudly(self, tmp_path):
+        tools, _, _ = tier3(tmp_path)
+        with pytest.raises(ValueError, match="valueType"):
+            tools["start_process"](
+                "Invoice Processing", "BOT-01", parameters={"X": "just-a-string"}
+            )
+
+    def test_spec_missing_value_fails_loudly(self, tmp_path):
+        # Each half of the shape guard ("valueType" present AND "value" present)
+        # is pinned: a spec with only valueType must be rejected, not fall
+        # through to a KeyError when the value is read.
+        tools, _, _ = tier3(tmp_path)
+        with pytest.raises(ValueError, match="valueType"):
+            tools["start_process"](
+                "Invoice Processing", "BOT-01", parameters={"X": {"valueType": "Text"}}
+            )
+
+    def test_spec_missing_value_type_fails_loudly(self, tmp_path):
+        tools, _, _ = tier3(tmp_path)
+        with pytest.raises(ValueError, match="valueType"):
+            tools["start_process"](
+                "Invoice Processing", "BOT-01", parameters={"X": {"value": "hello"}}
+            )
+
+    def test_empty_parameters_object_fails_loudly(self, tmp_path):
+        tools, _, _ = tier3(tmp_path)
+        with pytest.raises(ValueError, match="non-empty object"):
+            tools["start_process"]("Invoice Processing", "BOT-01", parameters={})
+
+    def test_additional_parameters_are_validated_and_forwarded(self, tmp_path):
+        tools, _, client = tier3(tmp_path)
+        result = tools["start_process"](
+            "Invoice Processing",
+            "BOT-01",
+            parameters={
+                "Doc": {
+                    "valueType": "Collection",
+                    "value": [],
+                    "additionalParameters": ["Sheet1", "Sheet2"],
+                }
+            },
+            dry_run=False,
+        )
+        session_id = result["result"]["sessionId"]
+        assert client._session_parameters[session_id]["Doc"]["additionalParameters"] == [
+            "Sheet1",
+            "Sheet2",
+        ]
+
+    def test_non_string_additional_parameters_fail_loudly(self, tmp_path):
+        tools, _, _ = tier3(tmp_path)
+        with pytest.raises(ValueError, match="additionalParameters"):
+            tools["start_process"](
+                "Invoice Processing",
+                "BOT-01",
+                parameters={
+                    "Doc": {"valueType": "Text", "value": "x", "additionalParameters": [1]}
+                },
+            )
+
+
+class TestStopSession:
+    def test_dry_run_is_the_default_and_changes_nothing(self, tmp_path):
+        tools, audit, client = tier3(tmp_path)
+        session = client.get_sessions()[0]
+        before = session["status"]
+        result = tools["stop_session"](session["sessionId"])
+        assert result["dry_run"] is True
+        assert result["would"] == {"session_id": session["sessionId"]}
+        assert client.get_sessions()[0]["status"] == before  # untouched
+        assert [e["status"] for e in read_audit(audit)] == ["dry_run"]
+
+    def test_live_run_stops_and_audits_attempt_before_success(self, tmp_path):
+        tools, audit, client = tier3(tmp_path)
+        session_id = client.get_sessions()[0]["sessionId"]
+        result = tools["stop_session"](session_id, dry_run=False)
+        assert result == {
+            "action": "stop_session",
+            "dry_run": False,
+            "result": {"sessionId": session_id, "status": "Stopped"},
+        }
+        assert client._find_session(session_id)["status"] == "Stopped"
+        assert [e["status"] for e in read_audit(audit)] == ["attempt", "success"]
+
+    def test_non_uuid_session_id_fails_loudly(self, tmp_path):
+        tools, _, _ = tier3(tmp_path)
+        with pytest.raises(ValueError, match="session_id must be a UUID"):
+            tools["stop_session"]("not-a-uuid")
+
+    def test_a_freshly_started_session_can_be_stopped(self, tmp_path):
+        # The documented workflow — start a process, then stop the session it
+        # returns — must hold under mock run mode: start_process's sessionId is
+        # a valid UUID, so stop_session's validate_uuid accepts it.
+        tools, _, client = tier3(tmp_path)
+        started = tools["start_process"]("Invoice Processing", "BOT-01", dry_run=False)
+        session_id = started["result"]["sessionId"]
+        validate_uuid(session_id, "session_id")  # raises if the mock minted a non-UUID
+        stopped = tools["stop_session"](session_id, dry_run=False)
+        assert stopped["result"] == {"sessionId": session_id, "status": "Stopped"}
+        assert client._find_session(session_id)["status"] == "Stopped"
+
+    def test_unknown_session_is_a_lenient_no_op_in_the_mock(self, tmp_path):
+        # A valid UUID the mock doesn't hold: the stop request still answers
+        # Stopped (the mock mirrors the live PATCH's fire-and-forget shape) and
+        # leaves the existing sessions untouched.
+        tools, _, client = tier3(tmp_path)
+        unknown = "e8a9d7c2-5f10-4b3e-bd64-0000000009ff"
+        result = tools["stop_session"](unknown, dry_run=False)
+        assert result["result"] == {"sessionId": unknown, "status": "Stopped"}
+        assert client._find_session(unknown) is None
+
 
 class TestSetScheduleEnabled:
     def test_live_disable_retires_the_schedule(self, tmp_path):
@@ -638,6 +801,7 @@ class TestRegisterToolsGate:
             "retry_queue_item",
             "defer_queue_item",
             "start_process",
+            "stop_session",
             "set_schedule_enabled",
             "trigger_schedule",
         ]

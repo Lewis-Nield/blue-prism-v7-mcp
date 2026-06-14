@@ -164,6 +164,69 @@ def validate_positive_int(value: Any, field: str, hint: str = "") -> int:
     return value
 
 
+# Blue Prism DataValue types for session start-up parameters (the PUT
+# .../parameters body tags every value with one of these). The API is exact on
+# casing, so values are canonicalised case-insensitively to these spellings.
+DATA_VALUE_TYPES = frozenset(
+    {
+        "Binary",
+        "Collection",
+        "Date",
+        "DateTime",
+        "Flag",
+        "Image",
+        "Number",
+        "Password",
+        "RadioButtons",
+        "Text",
+        "Time",
+        "TimeSpan",
+    }
+)
+
+
+def validate_session_parameters(parameters: Any) -> dict[str, dict] | None:
+    """Validate and normalise process start-up parameters for the PUT body.
+
+    Agents pass a mapping of parameter name to
+    ``{"valueType": <Blue Prism type>, "value": <value>}`` (with an optional
+    ``additionalParameters`` array of strings). A malformed shape or unknown
+    valueType fails loudly here rather than as an opaque server-side 400, and
+    the type casing is canonicalised to what the API expects. ``None`` means
+    "no parameters" — the parameterless start path. Values pass through
+    untouched: the model owns the typed payload, and the caller records only
+    names and types in the audit (a value can be a Password).
+    """
+    if parameters is None:
+        return None
+    if not isinstance(parameters, dict) or not parameters:
+        raise ValueError(
+            "parameters must be a non-empty object mapping each name to "
+            '{"valueType": ..., "value": ...}.'
+        )
+    normalised: dict[str, dict] = {}
+    for name, spec in parameters.items():
+        if not isinstance(spec, dict) or "valueType" not in spec or "value" not in spec:
+            raise ValueError(
+                f"parameter {name!r} must be an object with 'valueType' and "
+                '\'value\' (e.g. {"valueType": "Text", "value": "hello"}).'
+            )
+        value_type = validate_choice(
+            spec["valueType"], f"parameter {name!r} valueType", DATA_VALUE_TYPES
+        )
+        entry: dict[str, Any] = {"valueType": value_type, "value": spec["value"]}
+        extra = spec.get("additionalParameters")
+        if extra is not None:
+            if not isinstance(extra, list) or not all(isinstance(x, str) for x in extra):
+                raise ValueError(
+                    f"parameter {name!r} additionalParameters must be an array "
+                    "of strings (or omitted)."
+                )
+            entry["additionalParameters"] = extra
+        normalised[name] = entry
+    return normalised
+
+
 def resolve_id(
     value: str,
     records: list[dict],

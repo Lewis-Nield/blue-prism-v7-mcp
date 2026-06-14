@@ -47,6 +47,7 @@ ACTION_TOOLS = {
     "retry_queue_item",
     "defer_queue_item",
     "start_process",
+    "stop_session",
     "set_schedule_enabled",
     "trigger_schedule",
 }

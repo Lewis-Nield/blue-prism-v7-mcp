@@ -38,7 +38,13 @@ from ..governance import (
     holds,
     unsatisfied_clauses,
 )
-from .common import resolve_id, validate_iso, validate_positive_int, validate_uuid
+from .common import (
+    resolve_id,
+    validate_iso,
+    validate_positive_int,
+    validate_session_parameters,
+    validate_uuid,
+)
 
 _log = logging.getLogger("blue_prism_mcp.tier3")
 
@@ -166,18 +172,33 @@ def build_tier3_tools(
             lambda: client.defer_queue_item(queue_id, item_id, attempt_number, defer_until),
         )
 
-    def start_process(process: str, resource: str, dry_run: bool = True) -> dict:
+    def start_process(
+        process: str,
+        resource: str,
+        parameters: dict | None = None,
+        dry_run: bool = True,
+    ) -> dict:
         """Start a published process on a digital worker, now.
 
         `process` is the process name (case-insensitive, as shown in
         list_processes) or its UUID; `resource` is the digital worker's name
-        (as shown in list_resources) or UUID. Creates a session and requests
-        it run; the result carries the new sessionId — follow it with
-        list_sessions or get_session_log.
+        (as shown in list_resources) or UUID.
+
+        `parameters` (optional) sets the process's start-up inputs: a mapping of
+        parameter name to {"valueType": <type>, "value": <value>}, e.g.
+        {"InvoiceDate": {"valueType": "Date", "value": "2026-03-01"}}. valueType
+        is one of Text, Number, Flag, Date, DateTime, Time, TimeSpan, Password,
+        Collection, Image, Binary, RadioButtons. Omit it for a process that
+        takes no inputs.
+
+        Creates a session, applies any parameters, and requests it run; the
+        result carries the new sessionId — follow it with list_sessions or
+        get_session_log.
 
         By default this is a DRY RUN: it validates and returns the exact call
         it would make without changing anything. Pass dry_run=false to
-        actually start the process. Every invocation is audit-logged.
+        actually start the process. Every invocation is audit-logged — parameter
+        names and types only, never their values.
         """
         process_id = resolve_id(
             process,
@@ -187,17 +208,48 @@ def build_tier3_tools(
             name_key="processName",
         )
         resource_id = resolve_id(resource, client.get_resources(), entity="resource")
+        params = validate_session_parameters(parameters)
         args = {
             "process": process,
             "process_id": process_id,
             "resource": resource,
             "resource_id": resource_id,
         }
+        if params:
+            # Audit and dry-run echo carry parameter NAMES and TYPES only — a
+            # value can be a Password or other sensitive payload, so values
+            # never enter the audit log or the returned would-be call.
+            args["parameter_types"] = {n: spec["valueType"] for n, spec in params.items()}
         return _run(
             "start_process",
             args,
             dry_run,
-            lambda: client.start_process(process_id, resource_id),
+            lambda: client.start_process(process_id, resource_id, parameters=params),
+        )
+
+    def stop_session(session_id: str, dry_run: bool = True) -> dict:
+        """Request a running session stop — start_process's control sibling.
+
+        `session_id` is the sessionId from list_sessions (a UUID). Blue Prism
+        is asked to stop that session; the stop takes effect when the process
+        next yields, so it is a request, not an instant kill. Use this to halt
+        a run that is stuck, looping, or was started in error.
+
+        By default this is a DRY RUN: it validates and returns the exact call
+        it would make without changing anything. Pass dry_run=false to actually
+        request the stop. Every invocation is audit-logged.
+        """
+        session_id = validate_uuid(
+            session_id,
+            "session_id",
+            hint="Use the sessionId from list_sessions.",
+        )
+        args = {"session_id": session_id}
+        return _run(
+            "stop_session",
+            args,
+            dry_run,
+            lambda: client.stop_session(session_id),
         )
 
     def set_schedule_enabled(schedule: str, enabled: bool, dry_run: bool = True) -> dict:
@@ -263,6 +315,7 @@ def build_tier3_tools(
         retry_queue_item,
         defer_queue_item,
         start_process,
+        stop_session,
         set_schedule_enabled,
         trigger_schedule,
     ]

@@ -116,7 +116,7 @@ Gated behind `enable_actions=False`. Governance, capability-gating, audit, and
 dry-run scaffolding is present; the action tools are registered only when
 actions are enabled.
 - `retry_queue_item` / `defer_queue_item`
-- `start_process`
+- `start_process` / `stop_session`
 - `set_schedule_enabled` / `trigger_schedule`
 
 **The governance contract (Phase 5).** Three layers sit between the model and
@@ -180,7 +180,8 @@ webhook plumbing.
 | `list_processes` | `GET /processes` | 7.1 |
 | `retry_queue_item` | `POST .../items/{id}/attempts` (201 → `{attemptId}`) | 7.2 |
 | `defer_queue_item` | `PATCH .../attempts/{attemptId}` (RFC 6902 JSON Patch, sent as `application/json-patch+json`) | 7.2 |
-| `start_process` | `POST /sessions` → UUID, then `PATCH /sessions/{id}` `{status: Running}` | 7.1 |
+| `start_process` | `POST /sessions` → UUID, optional `PUT /sessions/{id}/parameters`, then `PATCH /sessions/{id}` `{status: Running}` | 7.1 |
+| `stop_session` | `PATCH /sessions/{id}` `{status: Stopped}` | 7.1 |
 | `set_schedule_enabled` | `PUT /schedules/{id}` (retire/unretire) | 7.0 |
 | `trigger_schedule` | `POST /schedules/{id}/runs` (optional `startTime`) | 7.2 |
 
@@ -240,6 +241,7 @@ Wire-level contract (identical across versions):
   |--------|------------------------|
   | `retry_queue_item` / `defer_queue_item` | `Full Access to Queue Management` |
   | `start_process` (session create + control) | one of `Create Process` \| `Edit Process` \| `Execute Process`, **and** `Control Resource` |
+  | `stop_session` (`PATCH /sessions/{id}` → `Stopped`) | same as `start_process` (one process permission **and** `Control Resource`) |
   | `set_schedule_enabled` — retire | `Edit Schedule` **and** `Retire Schedule` |
   | `set_schedule_enabled` — unretire | retire pair **and** `Create Schedule` |
   | `trigger_schedule` | `Edit Schedule` |
@@ -313,6 +315,35 @@ Phases 0–7 are **v0.1.0** — the shipped surface described above. What follow
 the next cycle: it does not change v0.1.0's behaviour, it deepens the v7 coverage
 and opens the core to hosts that embed it beyond the single stdio process.
 
+### Post-v0.1.0 releases
+A full audit of the client against the 7.5.1 OpenAPI spec confirmed the
+18-endpoint surface and surfaced an auth bug plus a set of useful unused endpoints.
+Sequenced as:
+- **v0.1.1 (patch) — auth correctness.** The token request must carry the
+  `bp-api bpserver` scope pair the spec requires on every endpoint; v0.1.0 requested
+  only `bp-api`, so as released it could not reach a live estate. Bugfix only.
+- **v0.2.0 (minor) — process-control completion.** `start_process` gains optional
+  typed start-up `parameters` (POST /sessions → PUT .../parameters → PATCH Running;
+  the audit records parameter names and types, never values), and **`stop_session`
+  is pulled forward from Phase 10** as `start_process`'s control sibling
+  (`PATCH /sessions/{id}` `{status: Stopped}`, the same permissions as
+  `start_process`).
+- **Endpoint-gap backlog (post-0.2.0 — each a real value-add the audit identified;
+  most map onto Phases 9–10 / console E7–E9):**
+  - *Control:* `stop_schedule` (`DELETE /schedules/{id}/runs/active`) — incident
+    sibling of `trigger_schedule`.
+  - *Diagnostic reads:* single work-queue item detail (`GET /workqueues/items/{id}`
+    — the only call that returns the item `data` payload; scrubbed), item attempt
+    history (`GET .../attempts`), single session detail (`GET /sessions/{id}`).
+  - *Insight:* dashboard aggregates (`workQueueCompositions`, `resourceUtilization`,
+    `licensesEntitlement`) for cheaper Tier-2 metrics and the console baseline feed;
+    schedule run-history is already Phase 9.
+  - *Context/console:* `workqueues/configurations` (the process→queue map console
+    severity needs — L2), `resources/pools`, environment-variable reads, process groups.
+- **North star (not a near-term gap):** 7.5's `subscriptions` PATCH and work-queue
+  item `callbacks`/webhooks are the event-driven orchestration plumbing for the
+  watch-and-react capability.
+
 ### Beyond v1 (phases 8+)
 - **Phase 8 — Embeddable core.** A tool's logic and its presentation are one body
   today: each closure resolves names, scrubs, sorts, and wraps the result in the
@@ -334,12 +365,13 @@ and opens the core to hosts that embed it beyond the single stdio process.
   its last result, not just its definition. `exception_summary` gains an
   estate-wide variant grouped across queues, so the dominant failure mode is one
   call rather than a loop over every queue.
-- **Phase 10 — `stop_session` (Tier 3).** The missing control sibling of
+- **Phase 10 — `stop_session` (Tier 3).** *Pulled forward into v0.2.0 — see
+  Post-v0.1.0 releases above.* The missing control sibling of
   `start_process`: `PATCH /sessions/{id}` with `{status: Stopped}`, the same
   endpoint `start_process` already drives for `{status: Running}`. Capability-
-  gated, audited, and dry-run by default like every Tier 3 tool. Its exact
-  permission (expected `Control Resource`, mirroring `start_process`'s control
-  clause) and the Stopped transition are day-one live-verification items — the
+  gated, audited, and dry-run by default like every Tier 3 tool. It carries
+  `start_process`'s permission clause (a process permission **and** `Control
+  Resource`); the Stopped transition is a day-one live-verification item — the
   same posture as the v1 writes the spec underdocuments.
 
 ## Conventions

@@ -521,6 +521,29 @@ class TestTierThreeWrites:
         patch_call = session.patch.call_args
         assert patch_call.args[0].endswith("/sessions/sess-uuid-1")
         assert patch_call.kwargs["json"] == {"status": "Running"}
+        session.put.assert_not_called()  # no params → no parameters PUT
+
+    def test_start_process_puts_parameters_before_running(self):
+        client, session = make_client()
+        prime_token(client)
+        session.post.return_value = _resp("sess-uuid-1")
+        session.put.return_value = _resp(None, 204)  # parameters PUT answers 204
+        session.patch.return_value = _resp(None, 204)
+        params = {"InvoiceDate": {"valueType": "Date", "value": "2026-03-01"}}
+        client.start_process("proc-1", "res-1", parameters=params)
+        put_call = session.put.call_args
+        assert put_call.args[0].endswith("/sessions/sess-uuid-1/parameters")
+        assert put_call.kwargs["json"] == {"parameters": params}
+
+    def test_stop_session_patches_status_to_stopped(self):
+        client, session = make_client()
+        prime_token(client)
+        session.patch.return_value = _resp(None, 202)
+        result = client.stop_session("sess-uuid-1")
+        assert result == {"sessionId": "sess-uuid-1", "status": "Stopped"}
+        patch_call = session.patch.call_args
+        assert patch_call.args[0].endswith("/sessions/sess-uuid-1")
+        assert patch_call.kwargs["json"] == {"status": "Stopped"}
 
     def test_set_schedule_enabled_maps_to_retirement(self):
         client, session = make_client()

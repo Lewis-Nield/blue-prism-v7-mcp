@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "blue-prism-mcp"
-version = "0.1.1"
+version = "0.2.0"
 description = "Distributable Model Context Protocol server for Blue Prism v7 Enterprise — governed LLM access to the estate over the supported REST API."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -80,3 +80,8 @@ extend-select = ["B"]
 # the tests don't actually pin. Expect equivalent mutants in the survivor list —
 # triage by hand, don't chase a 100% kill rate.
 source_paths = ["src/blue_prism_mcp/"]
+# test_handshake.py launches the packaged server as a real subprocess; that does
+# not survive mutmut's stream-capturing runner (I/O on a closed file) and it
+# pins no production logic the audit measures — it is an end-to-end smoke test.
+# Skip it so the baseline clean run and every mutant run stay green.
+pytest_add_cli_args = ["--ignore=tests/test_handshake.py"]
