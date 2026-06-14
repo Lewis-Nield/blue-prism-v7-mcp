@@ -82,7 +82,7 @@ day-one verification):
   `get_session_log`, `list_resources`, `list_schedules`, `list_processes`
 - **Insight:** `exception_summary`, `throughput_summary`, `estate_health`
 - **Control** (off by default): `retry_queue_item`, `defer_queue_item`,
-  `start_process`, `set_schedule_enabled`, `trigger_schedule`
+  `start_process`, `stop_session`, `set_schedule_enabled`, `trigger_schedule`
 
 ## Licence
 

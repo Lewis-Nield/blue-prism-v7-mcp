@@ -9,4 +9,4 @@ Layer map (see DESIGN.md for the full design):
     __main__.py — `python -m blue_prism_mcp` entrypoint (Phase 7)
 """
 
-__version__ = "0.1.1"
+__version__ = "0.2.0"

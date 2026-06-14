@@ -308,6 +308,9 @@ class MockBPClient:
         )
         self._permissions = permissions if permissions is not None else list(_DEFAULT_PERMISSIONS)
         self._session_counter = 0
+        # Start-up parameters applied per session id (kept out of the session
+        # rows so they don't leak into list_sessions output).
+        self._session_parameters: dict[str, dict] = {}
 
     def clear_cache(self) -> None:
         """No-op — the mock has no cache, but keeps the interface identical."""
@@ -406,9 +409,17 @@ class MockBPClient:
             item["deferredDate"] = defer_until
         return None
 
-    def start_process(self, process_id: str, resource_id: str) -> dict:
+    def start_process(
+        self, process_id: str, resource_id: str, parameters: dict | None = None
+    ) -> dict:
         self._session_counter += 1
-        session_id = f"sess-{process_id}-{self._session_counter}"
+        # Live v7 always answers a bare session UUID, and stop_session validates
+        # its argument as one — so the mock mints UUID-shaped ids too (in a range
+        # clear of the seeded fixtures), keeping the start_process → stop_session
+        # workflow exercisable under mock run mode.
+        session_id = f"e8a9d7c2-5f10-4b3e-bd64-{self._session_counter:012d}"
+        if parameters:
+            self._session_parameters[session_id] = parameters
         self._sessions.append(
             {
                 "sessionId": session_id,
@@ -426,6 +437,12 @@ class MockBPClient:
             }
         )
         return {"sessionId": session_id, "status": "Running"}
+
+    def stop_session(self, session_id: str) -> dict:
+        session = self._find_session(session_id)
+        if session is not None:
+            session["status"] = "Stopped"
+        return {"sessionId": session_id, "status": "Stopped"}
 
     def set_schedule_enabled(self, schedule_id: str, enabled: bool) -> None:
         schedule = self._find_schedule(schedule_id)
@@ -446,6 +463,12 @@ class MockBPClient:
         for item in self._queue_items:
             if item.get("queue") == queue_id and item.get("id") == item_id:
                 return item
+        return None
+
+    def _find_session(self, session_id: str) -> dict | None:
+        for session in self._sessions:
+            if session.get("sessionId") == session_id:
+                return session
         return None
 
     def _find_schedule(self, schedule_id) -> dict | None:

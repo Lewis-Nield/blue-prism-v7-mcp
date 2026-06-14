@@ -39,13 +39,20 @@ from typing import Any, Iterable
 # be satisfied by holding at least one of its alternatives.
 _QUEUE_FULL_ACCESS = "Full Access to Queue Management"
 
+# PATCH /sessions/{id} documents the same permissions whether the requested
+# status is Running (start_process) or Stopped (stop_session): Control Resource
+# plus any one of the process permissions. Defined once so the control pair
+# cannot drift apart.
+_SESSION_CONTROL = (
+    ("Create Process", "Edit Process", "Execute Process"),
+    ("Control Resource",),
+)
+
 TOOL_PERMISSIONS: dict[str, tuple[tuple[str, ...], ...]] = {
     "retry_queue_item": ((_QUEUE_FULL_ACCESS,),),
     "defer_queue_item": ((_QUEUE_FULL_ACCESS,),),
-    "start_process": (
-        ("Create Process", "Edit Process", "Execute Process"),
-        ("Control Resource",),
-    ),
+    "start_process": _SESSION_CONTROL,
+    "stop_session": _SESSION_CONTROL,
     # PUT /schedules/{id}: retiring needs Edit + Retire; UNretiring needs
     # Create Schedule on top. Registration requires the retire pair so the
     # tool isn't hidden from accounts that can retire but not create; the

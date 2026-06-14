@@ -511,21 +511,49 @@ class BPClient:
             headers={"Content-Type": "application/json-patch+json"},
         )
 
-    def start_process(self, process_id: str, resource_id: str) -> dict:
-        """Create a session for the process on the resource, then start it.
+    def start_process(
+        self, process_id: str, resource_id: str, parameters: dict | None = None
+    ) -> dict:
+        """Create a session for the process on the resource, set any start-up
+        parameters, then start it.
 
-        Two-step by API design (both 7.1+): POST /sessions creates a Pending
-        session and answers a bare session UUID; PATCH /sessions/{id} with
+        Up to three steps by API design (all 7.1+): POST /sessions creates a
+        Pending session and answers a bare session UUID; when `parameters` are
+        given, PUT /sessions/{id}/parameters sets them while the session is
+        still Pending (the API answers 204, no body); PATCH /sessions/{id} with
         {"status": "Running"} requests the run. The split suits Phase 5's
-        dry-run: a dry run can stop after the POST.
+        dry-run: a dry run can stop before the POST.
         """
         session_id = self._write(
             "POST",
             "/sessions",
             body={"processId": process_id, "resourceId": resource_id},
         )
-        self._write("PATCH", f"/sessions/{session_id}", body={"status": "Running"})
-        return {"sessionId": session_id, "status": "Running"}
+        if parameters:
+            self._write(
+                "PUT",
+                f"/sessions/{session_id}/parameters",
+                body={"parameters": parameters},
+            )
+        return self._set_session_status(session_id, "Running")
+
+    def stop_session(self, session_id: str) -> dict:
+        """Request a running session stop — start_process's control sibling.
+
+        Same endpoint and shape start_process drives for Running (PATCH
+        /sessions/{id}, 7.1+): {"status": "Stopped"} asks Blue Prism to stop
+        the session. The stop is a request the runtime honours when the process
+        next yields, not an instant kill; the answering status reflects what
+        was requested.
+        """
+        return self._set_session_status(session_id, "Stopped")
+
+    def _set_session_status(self, session_id: str, status: str) -> dict:
+        """PATCH /sessions/{id} {status} — the one session-control write both
+        start_process (Running) and stop_session (Stopped) drive, kept in one
+        place so the endpoint contract can't drift between the two."""
+        self._write("PATCH", f"/sessions/{session_id}", body={"status": status})
+        return {"sessionId": session_id, "status": status}
 
     def set_schedule_enabled(self, schedule_id: str, enabled: bool) -> Any:
         """PUT /schedules/{id} — retire (disable) or unretire a schedule.
