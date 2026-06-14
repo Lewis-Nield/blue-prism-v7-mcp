@@ -32,8 +32,9 @@ library it was always implicitly built on.
 - **Standalone artifact.** Independent repo, independently versioned and
   installable.
 - **Auth is OAuth2 client-credentials** against the Blue Prism Authentication
-  Server (form-encoded `POST <auth-server>/connect/token`, scope `bp-api`, JWT
-  bearer on every request). This is the only scheme the API documents, and it is
+  Server (form-encoded `POST <auth-server>/connect/token`, scope
+  `bp-api bpserver`, JWT bearer on every request). This is the only scheme the
+  API documents, and it is
   identical across 7.0–7.5, so one implementation covers every supported
   version. Config carries the auth-server URL and a client id/secret alongside
   the API base URL; there is no username/password flow.

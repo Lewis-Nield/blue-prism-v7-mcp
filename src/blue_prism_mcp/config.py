@@ -31,7 +31,12 @@ class BPConfig:
     # returned JWT as a bearer token.
     client_id: str = ""
     client_secret: str = ""
-    token_scope: str = "bp-api"
+    # The API's OpenAPI security requires BOTH scopes on every endpoint
+    # ("bp-api bpserver"); requesting only "bp-api" yields a token the API
+    # rejects. Set empty to omit the scope param entirely — matching the auth
+    # guide's documented token request, which lets the Authentication Server
+    # issue all scopes the client registration allows.
+    token_scope: str = "bp-api bpserver"
 
     verify_ssl: bool = True
 
@@ -117,7 +122,7 @@ class BPConfig:
             auth_url=e.get("BP_AUTH_URL", ""),
             client_id=e.get("BP_CLIENT_ID", ""),
             client_secret=e.get("BP_CLIENT_SECRET", ""),
-            token_scope=e.get("BP_TOKEN_SCOPE", "bp-api"),
+            token_scope=e.get("BP_TOKEN_SCOPE", "bp-api bpserver"),
             verify_ssl=e.get("BP_API_VERIFY_SSL", "true").lower() == "true",
             request_timeout=float(e.get("BP_API_TIMEOUT", "30")),
             cache_ttl=float(e.get("BP_API_CACHE_TTL", "30")),
