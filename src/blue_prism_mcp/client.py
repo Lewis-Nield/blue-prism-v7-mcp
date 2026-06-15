@@ -314,11 +314,13 @@ class BPClient:
         return self._cached("queues", lambda: self._get_collection("/workqueues"))
 
     def get_queue(self, queue_id: str) -> dict:
-        """GET /workqueues/{id} — one queue, with its per-state composition counts.
+        """GET /workqueues/{id} — one queue's full detail (WorkQueueSummary).
 
-        WorkQueueSummary already carries pending/completed/locked/exceptioned/
-        total counts and averageWorkTime, which is why the /dashboards/
-        workQueueCompositions aggregate is not consumed (see DESIGN.md).
+        WorkQueueSummary carries pending/completed/locked/exceptioned/total
+        counts and averageWorkTime, but NOT deferred. The /dashboards/
+        workQueueCompositions aggregate is consumed only for that one missing
+        count, which the list_queues tool folds in over its result set (this
+        single-queue read does not — see get_queue_compositions and DESIGN.md).
         """
         return self._cached(("queue", queue_id), lambda: self._get(f"/workqueues/{queue_id}"))
 
@@ -465,14 +467,55 @@ class BPClient:
     def get_current_limits_and_usage(self) -> dict:
         """GET /dashboards/currentLimitsAndUsage — licence limits vs usage.
 
-        The one /dashboards endpoint this server consumes (the others are
-        dashboard MI or redundant with /workqueues — see DESIGN.md). Limits are
-        nullable (null = unlimited); usages are current counts. Backs the
-        estate_health tool's licence block.
+        One of three /dashboards reads this server consumes (with
+        licensesEntitlement and workQueueCompositions; the resource-utilization
+        endpoints stay out as dashboard MI — see DESIGN.md). Limits are nullable
+        (null = unlimited); usages are current counts. Backs the estate_health
+        tool's licence block.
         """
         return self._cached(
             "limits_and_usage",
             lambda: self._get("/dashboards/currentLimitsAndUsage"),
+        )
+
+    def get_license_entitlement(self) -> dict:
+        """GET /dashboards/licensesEntitlement — what the estate is licensed for.
+
+        The entitlement side of the licence picture, complementing
+        currentLimitsAndUsage (limits vs current usage): the active licence
+        types plus per-tier ceilings (enterprise and desktop) for published
+        processes, concurrent sessions, runtime resources, and process-alert
+        machines. No params, single object (LicensesEntitlement). Requires the
+        "System - License" permission. Backs the license_entitlement tool.
+        """
+        return self._cached(
+            "license_entitlement",
+            lambda: self._get("/dashboards/licensesEntitlement"),
+        )
+
+    def get_queue_compositions(self, queue_ids: list[str]) -> list[dict]:
+        """GET /dashboards/workQueueCompositions — per-queue item-state counts.
+
+        The one datum /workqueues' WorkQueueSummary does not carry is the
+        per-queue *deferred* count; this aggregate adds it (id, name, plus
+        completed/pending/deferred/locked/exceptioned). workQueueIds is a
+        REQUIRED array, so callers pass the ids they already hold from
+        get_queues — there is no estate-wide form. The array goes as repeated
+        query params (workQueueIds=a&workQueueIds=b), the OpenAPI form/explode
+        default. Ids are sorted so the same id *set* shares one cache entry
+        regardless of request order. An empty id list short-circuits to no
+        request; an empty/204 body coerces to [] so the return is always a list.
+        """
+        if not queue_ids:
+            return []
+        ids = tuple(sorted(queue_ids))
+        return self._cached(
+            ("queue_compositions", ids),
+            lambda: self._get(
+                "/dashboards/workQueueCompositions",
+                params={"workQueueIds": list(ids)},
+            )
+            or [],
         )
 
     def get_user_permissions(self) -> list[str]:

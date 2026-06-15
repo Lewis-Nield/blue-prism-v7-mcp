@@ -18,6 +18,8 @@ from __future__ import annotations
 
 from typing import Callable
 
+import requests
+
 from ..pii import Scrubber
 from .common import (
     DEFAULT_LIMIT,
@@ -50,6 +52,35 @@ SESSION_STATUSES = frozenset(
 # content scrubbed. Date/time stay here so an NER backend can't turn a real
 # date into a redaction marker.
 _SCALAR_VALUE_TYPES = frozenset({"number", "flag", "date", "datetime", "time", "timespan"})
+
+
+def _deferred_counts(client, queue_ids: list) -> dict | None:
+    """Map queue id → deferred item count via the workQueueCompositions aggregate.
+
+    Returns None when the aggregate read *fails* (denied/timeout), so the caller
+    can signal that distinctly rather than silently dropping the field. On
+    success returns {id: deferred} built only from well-formed rows carrying a
+    non-null count: an id absent from the map is genuinely unknown (a malformed
+    or short/paged response, or a null count) and the caller omits the field
+    rather than fabricating a zero. The row filter also makes the function
+    robust to a non-list body (a 204 already coerces to [] in the client; a
+    proxy that reshapes the array into a dict/string yields no usable rows here
+    instead of crashing the listing).
+    """
+    ids = [qid for qid in queue_ids if qid]
+    if not ids:
+        return {}
+    try:
+        compositions = client.get_queue_compositions(ids)
+    except requests.RequestException:
+        return None
+    if not isinstance(compositions, list):
+        return {}  # a gateway/proxy reshaped the array — treat as no usable data
+    return {
+        row["id"]: row["deferred"]
+        for row in compositions
+        if isinstance(row, dict) and row.get("id") and row.get("deferred") is not None
+    }
 
 
 def build_tier1_tools(client, scrubber: Scrubber) -> list[Callable]:
@@ -131,21 +162,40 @@ def build_tier1_tools(client, scrubber: Scrubber) -> list[Callable]:
 
         Each item gives the queue's name and id, its status (Running/Paused),
         and item counts by state — pending, locked, completed, exceptioned,
-        total — plus the average work time per item. Use it to spot backlogs
-        and queues accumulating exceptions, and to find a queue's name for the
-        other queue tools.
+        total — plus the average work time per item. A per-queue `deferred`
+        count is folded in where available; if a queue carries no `deferred`
+        field that count was unknown for it, and if the whole estate's read was
+        denied `meta.deferred_unavailable` is set. Use it to spot backlogs and
+        queues accumulating exceptions, and to find a queue's name for the other
+        queue tools.
 
         Results come back as {"items": [...], "meta": {...}}, sorted by pending
         count (biggest backlog first) and capped at `limit` (default 50).
         meta.truncated tells you whether you saw every queue.
         """
-        return envelope(
+        result = envelope(
             client.get_queues(),
             sort_key=lambda q: q.get("pendingItemCount", 0),
             sorted_by="pendingItemCount desc",
             limit=limit,
             reverse=True,
         )
+        # WorkQueueSummary carries every state count except deferred; fold that
+        # one in from the workQueueCompositions aggregate, but only for the
+        # queues actually returned (a cheaper request than the full estate). The
+        # field is added only for queues the aggregate actually reported a count
+        # for — an unknown count is omitted, never a fabricated zero. If the
+        # whole read is denied or fails, the listing still stands and degrades
+        # visibly via meta.deferred_unavailable.
+        deferred = _deferred_counts(client, [q.get("id") for q in result["items"]])
+        if deferred is None:
+            result["meta"]["deferred_unavailable"] = True
+        else:
+            result["items"] = [
+                {**q, "deferred": deferred[q["id"]]} if q.get("id") in deferred else q
+                for q in result["items"]
+            ]
+        return result
 
     def get_queue(queue: str) -> dict:
         """Return one work queue's full detail by name or id.
@@ -153,7 +203,8 @@ def build_tier1_tools(client, scrubber: Scrubber) -> list[Callable]:
         Gives the queue's status, max attempts, encryption flag, and item
         counts by state (pending, locked, completed, exceptioned, total) plus
         average work time. `queue` is the queue name as shown in list_queues
-        (case-insensitive), or its UUID.
+        (case-insensitive), or its UUID. (The per-queue `deferred` count is not
+        included here — list_queues folds that in across its result set.)
         """
         queue_id = resolve_id(queue, client.get_queues(), entity="queue")
         return client.get_queue(queue_id)

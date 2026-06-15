@@ -392,6 +392,49 @@ class TestExtendedReads:
         client.get_current_limits_and_usage()
         session.get.assert_called_once()  # cached
 
+    def test_get_license_entitlement(self):
+        client, session = make_client()
+        session.get.return_value = _resp({"activeLicenseTypes": ["Enterprise"]})
+        assert client.get_license_entitlement() == {"activeLicenseTypes": ["Enterprise"]}
+        assert session.get.call_args.args[0].endswith("/dashboards/licensesEntitlement")
+        client.get_license_entitlement()
+        session.get.assert_called_once()  # cached
+
+    def test_get_queue_compositions_sends_repeated_id_params(self):
+        client, session = make_client()
+        session.get.return_value = _resp([{"id": "q1", "deferred": 3}])
+        result = client.get_queue_compositions(["q1", "q2"])
+        assert result == [{"id": "q1", "deferred": 3}]
+        assert session.get.call_args.args[0].endswith("/dashboards/workQueueCompositions")
+        # The array goes as the OpenAPI form/explode default (repeated key).
+        assert session.get.call_args.kwargs["params"] == {"workQueueIds": ["q1", "q2"]}
+
+    def test_get_queue_compositions_caches_per_id_set(self):
+        client, session = make_client()
+        session.get.return_value = _resp([{"id": "q1"}])
+        client.get_queue_compositions(["q1"])
+        client.get_queue_compositions(["q1"])
+        session.get.assert_called_once()  # same ids => one request
+
+    def test_get_queue_compositions_empty_ids_makes_no_request(self):
+        client, session = make_client()
+        assert client.get_queue_compositions([]) == []
+        session.get.assert_not_called()
+
+    def test_get_queue_compositions_coerces_empty_body_to_list(self):
+        # A 204/empty body makes _get return None; the method must still answer
+        # a list so the tool layer never iterates None.
+        client, session = make_client()
+        session.get.return_value = _resp(None, status_code=204)
+        assert client.get_queue_compositions(["q1"]) == []
+
+    def test_get_queue_compositions_cache_key_is_order_insensitive(self):
+        client, session = make_client()
+        session.get.return_value = _resp([{"id": "q1"}])
+        client.get_queue_compositions(["q1", "q2"])
+        client.get_queue_compositions(["q2", "q1"])  # same set, reversed
+        session.get.assert_called_once()  # one request, shared cache entry
+
     def test_get_user_permissions(self):
         # A flat array of permission-name strings (7.5.1 spec) — validated
         # strictly, cached like every read, consumed by the Phase 5
@@ -683,6 +726,21 @@ class TestMockExtended:
         usage = MockBPClient().get_current_limits_and_usage()
         assert "concurrentSessionsUsed" in usage
         assert "concurrentSessionsLimit" in usage
+
+    def test_get_license_entitlement(self):
+        entitlement = MockBPClient().get_license_entitlement()
+        assert entitlement["activeLicenseTypes"] == ["Enterprise"]
+        assert entitlement["enterpriseEntitlement"]["concurrentsessionslimit"] == 10
+
+    def test_get_queue_compositions_carries_deferred_for_known_queues(self):
+        client = MockBPClient()
+        qid = client.get_queues()[0]["id"]  # Invoices
+        [row] = client.get_queue_compositions([qid])
+        assert row["id"] == qid
+        assert row["deferred"] == 3  # the datum WorkQueueSummary lacks
+
+    def test_get_queue_compositions_skips_unknown_ids(self):
+        assert MockBPClient().get_queue_compositions(["no-such-queue"]) == []
 
     def test_get_user_permissions_defaults_to_the_full_action_surface(self):
         permissions = MockBPClient().get_user_permissions()

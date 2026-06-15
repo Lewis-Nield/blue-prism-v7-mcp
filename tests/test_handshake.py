@@ -44,6 +44,7 @@ READ_TOOLS = {
     "exception_summary",
     "throughput_summary",
     "estate_health",
+    "license_entitlement",
 }
 
 # Launch the artifact the way an operator would, but by module so PATH

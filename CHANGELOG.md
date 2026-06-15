@@ -7,6 +7,35 @@ additive endpoint is a minor bump.
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-06-15
+Estate insight — surface the licence entitlement picture and the one queue
+count the summary row omits. The dashboard aggregates were spec-pinned
+field-by-field against the 7.5.1 API; only the genuinely net-new data entered
+the reusable surface.
+
+### Added
+- `license_entitlement` (Tier 2 insight) — `GET /dashboards/licensesEntitlement`,
+  the entitlement side that complements `estate_health`'s limits-vs-usage:
+  `active_license_types` plus per-tier ceilings split `enterprise`/`desktop`
+  (published processes, concurrent sessions, runtime resources, process-alert
+  machines). Needs the `System - License` permission; degrades to an
+  `unavailable` note if the read is denied.
+
+### Changed
+- `list_queues` rows now include the per-queue `deferred` count, folded in from
+  `GET /dashboards/workQueueCompositions` (the one state count `WorkQueueSummary`
+  does not carry). The aggregate is fetched only for the queues being returned,
+  and `deferred` is omitted rather than failing the listing if the read is denied.
+
+### Notes
+- `resourceUtilization` / `resourcesSummaryUtilization` were assessed and left
+  out **as raw reads** — their shape is a chart feed (a 24-hour heat-map row per
+  worker per day; an unlabelled aggregate time-series), not the point facts an
+  LLM tool wants. The useful form, a derived per-worker utilisation tool, is a
+  real value-add for any consumer and is deferred to its own release (it needs
+  page-number paging support — the API's only such read — and an aggregation
+  design).
+
 ## [0.3.0] — 2026-06-14
 Incident response & diagnostics — drill from the list surface into the one
 failing thing, and stop a schedule running in error.

@@ -262,6 +262,84 @@ class TestListQueues:
             "sorted_by": "pendingItemCount desc",
         }
 
+    def test_folds_in_the_deferred_count_from_compositions(self):
+        # WorkQueueSummary has no deferred field; list_queues adds it from the
+        # workQueueCompositions aggregate (Invoices has 3 deferred in the mock).
+        rows = {q["name"]: q for q in tier1()["list_queues"]()["items"]}
+        assert rows["Invoices"]["deferred"] == 3
+        assert rows["Onboarding"]["deferred"] == 0  # no entry => zero, not unknown
+
+    def test_deferred_is_only_fetched_for_the_returned_queues(self):
+        # Truncation means the composition request covers just the page shown,
+        # not the whole estate — capture the ids the aggregate was asked for.
+        class SpyClient(MockBPClient):
+            asked_for = None
+
+            def get_queue_compositions(self, queue_ids):
+                SpyClient.asked_for = list(queue_ids)
+                return super().get_queue_compositions(queue_ids)
+
+        result = tier1(SpyClient())["list_queues"](limit=1)
+        assert len(result["items"]) == 1  # Invoices (biggest backlog)
+        assert SpyClient.asked_for == [result["items"][0]["id"]]
+
+    @pytest.mark.parametrize(
+        "error",
+        [requests.HTTPError("403 Forbidden"), requests.Timeout("read timed out")],
+        ids=["denied", "timeout"],
+    )
+    def test_deferred_omitted_and_flagged_when_the_aggregate_read_fails(self, error):
+        # A denied or dropped compositions read must not lose the listing; the
+        # deferred field is absent and meta.deferred_unavailable degrades visibly.
+        class NoCompositionsClient(MockBPClient):
+            def get_queue_compositions(self, queue_ids):
+                raise error
+
+        result = tier1(NoCompositionsClient())["list_queues"]()
+        assert result["items"]  # listing still stands
+        assert all("deferred" not in q for q in result["items"])
+        assert result["meta"]["deferred_unavailable"] is True
+
+    def test_deferred_omitted_for_a_queue_the_aggregate_does_not_report(self):
+        # A null count, or a queue missing from a short/paged response, is
+        # UNKNOWN — the field is omitted for it, never a fabricated zero. Here
+        # the aggregate reports only Invoices; Onboarding must not show deferred.
+        class PartialClient(MockBPClient):
+            def get_queue_compositions(self, queue_ids):
+                return [{"id": queue_ids[0], "name": "Invoices", "deferred": 7}]
+
+        rows = {q["name"]: q for q in tier1(PartialClient())["list_queues"]()["items"]}
+        assert rows["Invoices"]["deferred"] == 7
+        assert "deferred" not in rows["Onboarding"]
+
+    def test_deferred_omitted_when_its_count_is_null(self):
+        class NullDeferredClient(MockBPClient):
+            def get_queue_compositions(self, queue_ids):
+                return [{"id": qid, "deferred": None} for qid in queue_ids]
+
+        rows = tier1(NullDeferredClient())["list_queues"]()["items"]
+        assert all("deferred" not in q for q in rows)
+
+    def test_deferred_omitted_when_the_body_is_not_a_list(self):
+        # A gateway that reshapes the array into an object must not crash the
+        # listing — no usable rows, so deferred is simply omitted (read succeeded).
+        class ReshapedClient(MockBPClient):
+            def get_queue_compositions(self, queue_ids):
+                return {"items": []}  # not the bare array the endpoint returns
+
+        result = tier1(ReshapedClient())["list_queues"]()
+        assert result["items"]
+        assert all("deferred" not in q for q in result["items"])
+        assert "deferred_unavailable" not in result["meta"]  # the read itself worked
+
+    def test_empty_estate_skips_the_composition_request(self):
+        class SpyClient(MockBPClient):
+            def get_queue_compositions(self, queue_ids):  # pragma: no cover
+                raise AssertionError("must not request compositions for no queues")
+
+        result = tier1(SpyClient(queues=[]))["list_queues"]()
+        assert result["items"] == []
+
 
 class TestGetQueue:
     def test_resolves_name_to_the_queue(self):
@@ -834,7 +912,9 @@ class TestEstateHealth:
 
         result = tier2(NoLicenceClient())["estate_health"]()
         assert result["workers_total"] == 3
-        assert str(error) in result["license_usage"]["unavailable"]
+        note = result["license_usage"]["unavailable"]
+        assert note.startswith("licence read failed:")
+        assert str(error) in note
 
     def test_a_worker_without_a_status_is_counted_as_unknown(self):
         client = MockBPClient(resources=[{"name": "B-1"}])
@@ -847,6 +927,50 @@ class TestEstateHealth:
         assert result["workers_by_status"] == {}
         assert result["workers_requiring_attention"] == []
         assert result["attention_meta"]["truncated"] is False
+
+
+class TestLicenseEntitlement:
+    def test_reshapes_entitlement_into_readable_tiers(self):
+        result = tier2()["license_entitlement"]()
+        assert result["active_license_types"] == ["Enterprise"]
+        assert result["enterprise"] == {
+            "published_processes_limit": 0,
+            "concurrent_sessions_limit": 10,
+            "runtime_resources_limit": 5,
+            "process_alert_machines_limit": 0,
+        }
+        assert result["desktop"]["concurrent_sessions_limit"] == 0
+
+    def test_missing_tier_yields_nulls_not_an_error(self):
+        client = MockBPClient(license_entitlement={"activeLicenseTypes": ["Desktop"]})
+        result = tier2(client)["license_entitlement"]()
+        assert result["active_license_types"] == ["Desktop"]
+        assert result["enterprise"] == {
+            "published_processes_limit": None,
+            "concurrent_sessions_limit": None,
+            "runtime_resources_limit": None,
+            "process_alert_machines_limit": None,
+        }
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            requests.HTTPError("403 Forbidden"),
+            requests.Timeout("read timed out"),
+            requests.ConnectionError("connection refused"),
+        ],
+        ids=["denied", "timeout", "connection"],
+    )
+    def test_read_failure_degrades_visibly_not_fatally(self, error):
+        # The "System - License" permission may be withheld; a denied or dropped
+        # read returns an unavailable note rather than erroring the tool.
+        class NoEntitlementClient(MockBPClient):
+            def get_license_entitlement(self):
+                raise error
+
+        result = tier2(NoEntitlementClient())["license_entitlement"]()
+        assert result["unavailable"].startswith("licence entitlement read failed:")
+        assert str(error) in result["unavailable"]
 
 
 # --- Registration ------------------------------------------------------------------
@@ -885,6 +1009,7 @@ class TestRegisterTools:
             "exception_summary",
             "throughput_summary",
             "estate_health",
+            "license_entitlement",
         ]
         assert [fn.__name__ for fn in app.registered] == names
 

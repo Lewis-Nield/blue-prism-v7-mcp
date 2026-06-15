@@ -349,6 +349,28 @@ _DEFAULT_LIMITS_AND_USAGE: dict = {
     "processAlertMachinesUsed": 0,
 }
 
+_DEFAULT_LICENSE_ENTITLEMENT: dict = {
+    "activeLicenseTypes": ["Enterprise"],
+    "enterpriseEntitlement": {
+        "publishedprocesseslimit": 0,
+        "concurrentsessionslimit": 10,
+        "runtimeresourceslimit": 5,
+        "processalertmachineslimit": 0,
+    },
+    "desktopEntitlement": {
+        "publishedprocesseslimit": 0,
+        "concurrentsessionslimit": 0,
+        "runtimeresourceslimit": 0,
+        "processalertmachineslimit": 0,
+    },
+}
+
+# Per-queue deferred counts the workQueueCompositions aggregate adds on top of
+# WorkQueueSummary (keyed by queue id; queues without an entry report deferred 0).
+_DEFAULT_DEFERRED_BY_QUEUE: dict[str, int] = {
+    "9b6f3a1c-2e45-4d07-8c11-000000000101": 3,  # Invoices
+}
+
 
 class MockBPClient:
     """Offline BPClient: same read methods, in-memory data, no HTTP."""
@@ -365,6 +387,8 @@ class MockBPClient:
         item_attempts: dict[str, list[dict]] | None = None,
         session_logs: dict[str, list[dict]] | None = None,
         limits_and_usage: dict | None = None,
+        license_entitlement: dict | None = None,
+        deferred_by_queue: dict[str, int] | None = None,
         permissions: list[str] | None = None,
     ) -> None:
         self._resources = resources if resources is not None else list(_DEFAULT_RESOURCES)
@@ -394,6 +418,16 @@ class MockBPClient:
         )
         self._limits_and_usage = (
             limits_and_usage if limits_and_usage is not None else dict(_DEFAULT_LIMITS_AND_USAGE)
+        )
+        self._license_entitlement = (
+            license_entitlement
+            if license_entitlement is not None
+            else dict(_DEFAULT_LICENSE_ENTITLEMENT)
+        )
+        self._deferred_by_queue = (
+            deferred_by_queue
+            if deferred_by_queue is not None
+            else dict(_DEFAULT_DEFERRED_BY_QUEUE)
         )
         self._permissions = permissions if permissions is not None else list(_DEFAULT_PERMISSIONS)
         self._session_counter = 0
@@ -489,6 +523,31 @@ class MockBPClient:
 
     def get_current_limits_and_usage(self) -> dict:
         return dict(self._limits_and_usage)
+
+    def get_license_entitlement(self) -> dict:
+        return dict(self._license_entitlement)
+
+    def get_queue_compositions(self, queue_ids: list[str]) -> list[dict]:
+        # Mirror the live aggregate: one WorkQueueComposition per requested id
+        # that exists, carrying the per-state counts (deferred is the datum the
+        # WorkQueueSummary row lacks). Unknown ids are skipped, like the live API.
+        rows = []
+        for queue in self._queues:
+            qid = queue.get("id")
+            if qid not in queue_ids:
+                continue
+            rows.append(
+                {
+                    "id": qid,
+                    "name": queue.get("name"),
+                    "completed": queue.get("completedItemCount", 0),
+                    "pending": queue.get("pendingItemCount", 0),
+                    "deferred": self._deferred_by_queue.get(qid, 0),
+                    "locked": queue.get("lockedItemCount", 0),
+                    "exceptioned": queue.get("exceptionedItemCount", 0),
+                }
+            )
+        return rows
 
     def get_user_permissions(self) -> list[str]:
         return list(self._permissions)
