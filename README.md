@@ -12,7 +12,8 @@ is scrubbed at the tool boundary (optional Presidio backend).
 
 ## Status
 
-Actively developed against the phased plan in [DESIGN.md](DESIGN.md):
+The **v0.1.0 foundation** was built in eight phases against the plan in
+[DESIGN.md](DESIGN.md):
 
 - [x] Phase 0 — Scaffold
 - [x] Phase 1 — Decouple the client into `BPClient`
@@ -22,6 +23,9 @@ Actively developed against the phased plan in [DESIGN.md](DESIGN.md):
 - [x] Phase 5 — Governance scaffold + Tier 3, shipped disabled
 - [x] Phase 6 — Server + packaging
 - [x] Phase 7 — Validate (stdio handshake, end-to-end, coverage gate)
+
+Development continues as themed minor releases on top of that foundation — see
+[CHANGELOG.md](CHANGELOG.md) for the release history.
 
 ## Why v7 Enterprise
 
