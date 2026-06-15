@@ -7,6 +7,40 @@ additive endpoint is a minor bump.
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-06-15
+Context & topology — four read-only primitives that explain how the estate is
+wired: which process drains a queue, how workers are pooled, what shared
+configuration processes depend on, and how the process catalogue is organised.
+Each endpoint was spec-pinned field-by-field against the 7.5.1, 7.4.0, and 7.2.0
+APIs before any code.
+
+### Added
+- `list_queue_configurations` (Tier 1) — `GET /workqueues/configurations`, the
+  active queues' process→queue map: each active queue's assigned process and
+  resource group plus its live activity (active sessions, available resources,
+  time/ETA to clear). Needs Blue Prism 7.4+; on an older estate (or a denied
+  read) it returns an empty envelope with a `meta.unavailable` note rather than
+  failing the read surface.
+- `list_resource_pools` (Tier 1) — `GET /resources/pools`, the resource pools
+  (groupings of digital workers), their member counts and database status.
+- `list_environment_variables` (Tier 1) — `GET /environmentvariables`, the
+  shared process-configuration variables. The `value` is scrubbed type-aware on
+  the variable's Blue Prism data type — the same fail-closed policy as the
+  queue-item payload: a Password variable is redacted, free text is scrubbed,
+  binary/image is dropped, and numbers/flags/dates pass through.
+- `list_process_groups` (Tier 1) — `GET /processgroups/root/descendants`, the
+  process tree (folders and published processes) so an agent can see how the
+  catalogue is organised.
+
+### Notes
+- `list_queue_configurations` is a separate tool rather than a fold into
+  `list_queues`: it covers only active queues and carries live stats, a
+  different population and shape. The opinionated queue→process *name* mapping
+  stays a consumer concern; the tool exposes the generic id-based primitive.
+- The `environmentvariables` `value` is typed `object` with no inner shape in
+  the spec, so its exact form is a day-one live-verification item; the
+  type-aware scrub keys on the sibling `dataType` and holds either way.
+
 ## [0.4.0] — 2026-06-15
 Estate insight — surface the licence entitlement picture and the one queue
 count the summary row omits. The dashboard aggregates were spec-pinned
@@ -86,7 +120,9 @@ First runnable release — the foundation, built in eight phases (see
 - FastMCP stdio server, a first-class mock run mode, console entrypoint, and
   deployment / day-one verification docs.
 
-[Unreleased]: https://github.com/8m7nyv54n5-ux/blue-prism-v7-mcp/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/8m7nyv54n5-ux/blue-prism-v7-mcp/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/8m7nyv54n5-ux/blue-prism-v7-mcp/compare/v0.4.0...v0.5.0
+[0.4.0]: https://github.com/8m7nyv54n5-ux/blue-prism-v7-mcp/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/8m7nyv54n5-ux/blue-prism-v7-mcp/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/8m7nyv54n5-ux/blue-prism-v7-mcp/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/8m7nyv54n5-ux/blue-prism-v7-mcp/compare/v0.1.0...v0.1.1

@@ -511,11 +511,70 @@ class BPClient:
         ids = tuple(sorted(queue_ids))
         return self._cached(
             ("queue_compositions", ids),
-            lambda: self._get(
-                "/dashboards/workQueueCompositions",
-                params={"workQueueIds": list(ids)},
-            )
-            or [],
+            lambda: (
+                self._get(
+                    "/dashboards/workQueueCompositions",
+                    params={"workQueueIds": list(ids)},
+                )
+                or []
+            ),
+        )
+
+    def get_queue_configurations(self) -> list[dict]:
+        """GET /workqueues/configurations — the active queues' process/resource map.
+
+        Each active work queue's assigned process and resource group, plus its
+        live activity (active sessions, available resources, time/ETA estimates)
+        — the topology that links a queue to the work that drains it, which the
+        plain /workqueues listing does not carry. Token-paged like the other
+        collections.
+
+        Introduced at 7.4 (the one endpoint in this surface above the 7.2 floor):
+        a 7.2/7.3 estate 404s here, which the tool layer degrades to a visible
+        "unavailable" note rather than letting it fail the read surface.
+        """
+        return self._cached(
+            "queue_configurations",
+            lambda: self._get_collection("/workqueues/configurations"),
+        )
+
+    def get_resource_pools(self) -> list[dict]:
+        """GET /resources/pools — the resource pools and their membership.
+
+        Each pool's name, member count, and reported database status. Unlike the
+        other collection reads this endpoint answers a bare array with no paging
+        envelope, so it is a single unpaged request; an empty/204 body coerces to
+        [] so the return is always a list.
+        """
+        return self._cached(
+            "resource_pools",
+            lambda: self._get("/resources/pools") or [],
+        )
+
+    def get_environment_variables(self) -> list[dict]:
+        """GET /environmentvariables — the estate's environment-variable catalogue.
+
+        Each variable's name, description, Blue Prism data type, and value. The
+        value is a configuration payload that can hold a secret (a Password-typed
+        variable) or personal data (free text), so the tool layer scrubs it
+        type-aware before it reaches the model — the same fail-closed policy as
+        the queue-item payload. Token-paged.
+        """
+        return self._cached(
+            "environment_variables",
+            lambda: self._get_collection("/environmentvariables"),
+        )
+
+    def get_process_groups(self) -> list[dict]:
+        """GET /processgroups/root/descendants — the process-group tree.
+
+        A flat list of every node under the process tree root — each a process
+        (an Item) or a folder (a Group) with its name and last-modified time —
+        so an agent can see how the process catalogue is organised. Token-paged.
+        """
+        return self._cached(
+            "process_groups",
+            lambda: self._get_collection("/processgroups/root/descendants"),
         )
 
     def get_user_permissions(self) -> list[str]:

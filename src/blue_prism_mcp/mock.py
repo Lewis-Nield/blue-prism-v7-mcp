@@ -371,6 +371,89 @@ _DEFAULT_DEFERRED_BY_QUEUE: dict[str, int] = {
     "9b6f3a1c-2e45-4d07-8c11-000000000101": 3,  # Invoices
 }
 
+_RESOURCE_GROUP_PROD = "1f8b6c4d-0a23-4e91-9d77-000000000401"
+
+# WorkQueueConfigurationSummary rows: the ACTIVE queues only, each linking a
+# queue to its assigned process and resource group, plus live activity stats.
+_DEFAULT_QUEUE_CONFIGURATIONS: list[dict] = [
+    {
+        "id": "9b6f3a1c-2e45-4d07-8c11-000000000101",  # Invoices
+        "name": "Invoices",
+        "activeWorkQueueConfiguration": {
+            "assignedProcessId": _PROC_INVOICES,
+            "assignedResourceGroupId": _RESOURCE_GROUP_PROD,
+        },
+        "activeQueueStats": {
+            "activeSessions": 1,
+            "availableResources": 2,
+            "timeRemaining": "00:16:48",
+            "elapsedRemaining": "00:02:00",
+            "ETA": "2026-03-02T12:30:00Z",
+        },
+    },
+]
+
+# ResourcePool rows — a BARE array on the live endpoint (no paging envelope).
+_DEFAULT_RESOURCE_POOLS: list[dict] = [
+    {
+        "id": "3a5e7c9d-1b46-4f82-8e10-000000000501",
+        "name": "Production Pool",
+        "members": 2,
+        "databaseStatus": "Ready",
+    },
+]
+
+# EnvironmentVariable rows — value is a typed configuration payload scrubbed
+# type-aware at the tool boundary: the Text value carries PII to exercise the
+# scrubber, the Password value is redacted wholesale, the Number scalar passes
+# through untouched.
+_DEFAULT_ENVIRONMENT_VARIABLES: list[dict] = [
+    {
+        "id": "6d8f0a2c-3e57-4912-bd83-000000000601",
+        "name": "Finance Mailbox",
+        "description": "Inbox the invoice bot reads from",
+        "dataType": "Text",
+        "value": "ap-team@contoso.example and 07700 900123",
+    },
+    {
+        "id": "6d8f0a2c-3e57-4912-bd83-000000000602",
+        "name": "Ledger API Key",
+        "description": "Credential for the ledger posting API",
+        "dataType": "Password",
+        "value": "s3cr3t-token-value",
+    },
+    {
+        "id": "6d8f0a2c-3e57-4912-bd83-000000000603",
+        "name": "Retry Limit",
+        "description": "Maximum retries before manual review",
+        "dataType": "Number",
+        "value": 3,
+    },
+]
+
+# ProcessGroupItem rows — the flat descendant list of the process tree: a
+# folder (Group) and the published processes (Items) within it.
+_DEFAULT_PROCESS_GROUPS: list[dict] = [
+    {
+        "id": "8f0a2c4e-5b69-4d31-a2c5-000000000701",
+        "name": "Finance",
+        "nodeType": "Group",
+        "lastModified": "0001-01-01T00:00:00Z",
+    },
+    {
+        "id": _PROC_INVOICES,
+        "name": "Invoice Processing",
+        "nodeType": "Item",
+        "lastModified": "2026-02-20T09:05:10Z",
+    },
+    {
+        "id": _PROC_ONBOARDING,
+        "name": "Customer Onboarding",
+        "nodeType": "Item",
+        "lastModified": "2026-01-14T14:22:00Z",
+    },
+]
+
 
 class MockBPClient:
     """Offline BPClient: same read methods, in-memory data, no HTTP."""
@@ -390,6 +473,10 @@ class MockBPClient:
         license_entitlement: dict | None = None,
         deferred_by_queue: dict[str, int] | None = None,
         permissions: list[str] | None = None,
+        queue_configurations: list[dict] | None = None,
+        resource_pools: list[dict] | None = None,
+        environment_variables: list[dict] | None = None,
+        process_groups: list[dict] | None = None,
     ) -> None:
         self._resources = resources if resources is not None else list(_DEFAULT_RESOURCES)
         self._queues = queues if queues is not None else [dict(q) for q in _DEFAULT_QUEUES]
@@ -425,11 +512,29 @@ class MockBPClient:
             else dict(_DEFAULT_LICENSE_ENTITLEMENT)
         )
         self._deferred_by_queue = (
-            deferred_by_queue
-            if deferred_by_queue is not None
-            else dict(_DEFAULT_DEFERRED_BY_QUEUE)
+            deferred_by_queue if deferred_by_queue is not None else dict(_DEFAULT_DEFERRED_BY_QUEUE)
         )
         self._permissions = permissions if permissions is not None else list(_DEFAULT_PERMISSIONS)
+        self._queue_configurations = (
+            queue_configurations
+            if queue_configurations is not None
+            else [dict(c) for c in _DEFAULT_QUEUE_CONFIGURATIONS]
+        )
+        self._resource_pools = (
+            resource_pools
+            if resource_pools is not None
+            else [dict(p) for p in _DEFAULT_RESOURCE_POOLS]
+        )
+        self._environment_variables = (
+            environment_variables
+            if environment_variables is not None
+            else [dict(v) for v in _DEFAULT_ENVIRONMENT_VARIABLES]
+        )
+        self._process_groups = (
+            process_groups
+            if process_groups is not None
+            else [dict(g) for g in _DEFAULT_PROCESS_GROUPS]
+        )
         self._session_counter = 0
         # Start-up parameters applied per session id (kept out of the session
         # rows so they don't leak into list_sessions output).
@@ -548,6 +653,18 @@ class MockBPClient:
                 }
             )
         return rows
+
+    def get_queue_configurations(self) -> list[dict]:
+        return [dict(c) for c in self._queue_configurations]
+
+    def get_resource_pools(self) -> list[dict]:
+        return [dict(p) for p in self._resource_pools]
+
+    def get_environment_variables(self) -> list[dict]:
+        return [dict(v) for v in self._environment_variables]
+
+    def get_process_groups(self) -> list[dict]:
+        return [dict(g) for g in self._process_groups]
 
     def get_user_permissions(self) -> list[str]:
         return list(self._permissions)

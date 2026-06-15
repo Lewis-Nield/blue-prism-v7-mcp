@@ -41,6 +41,10 @@ READ_TOOLS = {
     "list_resources",
     "list_schedules",
     "list_processes",
+    "list_queue_configurations",
+    "list_resource_pools",
+    "list_environment_variables",
+    "list_process_groups",
     "exception_summary",
     "throughput_summary",
     "estate_health",
@@ -225,7 +229,7 @@ class TestBuildServer:
         with caplog.at_level(logging.INFO, logger="blue_prism_mcp.server"):
             build_server(BPConfig(data_source="mock", client_secret="s3cret"))
         startup = caplog.records[-1].getMessage()
-        assert "15 tools" in startup
+        assert "19 tools" in startup
         assert "data_source=mock" in startup
         assert "actions=disabled" in startup
         assert "s3cret" not in startup
