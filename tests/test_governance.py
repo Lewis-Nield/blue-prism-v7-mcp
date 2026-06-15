@@ -808,6 +808,7 @@ READ_TOOLS = [
     "exception_summary",
     "throughput_summary",
     "estate_health",
+    "license_entitlement",
 ]
 
 

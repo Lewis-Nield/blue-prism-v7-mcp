@@ -226,16 +226,30 @@ Wire-level contract (identical across versions):
   the fallback succeeds, because a bare 404 may equally mean the session id
   itself is unknown and must not demote a 7.4+ estate.
 - **`/dashboards/*` (all five present at the 7.2 floor; verified on 7.2.0 and
-  7.5.1):** `currentLimitsAndUsage` (licence limits vs current usage —
-  concurrent sessions, runtime resources, published processes) backs
-  `estate_health`'s licence block and is the only dashboards endpoint this
-  server consumes. `workQueueCompositions` is redundant here —
-  `GET /workqueues` already returns the same per-state counts on
-  `WorkQueueSummary` (pending/completed/locked/exceptioned/total plus
-  `averageWorkTime`). The two resource-utilization endpoints are dashboard MI
-  (and the API's only page-*number*-paged reads); utilisation stays out of the
-  reusable surface. Nothing under `/dashboards` aggregates exceptions or
-  throughput.
+  7.5.1):** three of the five are consumed (v0.4.0 spec-pin, field-by-field on
+  7.5.1). `currentLimitsAndUsage` (licence limits vs current usage — concurrent
+  sessions, runtime resources, published processes) backs `estate_health`'s
+  licence block. `licensesEntitlement` (no params, single object) adds the
+  *entitlement* side that nothing else carries — `activeLicenseTypes` plus
+  per-tier ceilings split `enterprise`/`desktop` — and backs the
+  `license_entitlement` tool. `workQueueCompositions` is *almost* redundant:
+  `GET /workqueues`'s `WorkQueueSummary` already carries every per-state count
+  (pending/completed/locked/exceptioned/total + `averageWorkTime`) **except**
+  `deferred`, so it is consumed only for that one count, which `list_queues`
+  folds into its rows (it requires `workQueueIds`, so the call covers just the
+  queues being returned, and degrades to omitting `deferred` if denied). The two
+  resource-utilization endpoints stay out **as raw reads** — not because they
+  belong to any one consumer, but because of their *shape*:
+  `resourceUtilization` is a heat-map feed (one row per worker per day, a
+  24-integer array of minutes-worked-per-hour) and `resourcesSummaryUtilization`
+  is an unlabelled aggregate time-series (`{usagehour, usage}`, no per-worker
+  breakdown). Both are chart series, not the point facts an LLM tool surface
+  wants. The genuinely useful form — a *derived* per-worker "% of available
+  minutes worked over a window" — is a real value-add for any consumer, but it
+  needs a deliberate aggregation design and page-*number* paging support (this
+  is the API's only page-number-paged read; the client today does
+  none/token/offset), so it is deferred to its own utilisation-insight release
+  (see backlog). Nothing under `/dashboards` aggregates exceptions or throughput.
 - **`ScheduleSummary` is the schedule definition only** (interval fields,
   `isRetired`; its `id` is an *integer*, unlike every other entity's UUID).
   No next-run field exists anywhere in the API; per-run history (a status
@@ -353,9 +367,16 @@ Sequenced as:
   - `get_session` (`GET /sessions/{id}`) — one run's detail by id, no date window.
 - **Endpoint-gap backlog (post-0.3.0 — each a real value-add the audit identified;
   most map onto Phases 9–10 / console E7–E9):**
-  - *Insight:* dashboard aggregates (`workQueueCompositions`, `resourceUtilization`,
-    `licensesEntitlement`) for cheaper Tier-2 metrics and the console baseline feed;
-    schedule run-history is already Phase 9.
+  - *Insight (DELIVERED v0.4.0):* the dashboard aggregates were spec-pinned
+    field-by-field on 7.5.1 — `licensesEntitlement` shipped as the
+    `license_entitlement` tool and `workQueueCompositions`' one net-new datum
+    (`deferred`) folded into `list_queues`. Schedule run-history is still Phase 9.
+  - *Utilisation insight (deferred derived tool):* a `resource_utilization`
+    Tier-2 tool aggregating `resourceUtilization`'s 24h heat-map into per-worker
+    "% of available minutes worked over a window" — genuinely useful to any
+    consumer, not console-only. Held back from v0.4.0 because it needs (a)
+    page-*number* paging support added to the client (the API's only such read)
+    and (b) a deliberate aggregation/denominator design. Its own small release.
   - *Context/console:* `workqueues/configurations` (the process→queue map console
     severity needs — L2), `resources/pools`, environment-variable reads, process groups.
 - **North star (not a near-term gap):** 7.5's `subscriptions` PATCH and work-queue

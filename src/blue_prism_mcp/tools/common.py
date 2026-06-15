@@ -16,6 +16,8 @@ from functools import lru_cache
 from typing import Any, Callable
 from uuid import UUID
 
+import requests
+
 from ..pii import Scrubber
 
 # Default cap on list-tool results. A large estate (200+ processes, months of
@@ -73,6 +75,22 @@ def envelope(
             "sorted_by": sorted_by,
         },
     }
+
+
+def read_or_unavailable(read: Callable[[], dict], label: str) -> dict:
+    """Run an optional read; on a transport/HTTP failure return an unavailable note.
+
+    The insight tools layer a few non-essential `/dashboards` reads on top of
+    their core data; a denied (no permission) or dropped (timeout, connection)
+    one must degrade *visibly* rather than failing the whole tool. Returns the
+    read's dict on success, or ``{"unavailable": "<label> failed: <error>"}`` —
+    one shape every consumer can branch on. RequestException is the root of
+    every error requests raises (HTTPError, Timeout, ConnectionError).
+    """
+    try:
+        return read()
+    except requests.RequestException as exc:
+        return {"unavailable": f"{label} failed: {exc}"}
 
 
 def validate_iso(value: str | None, field: str, required: bool = False) -> None:

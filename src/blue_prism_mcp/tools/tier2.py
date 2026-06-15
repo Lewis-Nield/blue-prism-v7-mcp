@@ -4,8 +4,9 @@ Separate single-purpose tools rather than parameters on the primitives — tight
 descriptions drive better model tool-selection. No v7 endpoint aggregates
 exceptions or throughput (verified — see DESIGN.md's /dashboards verdict), so
 exception_summary and throughput_summary aggregate client-side over the Tier 1
-reads, under the same required-window scoping. estate_health adds the one
-/dashboards read this server consumes: licence limits vs usage.
+reads, under the same required-window scoping. estate_health and
+license_entitlement read the two licence /dashboards endpoints this server
+consumes: current limits vs usage, and the per-tier entitlement ceilings.
 """
 
 from __future__ import annotations
@@ -13,13 +14,12 @@ from __future__ import annotations
 from collections import Counter
 from typing import Callable
 
-import requests
-
 from ..pii import Scrubber
 from .common import (
     DEFAULT_LIMIT,
     envelope,
     make_cached_scrub,
+    read_or_unavailable,
     require_window,
     resolve_id,
     resource_urgency,
@@ -29,9 +29,23 @@ from .common import (
 # down or degraded rather than merely busy/idle.
 _ATTENTION_STATUSES = frozenset({"Missing", "Offline", "Warning"})
 
+# The BaseEntitlement keys (all lowercase in the API) mapped to readable names.
+_ENTITLEMENT_FIELDS = {
+    "publishedprocesseslimit": "published_processes_limit",
+    "concurrentsessionslimit": "concurrent_sessions_limit",
+    "runtimeresourceslimit": "runtime_resources_limit",
+    "processalertmachineslimit": "process_alert_machines_limit",
+}
+
+
+def _entitlement_tier(tier: dict | None) -> dict:
+    """Reshape a BaseEntitlement into readable snake_case keys (values untouched)."""
+    tier = tier or {}
+    return {friendly: tier.get(raw) for raw, friendly in _ENTITLEMENT_FIELDS.items()}
+
 
 def build_tier2_tools(client, scrubber: Scrubber) -> list[Callable]:
-    """Build the three insight tools over *client*, scrubbing with *scrubber*."""
+    """Build the four insight tools over *client*, scrubbing with *scrubber*."""
     scrub_text = make_cached_scrub(scrubber)
 
     def exception_summary(
@@ -173,14 +187,10 @@ def build_tier2_tools(client, scrubber: Scrubber) -> list[Callable]:
             sorted_by="displayStatus urgency (Missing/Offline/Warning), name",
             limit=limit,
         )
-        try:
-            license_usage = client.get_current_limits_and_usage()
-        except requests.RequestException as exc:
-            # A service account without dashboard permission — or a timeout /
-            # connection drop on this one extra read — shouldn't lose worker
-            # health too. RequestException is the root of every error requests
-            # raises (HTTPError, Timeout, ConnectionError). Degrade visibly.
-            license_usage = {"unavailable": f"licence read failed: {exc}"}
+        # A service account without dashboard permission — or a timeout /
+        # connection drop on this one extra read — shouldn't lose worker health
+        # too; the licence block degrades visibly instead (see read_or_unavailable).
+        license_usage = read_or_unavailable(client.get_current_limits_and_usage, "licence read")
         return {
             "workers_total": len(resources),
             "workers_by_status": dict(
@@ -191,4 +201,27 @@ def build_tier2_tools(client, scrubber: Scrubber) -> list[Callable]:
             "license_usage": license_usage,
         }
 
-    return [exception_summary, throughput_summary, estate_health]
+    def license_entitlement() -> dict:
+        """Report what the estate is licensed for: entitlement ceilings by tier.
+
+        Complements estate_health's license_usage (limits vs current usage)
+        with the entitlement side: `active_license_types` lists the licence
+        types in force, and `enterprise`/`desktop` give each tier's ceilings —
+        published processes, concurrent sessions, runtime resources, and
+        process-alert machines. Use it to see the licensed capacity behind the
+        usage figures (e.g. enterprise vs desktop runtime-resource headroom).
+
+        Reading entitlement needs the "System - License" permission; if the
+        read is denied or fails, the result carries an `unavailable` note
+        instead of erroring.
+        """
+        raw = read_or_unavailable(client.get_license_entitlement, "licence entitlement read")
+        if "unavailable" in raw:
+            return raw
+        return {
+            "active_license_types": raw.get("activeLicenseTypes") or [],
+            "enterprise": _entitlement_tier(raw.get("enterpriseEntitlement")),
+            "desktop": _entitlement_tier(raw.get("desktopEntitlement")),
+        }
+
+    return [exception_summary, throughput_summary, estate_health, license_entitlement]
