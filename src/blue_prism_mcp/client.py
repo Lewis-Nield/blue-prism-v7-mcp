@@ -30,12 +30,10 @@ from typing import Any, Callable
 
 import requests
 
+from .cache import MISS, Cache, TTLCache
 from .config import BPConfig
 
 logger = logging.getLogger("blue_prism_mcp.client")
-
-# Cache sentinel — distinguishes "absent" from a cached falsy value (e.g. []).
-_MISS = object()
 
 # Refresh the OAuth2 token this many seconds before its stated expiry, so a
 # token never goes stale mid-request. The 401 retry in _request remains the
@@ -43,58 +41,46 @@ _MISS = object()
 _TOKEN_EXPIRY_SKEW = 60.0
 
 
-class _TTLCache:
-    """A tiny time-to-live cache keyed by an arbitrary hashable.
-
-    Replaces Streamlit's @st.cache_data: same intent (don't re-hit the live API
-    on every read within a short window), but bound to one client instance
-    instead of a process-global store.
-    """
-
-    def __init__(self, ttl: float) -> None:
-        self._ttl = ttl
-        self._store: dict[Any, tuple[float, Any]] = {}
-
-    def get(self, key: Any) -> Any:
-        entry = self._store.get(key)
-        if entry is None:
-            return _MISS
-        stored_at, value = entry
-        if time.monotonic() - stored_at >= self._ttl:
-            # >= so an entry expires exactly at the TTL boundary, and ttl=0
-            # always misses regardless of clock resolution (no stale read can
-            # slip through on a tied monotonic() reading).
-            del self._store[key]
-            return _MISS
-        return value
-
-    def set(self, key: Any, value: Any) -> None:
-        self._store[key] = (time.monotonic(), value)
-
-    def clear(self) -> None:
-        self._store.clear()
-
-
 class BPClient:
     """Stateful client for one Blue Prism v7 estate.
 
     Holds the injected config, the bearer token, a reused HTTP session, and a
-    per-instance TTL cache. Read methods mirror the v7 entities; write methods
-    (Phase 2/5) are only surfaced as MCP tools when config.enable_actions is True.
+    read cache. The cache is injectable (DESIGN Phase 8): the default is a
+    thread-safe per-instance `TTLCache`, but a long-lived multi-threaded host
+    embedding the engine can supply a shared store behind the `Cache` protocol.
+    Read methods mirror the v7 entities; write methods (Phase 2/5) are only
+    surfaced as MCP tools when config.enable_actions is True.
     """
 
-    def __init__(self, config: BPConfig, session: requests.Session | None = None) -> None:
+    def __init__(
+        self,
+        config: BPConfig,
+        session: requests.Session | None = None,
+        cache: Cache | None = None,
+    ) -> None:
         self._config = config
         self._session = session or requests.Session()  # pools TCP connections
         self._token: str | None = None
         self._token_expiry: float = 0.0  # monotonic deadline; 0 → no token
-        self._cache = _TTLCache(config.cache_ttl)
+        self._cache = cache if cache is not None else TTLCache(config.cache_ttl)
+        # Cache keys are namespaced by estate so an injected store shared across
+        # clients (e.g. one Redis backing several processes) never serves one
+        # estate's reads to another — keys like "resources" would otherwise
+        # collide. The default per-instance TTLCache doesn't need this, but the
+        # injectable seam invites sharing, so the isolation lives at the key.
+        self._cache_ns = config.base_url
         # Session-log endpoint pin: None until /logs is proven the only option,
         # then "logs" for the life of the instance (see get_session_log).
         self._log_path: str | None = None
 
     def clear_cache(self) -> None:
-        """Drop all cached reads (mirrors st.cache_data.clear())."""
+        """Drop all cached reads (mirrors st.cache_data.clear()).
+
+        Clears the whole backing store. With the default per-instance cache that
+        is exactly this client's reads; with an injected store shared across
+        clients it also evicts the others' (the minimal ``Cache`` protocol has no
+        scoped clear) — fresh-but-broad, the safe direction after a mutation.
+        """
         self._cache.clear()
 
     # --- Auth ---------------------------------------------------------------
@@ -295,12 +281,17 @@ class BPClient:
         return collected
 
     def _cached(self, key: Any, produce: Callable[[], Any]) -> Any:
-        """Return a cached read for `key`, computing and storing it on a miss."""
-        hit = self._cache.get(key)
-        if hit is not _MISS:
+        """Return a cached read for `key`, computing and storing it on a miss.
+
+        The key is namespaced by estate (see ``_cache_ns``) so a shared cache
+        never crosses estates.
+        """
+        namespaced = (self._cache_ns, key)
+        hit = self._cache.get(namespaced)
+        if hit is not MISS:
             return hit
         value = produce()
-        self._cache.set(key, value)
+        self._cache.set(namespaced, value)
         return value
 
     # --- Tier 1 reads -------------------------------------------------------

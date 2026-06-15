@@ -13,6 +13,7 @@ import pytest
 import requests
 
 from blue_prism_mcp.config import BPConfig
+from blue_prism_mcp.engine import Engine
 from blue_prism_mcp.mock import MockBPClient
 from blue_prism_mcp.pii import NullScrubber, RegexScrubber, ScrubResult
 from blue_prism_mcp.tools import (
@@ -40,13 +41,13 @@ class MarkerScrubber:
 
 
 def tier1(client=None, scrubber=None) -> dict:
-    tools = build_tier1_tools(client or MockBPClient(), scrubber or NullScrubber())
-    return {t.__name__: t for t in tools}
+    engine = Engine(client or MockBPClient(), scrubber or NullScrubber())
+    return {t.__name__: t for t in build_tier1_tools(engine)}
 
 
 def tier2(client=None, scrubber=None) -> dict:
-    tools = build_tier2_tools(client or MockBPClient(), scrubber or NullScrubber())
-    return {t.__name__: t for t in tools}
+    engine = Engine(client or MockBPClient(), scrubber or NullScrubber())
+    return {t.__name__: t for t in build_tier2_tools(engine)}
 
 
 WINDOW = {"start_date": "2026-03-01", "end_date": "2026-03-31"}
@@ -269,9 +270,11 @@ class TestListQueues:
         assert rows["Invoices"]["deferred"] == 3
         assert rows["Onboarding"]["deferred"] == 0  # no entry => zero, not unknown
 
-    def test_deferred_is_only_fetched_for_the_returned_queues(self):
-        # Truncation means the composition request covers just the page shown,
-        # not the whole estate — capture the ids the aggregate was asked for.
+    def test_deferred_is_folded_into_the_full_ranked_set_not_just_the_page(self):
+        # The deferred fold-in is domain enrichment, so it covers every ranked
+        # queue — an embedder consuming the records gets deferred on all of them.
+        # The MCP `limit` is representation-only: it caps the items shown without
+        # narrowing which queues were enriched.
         class SpyClient(MockBPClient):
             asked_for = None
 
@@ -279,9 +282,10 @@ class TestListQueues:
                 SpyClient.asked_for = list(queue_ids)
                 return super().get_queue_compositions(queue_ids)
 
+        all_ids = [q["id"] for q in SpyClient().get_queues()]
         result = tier1(SpyClient())["list_queues"](limit=1)
-        assert len(result["items"]) == 1  # Invoices (biggest backlog)
-        assert SpyClient.asked_for == [result["items"][0]["id"]]
+        assert len(result["items"]) == 1  # Invoices (biggest backlog) — page capped
+        assert sorted(SpyClient.asked_for) == sorted(all_ids)  # but all were enriched
 
     @pytest.mark.parametrize(
         "error",

@@ -13,6 +13,7 @@ from unittest.mock import MagicMock
 import pytest
 import requests
 
+from blue_prism_mcp.cache import TTLCache
 from blue_prism_mcp.client import BPClient
 from blue_prism_mcp.config import BPConfig
 from blue_prism_mcp.mock import MockBPClient
@@ -266,6 +267,57 @@ class TestBPClient:
         client.get_resources()
         client.get_resources()
         assert session.get.call_count == 2
+
+    def test_an_injected_cache_is_the_one_used(self):
+        # The embeddable core (Phase 8) lets a host inject a shared cache; prove
+        # the client reads/writes through the injected instance, not a default.
+        from blue_prism_mcp.cache import MISS
+
+        class SpyCache:
+            def __init__(self):
+                self.store = {}
+                self.gets, self.sets = 0, 0
+
+            def get(self, key):
+                self.gets += 1
+                return self.store.get(key, MISS)
+
+            def set(self, key, value):
+                self.sets += 1
+                self.store[key] = value
+
+            def clear(self):
+                self.store.clear()
+
+        cache = SpyCache()
+        session = MagicMock()
+        session.post.return_value = _auth_resp()
+        session.get.return_value = _resp([{"name": "BOT-01"}])
+        client = BPClient(make_config(), session=session, cache=cache)
+        client.get_resources()
+        client.get_resources()  # served from the injected cache
+        session.get.assert_called_once()
+        # keys are namespaced by estate, so the bare label is nested under one
+        assert cache.sets == 1 and cache.gets == 2
+        assert any("resources" in key for key in cache.store)
+
+    def test_a_shared_cache_does_not_leak_reads_across_estates(self):
+        # Two clients for different estates sharing one injected store must not
+        # serve estate A's reads to estate B — keys are namespaced by base_url.
+        cache = TTLCache(ttl=30)
+        session_a, session_b = MagicMock(), MagicMock()
+        session_a.post.return_value = session_b.post.return_value = _auth_resp()
+        session_a.get.return_value = _resp([{"name": "ESTATE-A-BOT"}])
+        session_b.get.return_value = _resp([{"name": "ESTATE-B-BOT"}])
+        client_a = BPClient(
+            make_config(base_url="https://a.example/api/v7"), session=session_a, cache=cache
+        )
+        client_b = BPClient(
+            make_config(base_url="https://b.example/api/v7"), session=session_b, cache=cache
+        )
+        assert client_a.get_resources()[0]["name"] == "ESTATE-A-BOT"
+        assert client_b.get_resources()[0]["name"] == "ESTATE-B-BOT"  # not A's
+        session_b.get.assert_called_once()  # B really fetched, not a cache hit
 
 
 # --- Pagination (_get_collection) ---------------------------------------------

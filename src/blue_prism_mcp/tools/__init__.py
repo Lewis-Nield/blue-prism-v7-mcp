@@ -24,20 +24,31 @@ from typing import Callable
 from ..config import BPConfig
 from ..governance import build_audit_log
 from ..pii import Scrubber
-from .common import DEFAULT_LIMIT, envelope, make_cached_scrub, resolve_id
+from .common import (
+    DEFAULT_LIMIT,
+    Ranked,
+    envelope,
+    make_cached_scrub,
+    rank,
+    resolve_id,
+    to_envelope,
+)
 from .tier1 import build_tier1_tools
 from .tier2 import build_tier2_tools
 from .tier3 import build_tier3_tools
 
 __all__ = [
     "DEFAULT_LIMIT",
+    "Ranked",
     "build_tier1_tools",
     "build_tier2_tools",
     "build_tier3_tools",
     "envelope",
     "make_cached_scrub",
+    "rank",
     "register_tools",
     "resolve_id",
+    "to_envelope",
 ]
 
 
@@ -60,9 +71,14 @@ def register_tools(app, client, scrubber: Scrubber, config: BPConfig) -> list[st
     which action tools registered and which were withheld, with the permission
     clauses they lack.
     """
+    # Local import: engine.py composes the per-tier mixins from this package, so
+    # importing it at module top would close an import cycle.
+    from ..engine import Engine
+
+    engine = Engine(client, scrubber)
     tools: list[Callable] = [
-        *build_tier1_tools(client, scrubber),
-        *build_tier2_tools(client, scrubber),
+        *build_tier1_tools(engine),
+        *build_tier2_tools(engine),
     ]
     if config.enable_actions:
         audit = build_audit_log(config)

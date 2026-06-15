@@ -93,6 +93,29 @@ day-one verification):
   `start_process`, `stop_session`, `set_schedule_enabled`, `trigger_schedule`,
   `stop_schedule`
 
+## Embed in-process
+
+The same logic that backs the MCP tools is exposed as a plain `Engine` facade,
+so a host can embed it without the stdio transport. Each read method returns the
+full relevance-sorted records — already scrubbed, with name resolution and loud
+validation — leaving the representation (paging, shaping) to the host:
+
+```python
+from blue_prism_mcp import Engine, BPClient, BPConfig, build_scrubber
+
+config = BPConfig(...)            # or BPConfig.from_env()
+engine = Engine(BPClient(config), build_scrubber(config))
+
+ranked = engine.list_queues()     # Ranked: full records, no truncation
+for queue in ranked.records:
+    ...                           # apply your own representation
+```
+
+For a long-lived, multi-threaded host sharing one client across workers, inject
+a shared store behind the `Cache` protocol (the default `TTLCache` is itself
+thread-safe): `BPClient(config, cache=my_cache)`. The MCP server's envelope view
+is just one adapter over the same engine (`tools.common.to_envelope`).
+
 ## Licence
 
 Proprietary — internal distribution.

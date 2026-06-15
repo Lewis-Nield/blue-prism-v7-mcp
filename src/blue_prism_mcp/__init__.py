@@ -5,8 +5,42 @@ Layer map (see DESIGN.md for the full design):
     client.py   — BPClient: the v7 REST client, decoupled from Streamlit (Phase 1-2)
     pii.py      — pluggable Scrubber protocol + Presidio backend (Phase 3)
     tools/      — Tier 1 Visibility, Tier 2 Insight, Tier 3 Control (Phase 4-5)
+    engine.py   — Engine: the embeddable domain facade over the reads (Phase 8)
+    cache.py    — Cache protocol + thread-safe TTLCache (Phase 8)
     server.py   — FastMCP stdio server + console entrypoint (Phase 6)
     __main__.py — `python -m blue_prism_mcp` entrypoint (Phase 7)
+
+Embeddable core (Phase 8): a host can embed the engine in-process and consume
+ranked domain records directly, applying its own representation —
+
+    from blue_prism_mcp import Engine, BPClient, BPConfig, build_scrubber
+    engine = Engine(BPClient(config), build_scrubber(config))
+    ranked = engine.list_queues()          # full records, no truncation
+    for queue in ranked.records: ...
+
+and inject a shared, thread-safe cache behind the ``Cache`` protocol for a
+long-lived multi-threaded host (``BPClient(config, cache=...)``).
 """
 
-__version__ = "0.5.0"
+from .cache import Cache, TTLCache
+from .client import BPClient
+from .config import BPConfig
+from .engine import Engine
+from .mock import MockBPClient
+from .pii import Scrubber, build_scrubber
+from .tools.common import Ranked
+
+__version__ = "0.6.0"
+
+__all__ = [
+    "BPClient",
+    "BPConfig",
+    "Cache",
+    "Engine",
+    "MockBPClient",
+    "Ranked",
+    "Scrubber",
+    "TTLCache",
+    "__version__",
+    "build_scrubber",
+]

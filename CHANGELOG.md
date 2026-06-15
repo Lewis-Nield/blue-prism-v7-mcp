@@ -7,6 +7,43 @@ additive endpoint is a minor bump.
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-06-15
+Embeddable core — an internal architecture release, no new endpoints and **no
+change to the tool surface or behaviour**. It splits each read tool's logic from
+its presentation and makes the cache injectable, so a host can embed the engine
+in-process (consuming ranked records to apply its own representation) and share
+one client safely across worker threads.
+
+### Added
+- `Engine` — a first-class facade over the read surface (`blue_prism_mcp.Engine`)
+  with one method per Tier 1 visibility and Tier 2 insight tool. Each returns the
+  *domain* result — the full relevance-sorted records, already scrubbed at the
+  PII boundaries, with **no top-N truncation** — as a `Ranked` (list tools) or a
+  plain dict (single reads / composites). Name resolution and loud input
+  validation live in the domain methods, so an embedder gets them too.
+- `Ranked` — the domain result type (`records`, `sorted_by`, `meta`); `rank()`
+  (sort → `Ranked`) and `to_envelope()` (the one representation adapter: top-N +
+  meta) in `tools.common`. The existing `envelope()` is retained as the
+  `to_envelope(rank(...))` composition.
+- `Cache` protocol and a thread-safe `TTLCache` default in a new
+  `blue_prism_mcp.cache` module. `BPClient` accepts an injected `cache=`
+  (defaulting to a per-instance `TTLCache`), so a long-lived multi-threaded host
+  can supply a shared/Redis-backed store.
+- Public package exports for embedding: `Engine`, `Ranked`, `Cache`, `TTLCache`,
+  `BPClient`, `MockBPClient`, `Scrubber`, `build_scrubber`, `BPConfig`.
+
+### Changed
+- The MCP tool layer (`build_tier1_tools` / `build_tier2_tools`) is now a thin
+  adapter over an `Engine`: it keeps every tool's exact signature, docstring,
+  and envelope output, delegating the logic to the engine and applying
+  `to_envelope`. `TTLCache` moved from `client.py` to `cache.py` and is now
+  lock-guarded.
+- `list_queues`'s `deferred` fold-in now enriches the full ranked result set
+  rather than only the returned page — a consequence of moving the enrichment
+  into the domain (an embedder consuming the records gets `deferred` on every
+  queue). The MCP `limit` remains representation-only; the items an LLM client
+  sees are unchanged.
+
 ## [0.5.0] — 2026-06-15
 Context & topology — four read-only primitives that explain how the estate is
 wired: which process drains a queue, how workers are pooled, what shared
@@ -120,7 +157,8 @@ First runnable release — the foundation, built in eight phases (see
 - FastMCP stdio server, a first-class mock run mode, console entrypoint, and
   deployment / day-one verification docs.
 
-[Unreleased]: https://github.com/8m7nyv54n5-ux/blue-prism-v7-mcp/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/8m7nyv54n5-ux/blue-prism-v7-mcp/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/8m7nyv54n5-ux/blue-prism-v7-mcp/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/8m7nyv54n5-ux/blue-prism-v7-mcp/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/8m7nyv54n5-ux/blue-prism-v7-mcp/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/8m7nyv54n5-ux/blue-prism-v7-mcp/compare/v0.2.0...v0.3.0

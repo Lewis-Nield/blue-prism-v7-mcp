@@ -184,7 +184,10 @@ policy expects and that no secret or personal data reaches the model.
   logging to stderr — keep it that way in any wrapper scripts.
 - **Caching** — reads are cached per server instance for `BP_API_CACHE_TTL`
   seconds (default 30); two server instances never share state, so one client
-  can safely point at two estates via two server entries.
+  can safely point at two estates via two server entries. The default cache is
+  thread-safe; a host that embeds the engine in-process and shares one client
+  across worker threads can inject its own store (e.g. a shared/Redis-backed
+  cache) behind the `Cache` protocol via `BPClient(config, cache=...)`.
 - **PII** — scrubbing applies at the exception-message and session-log
   boundaries before text leaves the process. `null` is an explicit choice,
   not a fallback; if you configured `regex` or `presidio` and the backend

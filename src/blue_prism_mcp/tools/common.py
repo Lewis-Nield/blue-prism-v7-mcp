@@ -10,6 +10,7 @@ LLM client re-reads the same rows across calls.
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from datetime import datetime
 from difflib import get_close_matches
 from functools import lru_cache
@@ -46,6 +47,69 @@ def resource_urgency(resource: dict) -> tuple:
     )
 
 
+@dataclass(frozen=True)
+class Ranked:
+    """A tool's domain result: the FULL relevance-sorted records, untruncated.
+
+    The split at the heart of the embeddable core (DESIGN Phase 8): a domain
+    function returns ``Ranked`` (every record, already sorted, already scrubbed),
+    and ``to_envelope`` is the one representation adapter that caps it to top-N
+    and wraps it for an LLM client. A host embedding the engine consumes
+    ``records`` directly and applies its own representation instead.
+
+    ``meta`` carries domain-level extras that belong in the envelope's meta but
+    are decided by the domain (e.g. ``deferred_unavailable`` when a fold-in read
+    failed, or an ``unavailable`` note when an endpoint needs a newer estate) —
+    so the list-tool adapter stays a pure cap-and-wrap. (A composite tool like
+    estate_health nests a ``Ranked`` in one field and caps just that field.)
+    """
+
+    records: list[dict]
+    sorted_by: str
+    meta: dict = field(default_factory=dict)
+
+
+def rank(
+    rows: list[dict],
+    sort_key: Callable[[dict], Any],
+    sorted_by: str,
+    reverse: bool = False,
+) -> Ranked:
+    """Sort *rows* by relevance into a ``Ranked`` — the domain step, no truncation.
+
+    Sort keys use ``.get`` defaults so a row missing the sort field never raises.
+    A domain method that needs ``meta`` extras constructs ``Ranked`` directly.
+    """
+    return Ranked(sorted(rows, key=sort_key, reverse=reverse), sorted_by)
+
+
+def to_envelope(ranked: Ranked, limit: int | None = DEFAULT_LIMIT) -> dict:
+    """Adapt a ``Ranked`` into the LLM-shaped, honestly-paginated envelope.
+
+    Returns ``{"items": [...], "meta": {...}}`` where meta carries the full
+    ``total``, the number ``returned``, whether the list was ``truncated``, and
+    the ``sorted_by`` description so an LLM client knows it saw the top N of M.
+    The domain's ``ranked.meta`` extras are merged in.
+
+    ``limit`` of None (or negative) returns every record; otherwise the first
+    ``limit`` after sorting. The domain's ``ranked.meta`` is merged first, so the
+    structural pagination keys always win and can never be clobbered.
+    """
+    records = ranked.records
+    total = len(records)
+    items = records if limit is None or limit < 0 else records[:limit]
+    return {
+        "items": items,
+        "meta": {
+            **ranked.meta,
+            "total": total,
+            "returned": len(items),
+            "truncated": len(items) < total,
+            "sorted_by": ranked.sorted_by,
+        },
+    }
+
+
 def envelope(
     rows: list[dict],
     sort_key: Callable[[dict], Any],
@@ -53,28 +117,13 @@ def envelope(
     limit: int | None = DEFAULT_LIMIT,
     reverse: bool = False,
 ) -> dict:
-    """Wrap a list of records in a relevance-sorted, honestly-paginated envelope.
+    """Rank *rows* and wrap them in the envelope — the rank+adapt composition.
 
-    Returns ``{"items": [...], "meta": {...}}`` where meta carries the full
-    ``total``, the number ``returned``, whether the list was ``truncated``, and
-    the ``sorted_by`` description so an LLM client knows it saw the top N of M.
-
-    ``limit`` of None (or negative) returns every row; otherwise the first
-    ``limit`` rows after sorting. Sort keys use ``.get`` defaults so a row
-    missing the sort field never raises.
+    Kept as the convenience one-shot for callers that don't need the domain
+    ``Ranked`` value on its own; equivalent to
+    ``to_envelope(rank(rows, sort_key, sorted_by, reverse), limit)``.
     """
-    total = len(rows)
-    ordered = sorted(rows, key=sort_key, reverse=reverse)
-    items = ordered if limit is None or limit < 0 else ordered[:limit]
-    return {
-        "items": items,
-        "meta": {
-            "total": total,
-            "returned": len(items),
-            "truncated": len(items) < total,
-            "sorted_by": sorted_by,
-        },
-    }
+    return to_envelope(rank(rows, sort_key, sorted_by, reverse), limit)
 
 
 def read_or_unavailable(read: Callable[[], dict], label: str) -> dict:

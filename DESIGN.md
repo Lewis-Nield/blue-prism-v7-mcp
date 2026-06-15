@@ -425,17 +425,21 @@ Sequenced as:
   watch-and-react capability.
 
 ### Beyond v1 (phases 8+)
-- **Phase 8 — Embeddable core.** A tool's logic and its presentation are one body
-  today: each closure resolves names, scrubs, sorts, and wraps the result in the
-  LLM-shaped top-N envelope in a single pass. Split them — a pure domain function
-  returning the full ranked records, with the envelope as one adapter over it — so
-  a host embedding the engine in-process can consume the records and apply its own
-  representation instead of re-deriving the logic. The cache gets the same
-  treatment: the per-instance dict suits one stdio process, but a long-lived,
-  multi-threaded host sharing a client across workers needs a **thread-safe,
-  injectable cache** behind a small protocol, with the in-process implementation
-  kept as the default. No tool gains or loses behaviour; the v0.1 surface is
-  unchanged.
+- **Phase 8 — Embeddable core.** *Shipped in v0.6.0.* A tool's logic and its
+  presentation were one body: each closure resolved names, scrubbed, sorted, and
+  wrapped the result in the LLM-shaped top-N envelope in a single pass. They are
+  now split — the domain logic lives on a first-class `Engine` facade
+  (`blue_prism_mcp.Engine`), one method per Tier 1/Tier 2 read, returning the
+  full ranked records (a `Ranked` for list tools, a dict for single reads/
+  composites) with no truncation; the envelope is one representation adapter
+  (`to_envelope`, with `rank` as the domain sort) and the MCP tool layer is a
+  thin set of closures over the engine. A host embedding the engine in-process
+  consumes `Ranked.records` and applies its own representation instead of
+  re-deriving the logic. The cache got the same treatment: a `Cache` protocol
+  with a **thread-safe, injectable** `TTLCache` default (`blue_prism_mcp.cache`),
+  injected via `BPClient(config, cache=...)`, for a long-lived multi-threaded
+  host sharing a client across workers. No tool gained or lost behaviour; the
+  v0.1 surface is unchanged.
 - **Phase 9 — Fuller v7 read coverage.** Push the filtering the v7 API already
   supports down into the reads the envelope currently caps client-side.
   `get_session_log` gains an errors-only filter and a time window, and exposes the
