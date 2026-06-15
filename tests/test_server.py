@@ -33,7 +33,10 @@ READ_TOOLS = {
     "list_queues",
     "get_queue",
     "list_queue_items",
+    "get_queue_item",
+    "list_item_attempts",
     "list_sessions",
+    "get_session",
     "get_session_log",
     "list_resources",
     "list_schedules",
@@ -50,6 +53,7 @@ ACTION_TOOLS = {
     "stop_session",
     "set_schedule_enabled",
     "trigger_schedule",
+    "stop_schedule",
 }
 
 
@@ -220,7 +224,7 @@ class TestBuildServer:
         with caplog.at_level(logging.INFO, logger="blue_prism_mcp.server"):
             build_server(BPConfig(data_source="mock", client_secret="s3cret"))
         startup = caplog.records[-1].getMessage()
-        assert "11 tools" in startup
+        assert "14 tools" in startup
         assert "data_source=mock" in startup
         assert "actions=disabled" in startup
         assert "s3cret" not in startup

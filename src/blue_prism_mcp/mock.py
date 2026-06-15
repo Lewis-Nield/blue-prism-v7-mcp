@@ -16,7 +16,9 @@ exceptionMessage/terminationReason), items are WorkQueueItemNoData (no payload
 — the one entity not keyed id/name), log entries are SessionLogSummary, and
 schedule ids are integers (the one non-UUID id in the API). The `queue` key on
 item fixtures is mock-internal plumbing (which queue holds the item), not an
-API field.
+API field — the single-item read drops it and attaches the WorkQueueItem `data`
+payload (a DataCollection, held per-item in _DEFAULT_ITEM_DATA), which the list
+read never carries. Attempt history (_DEFAULT_ITEM_ATTEMPTS) is NoData rows.
 
 Seed it with your own data, or accept the small built-in fixtures below.
 """
@@ -231,6 +233,81 @@ _DEFAULT_QUEUE_ITEMS: list[dict] = [
     },
 ]
 
+_ITEM_INVOICE_EXCEPTION = "f3b2a190-8c47-4e2d-9b55-000000000402"
+
+# The payload `data` for the single-item read (WorkQueueItem). Only the
+# single-item GET carries this; lists and attempt history are WorkQueueItemNoData.
+# The exceptioned invoice item carries personal data across every value type the
+# scrubber must handle: free Text (scrubbed), a Password (redacted), a Binary
+# blob (dropped), scalars (kept), and a nested Collection (recursed).
+_DEFAULT_ITEM_DATA: dict[str, dict] = {
+    _ITEM_INVOICE_EXCEPTION: {
+        "rows": [
+            {
+                "Supplier": {"valueType": "Text", "value": "Acme Trading Ltd"},
+                "Contact": {
+                    "valueType": "Text",
+                    "value": "Chase supplier on 07700 900123 before re-running",
+                },
+                "Amount": {"valueType": "Number", "value": 1499.99},
+                "Approved": {"valueType": "Flag", "value": False},
+                "VaultPassword": {"valueType": "Password", "value": "s3cret-Pa55word"},
+                "Scan": {
+                    "valueType": "Binary",
+                    "value": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQ==",
+                    "additionalParameters": ["invoice.pdf"],
+                },
+                "Logo": {
+                    "valueType": "Image",
+                    "value": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQ==",
+                },
+                "LineItems": {
+                    "valueType": "Collection",
+                    "value": {
+                        "rows": [
+                            {
+                                "Desc": {
+                                    "valueType": "Text",
+                                    "value": "Reconcile and call back on 07700 900456",
+                                },
+                                "Net": {"valueType": "Number", "value": 1249.99},
+                            }
+                        ]
+                    },
+                },
+            }
+        ]
+    },
+}
+
+# Attempt history for the single-item attempts read (WorkQueueItemNoData rows,
+# newest carrying the live state). exceptionReason is the scrub target.
+_DEFAULT_ITEM_ATTEMPTS: dict[str, list[dict]] = {
+    _ITEM_INVOICE_EXCEPTION: [
+        {
+            "id": _ITEM_INVOICE_EXCEPTION,
+            "state": "Exceptioned",
+            "keyValue": "INV-1002",
+            "attemptNumber": 1,
+            "lastUpdated": "2026-03-02T11:20:00Z",
+            "exceptionedDate": "2026-03-02T11:20:00Z",
+            "workTimeInSeconds": 40,
+            "exceptionReason": "Invoice total did not match PO; query raised by 07700 900123",
+            "resource": "BOT-01",
+        },
+        {
+            "id": _ITEM_INVOICE_EXCEPTION,
+            "state": "Pending",
+            "keyValue": "INV-1002",
+            "attemptNumber": 2,
+            "lastUpdated": "2026-03-02T12:00:00Z",
+            "workTimeInSeconds": 0,
+            "exceptionReason": None,
+            "resource": None,
+        },
+    ],
+}
+
 _DEFAULT_SESSION_LOGS: dict[str, list[dict]] = {
     "e8a9d7c2-5f10-4b3e-bd64-000000000301": [
         {"logNumber": 1, "stageName": "Start", "stageType": "Start", "result": ""},
@@ -284,6 +361,8 @@ class MockBPClient:
         sessions: list[dict] | None = None,
         processes: list[dict] | None = None,
         queue_items: list[dict] | None = None,
+        item_data: dict[str, dict] | None = None,
+        item_attempts: dict[str, list[dict]] | None = None,
         session_logs: dict[str, list[dict]] | None = None,
         limits_and_usage: dict | None = None,
         permissions: list[str] | None = None,
@@ -297,6 +376,16 @@ class MockBPClient:
         self._processes = processes if processes is not None else list(_DEFAULT_PROCESSES)
         self._queue_items = (
             queue_items if queue_items is not None else [dict(i) for i in _DEFAULT_QUEUE_ITEMS]
+        )
+        self._item_data = (
+            item_data
+            if item_data is not None
+            else {k: dict(v) for k, v in _DEFAULT_ITEM_DATA.items()}
+        )
+        self._item_attempts = (
+            item_attempts
+            if item_attempts is not None
+            else {k: [dict(a) for a in v] for k, v in _DEFAULT_ITEM_ATTEMPTS.items()}
         )
         self._session_logs = (
             session_logs
@@ -345,6 +434,13 @@ class MockBPClient:
             sessions = [s for s in sessions if _at_or_before(s.get("startTime"), end_date)]
         return [dict(s) for s in sessions]
 
+    def get_session(self, session_id: str) -> dict:
+        # Single-session detail; strict like the live 404 → unknown id raises.
+        session = self._find_session(session_id)
+        if session is None:
+            raise LookupError(f"No session with id {session_id!r}")
+        return dict(session)
+
     def get_processes(self) -> list[dict]:
         return [dict(p) for p in self._processes]
 
@@ -366,6 +462,27 @@ class MockBPClient:
         if end_date:
             items = [i for i in items if _at_or_before(i.get("lastUpdated"), end_date)]
         return [dict(i) for i in items]
+
+    def get_queue_item(self, item_id: str) -> dict:
+        # The single-item read returns WorkQueueItem (WITH `data`); the list
+        # read returns NoData. Item ids are globally unique, so this matches the
+        # queue-less live path. The mock-internal `queue` key is dropped (it is
+        # not an API field), and `data` always present like the live schema —
+        # an empty collection when no payload fixture exists for the item.
+        for item in self._queue_items:
+            if item.get("id") == item_id:
+                row = {k: v for k, v in item.items() if k != "queue"}
+                row["data"] = dict(self._item_data.get(item_id, {"rows": []}))
+                return row
+        raise LookupError(f"No work queue item with id {item_id!r}")
+
+    def get_item_attempts(self, queue_id: str, item_id: str) -> list[dict]:
+        # Queue-scoped like the live path: an item not in this queue answers an
+        # empty history (the live endpoint 404s on a mismatch; an empty list is
+        # the benign tool-visible equivalent). Rows are WorkQueueItemNoData.
+        if self._find_item(queue_id, item_id) is None:
+            return []
+        return [dict(a) for a in self._item_attempts.get(item_id, [])]
 
     def get_session_log(self, session_id: str) -> list[dict]:
         return [dict(e) for e in self._session_logs.get(session_id, [])]
@@ -456,6 +573,15 @@ class MockBPClient:
             return None
         schedule["lastOutcome"] = "Triggered"
         return {"schedule": schedule_id, "status": "Triggered"}
+
+    def stop_schedule(self, schedule_id: str) -> None:
+        # Cancels active runs; the live endpoint answers 202 with no body, so
+        # the mock returns None too. Records the outcome on the fixture so a
+        # test can observe the effect after the write.
+        schedule = self._find_schedule(schedule_id)
+        if schedule is not None:
+            schedule["lastOutcome"] = "Stopped"
+        return None
 
     # --- Lookup helpers -----------------------------------------------------
 

@@ -388,6 +388,50 @@ class BPClient:
             ),
         )
 
+    def get_queue_item(self, item_id: str) -> dict:
+        """GET /workqueues/items/{id} — one item WITH its payload `data`.
+
+        The only read in the surface that returns WorkQueueItem (the `data`
+        DataCollection); list/attempt reads return WorkQueueItemNoData. The
+        queue-less path is used by design — the item UUID is globally unique,
+        so the caller needs only the id it already has from a list. The tool
+        layer scrubs the payload before it reaches the model.
+
+        Spec caveat: this endpoint does not support application-server-based
+        encryption keys — only unencrypted or database-key-encrypted queues
+        answer here; an app-server-encrypted queue's item returns a 4xx (raised
+        as an HTTPError), which the tool surfaces rather than masks.
+        """
+        return self._cached(
+            ("queue_item", item_id), lambda: self._get(f"/workqueues/items/{item_id}")
+        )
+
+    def get_item_attempts(self, queue_id: str, item_id: str) -> list[dict]:
+        """GET /workqueues/{queueId}/items/{itemId}/attempts — an item's attempt
+        history.
+
+        Queue-scoped (the attempts path needs both ids, unlike the queue-less
+        single-item read). Answers an array of WorkQueueItemNoData — one row per
+        attempt, newest carrying the live state — with no payload `data` but
+        with exceptionReason present (scrubbed at the tool boundary). Attempt
+        counts are small (bounded by the queue's maxAttempts), so this is a
+        single unpaged request.
+        """
+        return self._cached(
+            ("item_attempts", queue_id, item_id),
+            lambda: self._get(f"/workqueues/{queue_id}/items/{item_id}/attempts"),
+        )
+
+    def get_session(self, session_id: str) -> dict:
+        """GET /sessions/{id} — one session's detail (SessionSummary).
+
+        The single-session sibling of get_sessions: same SessionSummary shape as
+        a list row (status, timings, latestStage, exceptionMessage/Type,
+        terminationReason), addressed directly by id with no date window. The
+        tool layer scrubs exceptionMessage before it reaches the model.
+        """
+        return self._cached(("session", session_id), lambda: self._get(f"/sessions/{session_id}"))
+
     def get_session_log(self, session_id: str) -> list[dict]:
         """GET /sessions/{id}/logslight, falling back to /logs — the stage log.
 
@@ -573,3 +617,13 @@ class BPClient:
         """POST /schedules/{id}/runs — run a schedule now, or at `start_time`."""
         body = {"startTime": start_time} if start_time else {}
         return self._write("POST", f"/schedules/{schedule_id}/runs", body=body)
+
+    def stop_schedule(self, schedule_id: str) -> Any:
+        """DELETE /schedules/{id}/runs/active — request a running schedule to stop.
+
+        trigger_schedule's incident sibling: it cancels the schedule's active
+        runs. Like the runtime stop_session, this is a request the server
+        honours when the work next yields, not an instant kill. Answers 202
+        with no body (→ None).
+        """
+        return self._write("DELETE", f"/schedules/{schedule_id}/runs/active")

@@ -311,6 +311,30 @@ def build_tier3_tools(
             lambda: client.trigger_schedule(schedule_id, start_time),
         )
 
+    def stop_schedule(schedule: str, dry_run: bool = True) -> dict:
+        """Stop a schedule that is currently running — trigger_schedule's sibling.
+
+        `schedule` is the schedule name (case-insensitive, as shown in
+        list_schedules) or its id. Blue Prism is asked to cancel the schedule's
+        active runs; like stopping a session, it takes effect when the running
+        work next yields, so it is a request, not an instant kill. Use this to
+        halt a schedule that was triggered in error or is misbehaving. It does
+        not retire the schedule — its future timetable is unchanged (use
+        set_schedule_enabled to disable it).
+
+        By default this is a DRY RUN: it validates and returns the exact call
+        it would make without changing anything. Pass dry_run=false to actually
+        request the stop. Every invocation is audit-logged.
+        """
+        schedule_id = resolve_id(schedule, client.get_schedules(), entity="schedule")
+        args = {"schedule": schedule, "schedule_id": schedule_id}
+        return _run(
+            "stop_schedule",
+            args,
+            dry_run,
+            lambda: client.stop_schedule(schedule_id),
+        )
+
     tools = [
         retry_queue_item,
         defer_queue_item,
@@ -318,5 +342,6 @@ def build_tier3_tools(
         stop_session,
         set_schedule_enabled,
         trigger_schedule,
+        stop_schedule,
     ]
     return [tool for tool in tools if tool.__name__ in allowed], withheld

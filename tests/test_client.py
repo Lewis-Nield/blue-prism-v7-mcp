@@ -418,6 +418,52 @@ class TestExtendedReads:
         with pytest.raises(ValueError, match="non-empty strings"):
             client.get_user_permissions()
 
+    def test_get_queue_item_hits_queue_less_path_and_carries_data(self):
+        # The single-item read uses the queue-less path (the item UUID is
+        # globally unique) and returns WorkQueueItem WITH its `data` payload.
+        client, session = make_client()
+        session.get.return_value = _resp({"id": "i1", "data": {"rows": []}})
+        assert client.get_queue_item("i1") == {"id": "i1", "data": {"rows": []}}
+        assert session.get.call_args.args[0].endswith("/workqueues/items/i1")
+
+    def test_get_queue_item_is_cached_per_id(self):
+        client, session = make_client()
+        session.get.return_value = _resp({"id": "i1"})
+        client.get_queue_item("i1")
+        client.get_queue_item("i1")
+        session.get.assert_called_once()
+
+    def test_get_item_attempts_hits_queue_scoped_path(self):
+        # Attempts are queue-scoped (both ids in the path), unlike the
+        # queue-less single-item read.
+        client, session = make_client()
+        session.get.return_value = _resp([{"attemptNumber": 1}, {"attemptNumber": 2}])
+        assert client.get_item_attempts("q1", "i1") == [
+            {"attemptNumber": 1},
+            {"attemptNumber": 2},
+        ]
+        assert session.get.call_args.args[0].endswith("/workqueues/q1/items/i1/attempts")
+
+    def test_get_item_attempts_caches_per_queue_and_item(self):
+        client, session = make_client()
+        session.get.return_value = _resp([])
+        client.get_item_attempts("q1", "i1")
+        client.get_item_attempts("q1", "i2")
+        assert session.get.call_count == 2  # distinct cache keys, not shared
+
+    def test_get_session_hits_single_session_path(self):
+        client, session = make_client()
+        session.get.return_value = _resp({"sessionId": "s1", "status": "Completed"})
+        assert client.get_session("s1") == {"sessionId": "s1", "status": "Completed"}
+        assert session.get.call_args.args[0].endswith("/sessions/s1")
+
+    def test_get_session_is_cached_per_id(self):
+        client, session = make_client()
+        session.get.return_value = _resp({"sessionId": "s1"})
+        client.get_session("s1")
+        client.get_session("s1")
+        session.get.assert_called_once()
+
 
 # --- Session log: the logslight probe ------------------------------------------
 
@@ -568,6 +614,15 @@ class TestTierThreeWrites:
         client.trigger_schedule("sched-1", start_time="2026-06-10T09:00:00Z")
         assert session.post.call_args.kwargs["json"] == {"startTime": "2026-06-10T09:00:00Z"}
 
+    def test_stop_schedule_deletes_the_active_runs(self):
+        # trigger_schedule's incident sibling: DELETE /schedules/{id}/runs/active,
+        # answering 202 with no body (→ None).
+        client, session = make_client()
+        prime_token(client)
+        session.delete.return_value = _resp(None, 202)
+        assert client.stop_schedule("sched-1") is None
+        assert session.delete.call_args.args[0].endswith("/schedules/sched-1/runs/active")
+
     def test_empty_response_body_returns_none(self):
         client, session = make_client()
         prime_token(client)
@@ -679,6 +734,58 @@ class TestMockExtended:
     def test_get_session_log_unknown_session_is_empty(self):
         assert MockBPClient().get_session_log("nope") == []
 
+    def test_get_queue_item_carries_data_and_drops_internal_queue_key(self):
+        # The single-item read returns WorkQueueItem (WITH `data`); the
+        # mock-internal `queue` plumbing key never surfaces.
+        client = MockBPClient()
+        qid = _queue_id(client)
+        item = client.get_queue_items(qid, state="Exceptioned")[0]
+        full = client.get_queue_item(item["id"])
+        assert "data" in full and "rows" in full["data"]
+        assert "queue" not in full
+
+    def test_get_queue_item_defaults_to_an_empty_collection(self):
+        # An item with no payload fixture still answers a `data` field, like
+        # the live schema (which always carries one).
+        client = MockBPClient()
+        qid = _queue_id(client)
+        plain = client.get_queue_items(qid, state="Completed")[0]
+        assert client.get_queue_item(plain["id"])["data"] == {"rows": []}
+
+    def test_get_queue_item_unknown_id_raises(self):
+        with pytest.raises(LookupError):
+            MockBPClient().get_queue_item("no-such-item")
+
+    def test_get_item_attempts_returns_history_for_the_item(self):
+        client = MockBPClient()
+        qid = _queue_id(client)
+        item = client.get_queue_items(qid, state="Exceptioned")[0]
+        attempts = client.get_item_attempts(qid, item["id"])
+        assert [a["attemptNumber"] for a in attempts] == [1, 2]
+
+    def test_get_item_attempts_is_queue_scoped(self):
+        # An item not in the named queue answers an empty history (the live
+        # endpoint 404s on the mismatch).
+        client = MockBPClient()
+        item = client.get_queue_items(_queue_id(client), state="Exceptioned")[0]
+        assert client.get_item_attempts("other-queue", item["id"]) == []
+
+    def test_get_item_attempts_defaults_to_empty_history(self):
+        client = MockBPClient()
+        qid = _queue_id(client)
+        plain = client.get_queue_items(qid, state="Completed")[0]
+        assert client.get_item_attempts(qid, plain["id"]) == []
+
+    def test_get_session_returns_the_matching_session(self):
+        client = MockBPClient()
+        sid = client.get_sessions()[0]["sessionId"]
+        assert client.get_session(sid)["sessionId"] == sid
+
+    def test_get_session_unknown_id_raises(self):
+        # The live endpoint 404s; the mock fails loudly rather than None.
+        with pytest.raises(LookupError):
+            MockBPClient().get_session("no-such-session")
+
     def test_retry_queue_item_creates_attempt_and_flips_state(self):
         client = MockBPClient()
         qid = _queue_id(client)
@@ -774,12 +881,19 @@ class TestMockExtended:
         sched = [s for s in client.get_schedules() if s["name"] == "Daily Invoice Run"][0]
         assert sched["lastOutcome"] == "Triggered"
 
+    def test_stop_schedule_records_outcome_and_returns_none(self):
+        client = MockBPClient()
+        assert client.stop_schedule("Daily Invoice Run") is None
+        sched = [s for s in client.get_schedules() if s["name"] == "Daily Invoice Run"][0]
+        assert sched["lastOutcome"] == "Stopped"
+
     def test_write_on_unknown_target_is_safe(self):
         client = MockBPClient()
         # No matching item/schedule — answers None without raising or mutating.
         assert client.retry_queue_item(_queue_id(client), "ghost") is None
         assert client.set_schedule_enabled("ghost", True) is None
         assert client.trigger_schedule("ghost") is None
+        assert client.stop_schedule("ghost") is None
 
     def test_instances_do_not_share_fixture_mutations(self):
         # A write on one instance must not leak into a fresh instance via the

@@ -48,6 +48,11 @@ _SESSION_CONTROL = (
     ("Control Resource",),
 )
 
+# POST /schedules/{id}/runs (trigger) and DELETE /schedules/{id}/runs/active
+# (stop) both document `Edit Schedule` only — defined once so the run-control
+# pair (start a run / stop the active runs) cannot drift apart.
+_SCHEDULE_RUN_CONTROL = (("Edit Schedule",),)
+
 TOOL_PERMISSIONS: dict[str, tuple[tuple[str, ...], ...]] = {
     "retry_queue_item": ((_QUEUE_FULL_ACCESS,),),
     "defer_queue_item": ((_QUEUE_FULL_ACCESS,),),
@@ -58,7 +63,8 @@ TOOL_PERMISSIONS: dict[str, tuple[tuple[str, ...], ...]] = {
     # tool isn't hidden from accounts that can retire but not create; the
     # unretire extra is enforced at call time (see tier3).
     "set_schedule_enabled": (("Edit Schedule",), ("Retire Schedule",)),
-    "trigger_schedule": (("Edit Schedule",),),
+    "trigger_schedule": _SCHEDULE_RUN_CONTROL,
+    "stop_schedule": _SCHEDULE_RUN_CONTROL,
 }
 
 UNRETIRE_EXTRA_PERMISSION = "Create Schedule"

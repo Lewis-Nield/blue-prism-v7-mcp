@@ -90,7 +90,15 @@ library it was always implicitly built on.
 - `list_queues` / `get_queue` — work-queue health
 - `list_queue_items` — **requires a queue + status + date window** (queues run to
   millions of items; no estate-wide item listing). Envelope-capped.
+- `get_queue_item` — one item in full **including its payload `data`** (the only
+  read that returns it). The `data` DataCollection is scrubbed type-aware: free
+  text through the scrubber, passwords redacted, binary/image dropped, scalars
+  kept, nested collections recursed. (Blue Prism cannot return data for
+  application-server-encrypted queues — that call fails; use the no-data tools.)
+- `list_item_attempts` — an item's attempt history (no payload data; the
+  exception reason at each attempt is scrubbed)
 - `list_sessions` — run history; filter by process/resource/status/date
+- `get_session` — one session's detail by id (no date window), PII-scrubbed
 - `get_session_log` — stage-level log for one session (PII-scrubbed, size-capped)
 - `list_resources` — digital workers + status
 - `list_schedules` — the schedule catalogue + retirement state. (The API holds
@@ -117,7 +125,7 @@ dry-run scaffolding is present; the action tools are registered only when
 actions are enabled.
 - `retry_queue_item` / `defer_queue_item`
 - `start_process` / `stop_session`
-- `set_schedule_enabled` / `trigger_schedule`
+- `set_schedule_enabled` / `trigger_schedule` / `stop_schedule`
 
 **The governance contract (Phase 5).** Three layers sit between the model and
 a write, and every one fails loud rather than degrading:
@@ -173,7 +181,10 @@ webhook plumbing.
 |------|----------|-------|
 | `list_queues` / `get_queue` | `GET /workqueues`, `GET /workqueues/{id}` | 7.0 |
 | `list_queue_items` | `GET /workqueues/{id}/items` | 7.0 |
+| `get_queue_item` | `GET /workqueues/items/{id}` (→ `WorkQueueItem`, the only read with `data`) | 7.0 |
+| `list_item_attempts` | `GET /workqueues/{id}/items/{itemId}/attempts` (→ `WorkQueueItemNoData[]`) | 7.2 |
 | `list_sessions` | `GET /sessions` | 7.0 |
+| `get_session` | `GET /sessions/{id}` (→ `SessionSummary`) | 7.0 |
 | `get_session_log` | `GET /sessions/{id}/logs` (`logslight` on 7.4+) | 7.0 |
 | `list_resources` | `GET /resources` | 7.0 |
 | `list_schedules` | `GET /schedules` | 7.0 |
@@ -184,6 +195,7 @@ webhook plumbing.
 | `stop_session` | `PATCH /sessions/{id}` `{status: Stopped}` | 7.1 |
 | `set_schedule_enabled` | `PUT /schedules/{id}` (retire/unretire) | 7.0 |
 | `trigger_schedule` | `POST /schedules/{id}/runs` (optional `startTime`) | 7.2 |
+| `stop_schedule` | `DELETE /schedules/{id}/runs/active` (202, no body) | 7.2 |
 
 Wire-level contract (identical across versions):
 - **Paging is token-based only**: `itemsPerPage` + `pagingToken` request params;
@@ -244,7 +256,7 @@ Wire-level contract (identical across versions):
   | `stop_session` (`PATCH /sessions/{id}` → `Stopped`) | same as `start_process` (one process permission **and** `Control Resource`) |
   | `set_schedule_enabled` — retire | `Edit Schedule` **and** `Retire Schedule` |
   | `set_schedule_enabled` — unretire | retire pair **and** `Create Schedule` |
-  | `trigger_schedule` | `Edit Schedule` |
+  | `trigger_schedule` / `stop_schedule` | `Edit Schedule` (both run-control verbs document the same single permission) |
 
   Deployment docs (Phase 6) must cover service-account permission mapping.
 
@@ -328,13 +340,19 @@ Sequenced as:
   is pulled forward from Phase 10** as `start_process`'s control sibling
   (`PATCH /sessions/{id}` `{status: Stopped}`, the same permissions as
   `start_process`).
-- **Endpoint-gap backlog (post-0.2.0 — each a real value-add the audit identified;
+- **v0.3.0 (minor) — incident response & diagnostics.** One control verb and three
+  drill-down reads that turn the list surface into a diagnostic one:
+  - `stop_schedule` (`DELETE /schedules/{id}/runs/active`) — incident sibling of
+    `trigger_schedule`, sharing its single `Edit Schedule` permission.
+  - `get_queue_item` (`GET /workqueues/items/{id}`) — one item in full **including
+    the `data` payload**, the only read that returns it. The DataCollection is
+    scrubbed type-aware: free text through the scrubber, passwords redacted,
+    binary/image dropped, scalars kept, nested collections recursed.
+  - `list_item_attempts` (`GET /workqueues/{id}/items/{itemId}/attempts`) — an
+    item's attempt history (no payload data; scrubbed exception reasons).
+  - `get_session` (`GET /sessions/{id}`) — one run's detail by id, no date window.
+- **Endpoint-gap backlog (post-0.3.0 — each a real value-add the audit identified;
   most map onto Phases 9–10 / console E7–E9):**
-  - *Control:* `stop_schedule` (`DELETE /schedules/{id}/runs/active`) — incident
-    sibling of `trigger_schedule`.
-  - *Diagnostic reads:* single work-queue item detail (`GET /workqueues/items/{id}`
-    — the only call that returns the item `data` payload; scrubbed), item attempt
-    history (`GET .../attempts`), single session detail (`GET /sessions/{id}`).
   - *Insight:* dashboard aggregates (`workQueueCompositions`, `resourceUtilization`,
     `licensesEntitlement`) for cheaper Tier-2 metrics and the console baseline feed;
     schedule run-history is already Phase 9.
