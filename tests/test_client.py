@@ -117,6 +117,29 @@ class TestMockClient:
         client.get_resources().append({"name": "INJECTED"})
         assert all(r["name"] != "INJECTED" for r in client.get_resources())
 
+    def test_context_topology_reads_have_the_right_shape(self):
+        client = MockBPClient()
+        configs = client.get_queue_configurations()
+        assert configs and "activeWorkQueueConfiguration" in configs[0]
+        pools = client.get_resource_pools()
+        assert pools and {"id", "name", "members", "databaseStatus"} <= pools[0].keys()
+        env_vars = client.get_environment_variables()
+        assert env_vars and {"name", "dataType", "value"} <= env_vars[0].keys()
+        groups = client.get_process_groups()
+        assert groups and {n["nodeType"] for n in groups} == {"Group", "Item"}
+
+    def test_context_topology_seeds_override_defaults(self):
+        client = MockBPClient(
+            queue_configurations=[{"name": "C"}],
+            resource_pools=[{"name": "P"}],
+            environment_variables=[{"name": "V"}],
+            process_groups=[{"name": "G"}],
+        )
+        assert client.get_queue_configurations() == [{"name": "C"}]
+        assert client.get_resource_pools() == [{"name": "P"}]
+        assert client.get_environment_variables() == [{"name": "V"}]
+        assert client.get_process_groups() == [{"name": "G"}]
+
 
 # --- Live client: auth (mocked HTTP) -------------------------------------------
 
@@ -398,6 +421,51 @@ class TestExtendedReads:
         assert client.get_license_entitlement() == {"activeLicenseTypes": ["Enterprise"]}
         assert session.get.call_args.args[0].endswith("/dashboards/licensesEntitlement")
         client.get_license_entitlement()
+        session.get.assert_called_once()  # cached
+
+    def test_get_queue_configurations(self):
+        client, session = make_client()
+        session.get.return_value = _resp({"items": [{"id": "q1", "name": "Invoices"}]})
+        assert client.get_queue_configurations() == [{"id": "q1", "name": "Invoices"}]
+        assert session.get.call_args.args[0].endswith("/workqueues/configurations")
+        client.get_queue_configurations()
+        session.get.assert_called_once()  # cached
+
+    def test_get_resource_pools_is_a_bare_unpaged_array(self):
+        client, session = make_client()
+        session.get.return_value = _resp([{"id": "p1", "name": "Pool", "members": 3}])
+        assert client.get_resource_pools() == [{"id": "p1", "name": "Pool", "members": 3}]
+        assert session.get.call_args.args[0].endswith("/resources/pools")
+        client.get_resource_pools()
+        session.get.assert_called_once()  # cached
+
+    def test_get_resource_pools_coerces_empty_body_to_list(self):
+        # The endpoint answers a bare array, so a 204/empty body must still
+        # return a list rather than None for the tool layer to iterate.
+        client, session = make_client()
+        session.get.return_value = _resp(None, status_code=204)
+        assert client.get_resource_pools() == []
+
+    def test_get_environment_variables(self):
+        client, session = make_client()
+        session.get.return_value = _resp(
+            {"items": [{"id": "v1", "name": "Mailbox", "dataType": "Text", "value": "x"}]}
+        )
+        assert client.get_environment_variables() == [
+            {"id": "v1", "name": "Mailbox", "dataType": "Text", "value": "x"}
+        ]
+        assert session.get.call_args.args[0].endswith("/environmentvariables")
+        client.get_environment_variables()
+        session.get.assert_called_once()  # cached
+
+    def test_get_process_groups(self):
+        client, session = make_client()
+        session.get.return_value = _resp(
+            {"items": [{"id": "g1", "name": "Finance", "nodeType": "Group"}]}
+        )
+        assert client.get_process_groups() == [{"id": "g1", "name": "Finance", "nodeType": "Group"}]
+        assert session.get.call_args.args[0].endswith("/processgroups/root/descendants")
+        client.get_process_groups()
         session.get.assert_called_once()  # cached
 
     def test_get_queue_compositions_sends_repeated_id_params(self):

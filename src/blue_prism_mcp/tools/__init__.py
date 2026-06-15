@@ -3,7 +3,9 @@
 Tiers (see DESIGN.md):
     Tier 1 Visibility — list_queues/get_queue, list_queue_items/get_queue_item,
         list_item_attempts, list_sessions/get_session, get_session_log,
-        list_resources, list_schedules, list_processes
+        list_resources, list_schedules, list_processes, and the context/topology
+        reads list_queue_configurations, list_resource_pools,
+        list_environment_variables, list_process_groups
     Tier 2 Insight   — exception_summary, throughput_summary, estate_health,
         license_entitlement
     Tier 3 Control   — retry/defer queue items, start_process, stop_session,

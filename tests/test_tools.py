@@ -693,6 +693,126 @@ class TestListProcesses:
         assert names == sorted(names)
 
 
+class TestListQueueConfigurations:
+    def test_maps_queues_to_processes_busiest_first(self):
+        client = MockBPClient(
+            queue_configurations=[
+                {"name": "Quiet", "activeQueueStats": {"activeSessions": 0}},
+                {"name": "Busy", "activeQueueStats": {"activeSessions": 4}},
+                {"name": "Some", "activeQueueStats": {"activeSessions": 2}},
+            ]
+        )
+        result = tier1(client)["list_queue_configurations"]()
+        assert [c["name"] for c in result["items"]] == ["Busy", "Some", "Quiet"]
+
+    def test_carries_the_process_and_resource_group_ids(self):
+        config = tier1()["list_queue_configurations"]()["items"][0]
+        assert config["activeWorkQueueConfiguration"]["assignedProcessId"]
+        assert config["activeWorkQueueConfiguration"]["assignedResourceGroupId"]
+
+    def test_missing_stats_sort_as_zero_not_crash(self):
+        client = MockBPClient(queue_configurations=[{"name": "NoStats"}])
+        result = tier1(client)["list_queue_configurations"]()
+        assert result["items"][0]["name"] == "NoStats"
+
+    def test_degrades_visibly_on_an_older_estate_or_denied_read(self):
+        # The endpoint is 7.4+ (the one tool above the 7.2 floor): a 404 on an
+        # older estate, or a 403 on a denied read, degrades to an empty envelope
+        # with a meta.unavailable note rather than failing the read surface.
+        class OldEstate(MockBPClient):
+            def get_queue_configurations(self):
+                raise requests.HTTPError("404 Not Found")
+
+        result = tier1(OldEstate())["list_queue_configurations"]()
+        assert result["items"] == []
+        assert result["meta"]["total"] == 0
+        assert "7.4" in result["meta"]["unavailable"]
+
+
+class TestListResourcePools:
+    def test_largest_pool_first(self):
+        client = MockBPClient(
+            resource_pools=[
+                {"name": "Small", "members": 1},
+                {"name": "Big", "members": 9},
+                {"name": "Mid", "members": 4},
+            ]
+        )
+        result = tier1(client)["list_resource_pools"]()
+        assert [p["name"] for p in result["items"]] == ["Big", "Mid", "Small"]
+
+    def test_empty_estate_is_an_empty_envelope(self):
+        result = tier1(MockBPClient(resource_pools=[]))["list_resource_pools"]()
+        assert result["items"] == []
+        assert result["meta"]["total"] == 0
+
+
+class TestListEnvironmentVariables:
+    def test_alphabetical_by_name(self):
+        result = tier1()["list_environment_variables"]()
+        names = [v["name"] for v in result["items"]]
+        assert names == sorted(names)
+
+    def test_value_is_scrubbed_type_aware(self):
+        # Same fail-closed policy as the queue-item payload, keyed on dataType:
+        # Password redacted, Text through the scrubber, scalars kept.
+        rows = {
+            v["name"]: v
+            for v in tier1(scrubber=MarkerScrubber())["list_environment_variables"]()["items"]
+        }
+        assert rows["Ledger API Key"]["value"] == "[PASSWORD]"
+        assert rows["Finance Mailbox"]["value"] == "[SCRUBBED]"
+        assert rows["Retry Limit"]["value"] == 3  # Number scalar kept
+        # Description is admin-authored free text → scrubbed at the same boundary.
+        assert rows["Finance Mailbox"]["description"] == "[SCRUBBED]"
+
+    def test_value_pii_is_actually_removed_end_to_end(self):
+        result = tier1(scrubber=RegexScrubber())["list_environment_variables"]()
+        blob = json.dumps(result["items"])
+        assert "ap-team@contoso.example" not in blob
+        assert "07700 900123" not in blob
+        assert "s3cr3t-token-value" not in blob
+
+    def test_unknown_and_miscased_types_fail_closed(self):
+        client = MockBPClient(
+            environment_variables=[
+                {"name": "Legacy", "dataType": "text", "value": "leak"},
+                {"name": "Secret", "dataType": "password", "value": "hunter2"},
+                {"name": "Mystery", "dataType": "Quantum", "value": "leak too"},
+                {"name": "Blob", "dataType": "Image", "value": "AAAA"},
+                {"name": "Empty", "dataType": "Text", "value": None},
+            ]
+        )
+        rows = {
+            v["name"]: v
+            for v in tier1(client, MarkerScrubber())["list_environment_variables"]()["items"]
+        }
+        assert rows["Legacy"]["value"] == "[SCRUBBED]"  # miscased Text still scrubbed
+        assert rows["Secret"]["value"] == "[PASSWORD]"  # miscased Password still redacted
+        assert rows["Mystery"]["value"] == "[SCRUBBED]"  # unknown type fails closed
+        assert rows["Blob"]["value"] == "[IMAGE omitted]"
+        assert rows["Empty"]["value"] is None
+
+
+class TestListProcessGroups:
+    def test_folders_first_then_processes_alphabetical(self):
+        client = MockBPClient(
+            process_groups=[
+                {"name": "Zeta Process", "nodeType": "Item"},
+                {"name": "Beta Folder", "nodeType": "Group"},
+                {"name": "Alpha Process", "nodeType": "Item"},
+                {"name": "Yankee Folder", "nodeType": "Group"},
+            ]
+        )
+        result = tier1(client)["list_process_groups"]()
+        assert [n["name"] for n in result["items"]] == [
+            "Beta Folder",
+            "Yankee Folder",
+            "Alpha Process",
+            "Zeta Process",
+        ]
+
+
 # --- Tier 2 -----------------------------------------------------------------------
 
 
@@ -1006,6 +1126,10 @@ class TestRegisterTools:
             "list_resources",
             "list_schedules",
             "list_processes",
+            "list_queue_configurations",
+            "list_resource_pools",
+            "list_environment_variables",
+            "list_process_groups",
             "exception_summary",
             "throughput_summary",
             "estate_health",

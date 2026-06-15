@@ -42,7 +42,11 @@ library it was always implicitly built on.
   specs (7.0.1 through 7.5.1 — see *v7 API ground truth* below): Tier 1+2 need
   only 7.1 (7.0 lacks just `/processes`), the Tier 3 writes need 7.2, and the
   API is endpoint-stable from 7.2 through 7.5.1. Build against 7.5.1, declare
-  support for 7.2+.
+  support for 7.2+. The one tool above the 7.2 floor is
+  `list_queue_configurations` (7.4): rather than raise the floor for a single
+  read, it degrades on a 7.2/7.3 estate — a 404 (or a denied read) returns an
+  empty envelope with a `meta.unavailable` note, so the rest of the surface is
+  unaffected.
 - **Names in, UUIDs underneath.** Every v7 entity ID is a UUID; agents speak in
   names ("the Invoices queue"). Tools accept names and resolve them to IDs via
   the list endpoints (Phase 4).
@@ -105,6 +109,17 @@ library it was always implicitly built on.
   no next-run field anywhere, and last-outcome lives in the schedule run logs —
   see the ground truth below; run-history enrichment is deferred.)
 - `list_processes` — published process catalogue
+- `list_queue_configurations` — the active queues' process→queue map: each
+  active queue's assigned process and resource group plus its live activity
+  (active sessions, available resources, time/ETA to clear). Needs 7.4+;
+  degrades to an "unavailable" note on an older estate rather than failing.
+- `list_resource_pools` — the resource pools (groupings of digital workers),
+  their member counts and database status (a bare array endpoint — no paging)
+- `list_environment_variables` — the shared process-configuration variables;
+  the value is scrubbed type-aware (the same fail-closed policy as the
+  queue-item payload, keyed on the variable's Blue Prism data type)
+- `list_process_groups` — the process tree (folders and processes) so an agent
+  can see how the catalogue is organised
 
 ### Tier 2 — Insight (separate derived tools)
 - `exception_summary` — exceptioned items for one queue + window, grouped by
@@ -189,6 +204,10 @@ webhook plumbing.
 | `list_resources` | `GET /resources` | 7.0 |
 | `list_schedules` | `GET /schedules` | 7.0 |
 | `list_processes` | `GET /processes` | 7.1 |
+| `list_queue_configurations` | `GET /workqueues/configurations` (→ `WorkQueueConfigurationSummary`, active queues only) | **7.4** |
+| `list_resource_pools` | `GET /resources/pools` (→ `ResourcePool[]`, bare array, no paging) | 7.1 |
+| `list_environment_variables` | `GET /environmentvariables` (→ `EnvironmentVariable`, `value` scrubbed type-aware) | 7.2 |
+| `list_process_groups` | `GET /processgroups/root/descendants` (→ `ProcessGroupItem[]`, Item/Group nodes) | 7.2 |
 | `retry_queue_item` | `POST .../items/{id}/attempts` (201 → `{attemptId}`) | 7.2 |
 | `defer_queue_item` | `PATCH .../attempts/{attemptId}` (RFC 6902 JSON Patch, sent as `application/json-patch+json`) | 7.2 |
 | `start_process` | `POST /sessions` → UUID, optional `PUT /sessions/{id}/parameters`, then `PATCH /sessions/{id}` `{status: Running}` | 7.1 |
@@ -250,6 +269,23 @@ Wire-level contract (identical across versions):
   is the API's only page-number-paged read; the client today does
   none/token/offset), so it is deferred to its own utilisation-insight release
   (see backlog). Nothing under `/dashboards` aggregates exceptions or throughput.
+- **Context & topology reads (v0.5.0, pinned field-by-field on 7.5.1 + the
+  7.2/7.4 specs).** `workqueues/configurations` (7.4) answers
+  `WorkQueueConfigurationSummary` for *active* queues only — `id`, `name`,
+  `activeWorkQueueConfiguration{assignedProcessId, assignedResourceGroupId}`,
+  and `activeQueueStats{activeSessions, availableResources, timeRemaining,
+  elapsedRemaining, ETA}`; it is a separate tool, not a fold into `list_queues`,
+  because the population and shape differ (the opinionated queue→process *name*
+  mapping stays a console concern; the tool exposes the generic id-based
+  primitive). `resources/pools` (7.1) is a *bare array* with no paging envelope
+  (`ResourcePool{id, name, members, databaseStatus}`; `databaseStatus` enum
+  Unknown/Ready/Offline/Pending). `environmentvariables` (7.2) is token-paged
+  `EnvironmentVariable{id, name, description, dataType, value}` — `dataType`
+  carries the same Blue Prism type vocabulary as a `DataValue`, so the `value`
+  (a config payload that can hold a secret or PII) runs through the identical
+  fail-closed type-aware scrub as the queue-item payload. `processgroups/root/
+  descendants` (7.2) is token-paged `ProcessGroupItem{id, name, nodeType
+  (Item/Group), lastModified}` — a flat descendant list of the process tree.
 - **`ScheduleSummary` is the schedule definition only** (interval fields,
   `isRetired`; its `id` is an *integer*, unlike every other entity's UUID).
   No next-run field exists anywhere in the API; per-run history (a status
@@ -281,7 +317,12 @@ for the schedule PUT (`ScheduleSummary` carries `isRetired` and the PUT
 documents retire permissions, but the published request schema omits the
 flag); and the exact permission strings `GET /user/permissions` returns —
 the capability resolver matches the documented display names
-case-insensitively, but the spec never shows a real response.
+case-insensitively, but the spec never shows a real response. v0.5.0 adds one
+more: the `environmentvariables` `value` is typed `object` (nullable) in the
+spec with no inner shape, so whether it arrives as the raw typed value or a
+`DataValue` wrapper is unverified — the type-aware scrub keys on the variable's
+sibling `dataType` and works either way, but the exact value shape wants a live
+check.
 
 ---
 

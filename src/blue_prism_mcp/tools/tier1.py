@@ -84,7 +84,7 @@ def _deferred_counts(client, queue_ids: list) -> dict | None:
 
 
 def build_tier1_tools(client, scrubber: Scrubber) -> list[Callable]:
-    """Build the eight visibility tools over *client*, scrubbing with *scrubber*."""
+    """Build the visibility tools over *client*, scrubbing with *scrubber*."""
     scrub_text = make_cached_scrub(scrubber)
 
     def _scrubbed_item(item: dict) -> dict:
@@ -126,8 +126,8 @@ def build_tier1_tools(client, scrubber: Scrubber) -> list[Callable]:
             return _scrubbed_collection(value)
         return value
 
-    def _scrubbed_value(cell: dict) -> dict:
-        """Scrub one DataValue, FAIL-CLOSED by Blue Prism value type.
+    def _scrub_typed_value(value_type, value):
+        """Apply the FAIL-CLOSED, type-aware scrub policy to one typed value.
 
         A diagnostic read must never leak a secret or a binary blob, so the
         policy errs toward scrubbing: Password is redacted wholesale;
@@ -138,24 +138,49 @@ def build_tier1_tools(client, scrubber: Scrubber) -> list[Callable]:
         RadioButtons, Collection, AND any unknown or miscased type — has its
         string content scrubbed and nested collections recursed, so a value
         type the server spells differently fails closed rather than passing
-        through verbatim. additionalParameters (a Binary's file path, etc.) is
-        free text too, so it is scrubbed at the same boundary. Matching is
-        case-insensitive, like the start-up parameter validator.
+        through verbatim. Matching is case-insensitive, like the start-up
+        parameter validator. Shared by the queue-item DataValue scrub and the
+        environment-variable value scrub (same Blue Prism type vocabulary).
         """
-        value_type = str(cell.get("valueType") or "").strip().casefold()
+        vt = str(value_type or "").strip().casefold()
+        if vt == "password":
+            return "[PASSWORD]"
+        if vt in ("binary", "image"):
+            return f"[{vt.upper()} omitted]"
+        if vt in _SCALAR_VALUE_TYPES:
+            return value
+        return _scrub_payload(value)
+
+    def _scrubbed_value(cell: dict) -> dict:
+        """Scrub one DataValue cell, keyed on its ``valueType``.
+
+        additionalParameters (a Binary's file path, etc.) is free text too, so
+        it is scrubbed at the same boundary.
+        """
         new = dict(cell)
-        if value_type == "password":
-            new["value"] = "[PASSWORD]"
-        elif value_type in ("binary", "image"):
-            new["value"] = f"[{value_type.upper()} omitted]"
-        elif value_type not in _SCALAR_VALUE_TYPES:
-            new["value"] = _scrub_payload(cell.get("value"))
+        new["value"] = _scrub_typed_value(cell.get("valueType"), cell.get("value"))
         extra = cell.get("additionalParameters")
         if isinstance(extra, list):
             new["additionalParameters"] = [
                 scrub_text(x) if isinstance(x, str) else x for x in extra
             ]
         return new
+
+    def _scrubbed_env_var(var: dict) -> dict:
+        """Scrub one environment variable type-aware, keyed on dataType.
+
+        The value is a configuration payload carrying the same Blue Prism data
+        types as a queue-item DataValue, so it runs through the identical
+        fail-closed policy: a Password variable is redacted, Binary/Image
+        dropped, scalars kept, and every text/unknown type scrubbed. The
+        description is admin-authored free text, so it is scrubbed at the same
+        boundary — an environment variable is treated as a PII/secret surface.
+        """
+        return {
+            **var,
+            "description": scrub_text(var.get("description")),
+            "value": _scrub_typed_value(var.get("dataType"), var.get("value")),
+        }
 
     def list_queues(limit: int = DEFAULT_LIMIT) -> dict:
         """List every work queue with its health counts.
@@ -442,6 +467,106 @@ def build_tier1_tools(client, scrubber: Scrubber) -> list[Callable]:
             limit=limit,
         )
 
+    def list_queue_configurations(limit: int = DEFAULT_LIMIT) -> dict:
+        """Map each active work queue to the process and resources that drain it.
+
+        Each item gives an active queue's name and id, the id of the process
+        assigned to work it (`assignedProcessId`) and of its assigned resource
+        group (`assignedResourceGroupId`), and live activity — how many sessions
+        are working it now, how many workers are available, and the estimated
+        time/ETA to clear the backlog. Use it to see which process handles a
+        queue and whether enough workers are on it. (Only active queues appear,
+        so this is a smaller set than list_queues; cross-reference
+        assignedProcessId against list_processes for the process name.)
+
+        Results come back as {"items": [...], "meta": {...}}, busiest first
+        (most active sessions), capped at `limit` (default 50).
+
+        Needs Blue Prism 7.4 or later; against an older estate this returns no
+        items with `meta.unavailable` explaining why, rather than failing.
+        """
+        try:
+            configurations = client.get_queue_configurations()
+        except requests.RequestException as exc:
+            return {
+                "items": [],
+                "meta": {
+                    "total": 0,
+                    "returned": 0,
+                    "truncated": False,
+                    "sorted_by": "activeQueueStats.activeSessions desc",
+                    "unavailable": (
+                        "queue configurations unavailable (requires Blue Prism 7.4+ "
+                        f"and Queue Management read access): {exc}"
+                    ),
+                },
+            }
+        return envelope(
+            configurations,
+            sort_key=lambda c: (c.get("activeQueueStats") or {}).get("activeSessions") or 0,
+            sorted_by="activeQueueStats.activeSessions desc",
+            limit=limit,
+            reverse=True,
+        )
+
+    def list_resource_pools(limit: int = DEFAULT_LIMIT) -> dict:
+        """List the resource pools (groupings of digital workers) and their size.
+
+        Each item gives the pool's name and id, the number of member resources,
+        and its reported database status (Ready/Offline/Pending/Unknown). Use it
+        to see how the estate's workers are pooled and whether a pool is online.
+
+        Results come back as {"items": [...], "meta": {...}}, largest pool
+        first (most members), capped at `limit` (default 50).
+        """
+        return envelope(
+            client.get_resource_pools(),
+            sort_key=lambda p: p.get("members") or 0,
+            sorted_by="members desc",
+            limit=limit,
+            reverse=True,
+        )
+
+    def list_environment_variables(limit: int = DEFAULT_LIMIT) -> dict:
+        """List the estate's environment variables (shared process configuration).
+
+        Each item gives the variable's name, description, Blue Prism data type,
+        and value. Personal data is removed before you see it: a Password
+        variable is redacted, binary/image values are dropped (a marker is
+        left), the free-text value and description are scrubbed, and
+        numbers/flags/dates pass through. Use it to see the shared configuration
+        processes depend on.
+
+        Results come back as {"items": [...], "meta": {...}}, alphabetical by
+        name, capped at `limit` (default 50); meta.truncated tells you whether
+        you saw every variable.
+        """
+        return envelope(
+            [_scrubbed_env_var(v) for v in client.get_environment_variables()],
+            sort_key=lambda v: str(v.get("name") or ""),
+            sorted_by="name",
+            limit=limit,
+        )
+
+    def list_process_groups(limit: int = DEFAULT_LIMIT) -> dict:
+        """List the process tree — the folders and processes in the catalogue.
+
+        Each item is a node in the process group tree: either a folder
+        (`nodeType` "Group") or a published process (`nodeType` "Item"), with
+        its name, id, and last-modified time (a placeholder date for folders).
+        Use it to see how the process catalogue is organised into groups.
+
+        Results come back as {"items": [...], "meta": {...}}, folders first then
+        processes, alphabetical within each, capped at `limit` (default 50);
+        meta.truncated tells you whether you saw the whole tree.
+        """
+        return envelope(
+            client.get_process_groups(),
+            sort_key=lambda n: (n.get("nodeType") != "Group", str(n.get("name") or "")),
+            sorted_by="folders first, then name",
+            limit=limit,
+        )
+
     return [
         list_queues,
         get_queue,
@@ -454,4 +579,8 @@ def build_tier1_tools(client, scrubber: Scrubber) -> list[Callable]:
         list_resources,
         list_schedules,
         list_processes,
+        list_queue_configurations,
+        list_resource_pools,
+        list_environment_variables,
+        list_process_groups,
     ]

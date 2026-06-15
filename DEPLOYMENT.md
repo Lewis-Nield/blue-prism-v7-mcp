@@ -8,7 +8,9 @@ client, and the day-one verification checklist for the action surface.
 
 - **Blue Prism 7.2+** with the v7 REST API and the Blue Prism Authentication
   Server deployed. The API surface is stable from 7.2 through 7.5.1; the
-  visibility tools degrade gracefully to 7.1, but the control tools need 7.2.
+  visibility tools degrade gracefully to 7.1 (with `list_queue_configurations`
+  needing 7.4 and degrading to an "unavailable" note below it), but the control
+  tools need 7.2.
 - **Python 3.11+** on the machine that runs the MCP client (the server speaks
   stdio, so it runs wherever the client runs).
 - A **dedicated service account** registered with the Authentication Server
@@ -31,7 +33,15 @@ there is no permission model of its own to misconfigure. Two rules follow:
 
 - **Visibility/Insight tools** need the corresponding read permissions
   (queues, sessions, resources, schedules, processes, dashboards). A standard
-  read-only operations role covers them.
+  read-only operations role covers them. The v0.5.0 context/topology reads add
+  a few more read clauses: `list_queue_configurations` needs Read (or Full)
+  Access to Queue Management; `list_resource_pools` a View Resource clause;
+  `list_environment_variables` a View Environment Variables clause (Business
+  Objects or Processes); `list_process_groups` a process-view clause (e.g. View
+  Process Definition). A read denied for lack of a clause surfaces as an error
+  on that one tool, not a startup failure — and `list_queue_configurations`
+  additionally needs **Blue Prism 7.4+**, degrading to an "unavailable" note on
+  older estates rather than failing.
 - **Control tools are capability-gated at startup.** When actions are enabled,
   the server reads `GET /user/permissions` and registers only the action
   tools the account can actually execute — a tool the account cannot run does
@@ -159,6 +169,13 @@ for queues that are unencrypted or use a database encryption key — on an
 application-server-encrypted queue the call returns a 4xx, so confirm the
 behaviour on the queue types your estate runs; and that `get_queue_item`'s
 type-aware scrub leaves no personal data in the payload your processes carry.
+
+The v0.5.0 context reads add one more (again a read, no `dry_run`):
+`list_environment_variables` returns each variable's `value`, typed `object` in
+the spec with no inner shape. The tool scrubs it type-aware on the variable's
+`dataType` (Password redacted, free text scrubbed, binary/image dropped, scalars
+kept) — confirm against your estate that the value arrives in the shape that
+policy expects and that no secret or personal data reaches the model.
 
 ## Operational notes
 
