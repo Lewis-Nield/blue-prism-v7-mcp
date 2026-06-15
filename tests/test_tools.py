@@ -7,12 +7,14 @@ HTTP. Scrub assertions use a marker scrubber that stamps every message, so
 "was this field scrubbed?" is a string equality, not a pattern guess.
 """
 
+import json
+
 import pytest
 import requests
 
 from blue_prism_mcp.config import BPConfig
 from blue_prism_mcp.mock import MockBPClient
-from blue_prism_mcp.pii import NullScrubber, ScrubResult
+from blue_prism_mcp.pii import NullScrubber, RegexScrubber, ScrubResult
 from blue_prism_mcp.tools import (
     DEFAULT_LIMIT,
     build_tier1_tools,
@@ -346,6 +348,165 @@ class TestListQueueItems:
             "Q", "Pending", **WINDOW, status="awaiting review"
         )
         assert [i["id"] for i in result["items"]] == ["i1"]
+
+
+def _exception_item_id(client: MockBPClient) -> str:
+    qid = next(q["id"] for q in client.get_queues() if q["name"] == "Invoices")
+    return client.get_queue_items(qid, state="Exceptioned")[0]["id"]
+
+
+class TestGetQueueItem:
+    def test_returns_the_single_item_with_its_data(self):
+        client = MockBPClient()
+        item = tier1(client)["get_queue_item"](_exception_item_id(client))
+        assert item["keyValue"] == "INV-1002"
+        assert "rows" in item["data"]  # the only read carrying the payload
+        assert "queue" not in item  # mock-internal plumbing never surfaces
+
+    def test_rejects_a_non_uuid_item_id(self):
+        with pytest.raises(ValueError, match="item_id must be a UUID"):
+            tier1()["get_queue_item"]("INV-1002")
+
+    def test_exception_reason_is_scrubbed(self):
+        client = MockBPClient()
+        item = tier1(client, MarkerScrubber())["get_queue_item"](_exception_item_id(client))
+        assert item["exceptionReason"] == "[SCRUBBED]"
+
+    def test_data_payload_is_scrubbed_type_aware(self):
+        # The crux of v0.3.0: the only payload the read surface exposes is
+        # scrubbed by Blue Prism value type — free text through the scrubber,
+        # passwords redacted, binaries dropped, scalars kept, collections recursed.
+        client = MockBPClient()
+        item = tier1(client, MarkerScrubber())["get_queue_item"](_exception_item_id(client))
+        row = item["data"]["rows"][0]
+        assert row["Contact"]["value"] == "[SCRUBBED]"  # Text through the scrubber
+        assert row["VaultPassword"]["value"] == "[PASSWORD]"  # secret redacted wholesale
+        assert row["Scan"]["value"] == "[BINARY omitted]"  # base64 dropped
+        assert row["Scan"]["additionalParameters"] == ["[SCRUBBED]"]  # filename scrubbed too
+        assert row["Logo"]["value"] == "[IMAGE omitted]"  # image base64 dropped
+        assert row["Amount"]["value"] == 1499.99  # scalar kept
+        assert row["Approved"]["value"] is False  # scalar kept
+        nested = row["LineItems"]["value"]["rows"][0]
+        assert nested["Desc"]["value"] == "[SCRUBBED]"  # nested collection recursed
+        assert nested["Net"]["value"] == 1249.99
+
+    def test_data_scrub_fails_closed_on_unknown_and_miscased_types(self):
+        # The scrub is a security boundary: a value type the server spells
+        # differently (or one not in the spec, or a RadioButtons label array)
+        # must NOT pass through verbatim — its string content is scrubbed and a
+        # miscased Password is still redacted.
+        class OddClient(MockBPClient):
+            def get_queue_item(self, item_id):
+                return {
+                    "id": item_id,
+                    "exceptionReason": None,
+                    "data": {
+                        "rows": [
+                            {
+                                "Legacy": {"valueType": "text", "value": "secret note"},
+                                "Secret": {"valueType": "password", "value": "hunter2"},
+                                "Options": {
+                                    "valueType": "RadioButtons",
+                                    "value": ["pick one", "or two"],
+                                },
+                                "Mystery": {"valueType": "Quantum", "value": "leak me"},
+                                "Empty": {"valueType": "Text", "value": None},
+                                "Count": {"valueType": "Tally", "value": 7},
+                            }
+                        ]
+                    },
+                }
+
+        item = tier1(OddClient(), MarkerScrubber())["get_queue_item"](
+            "f3b2a190-8c47-4e2d-9b55-000000000402"
+        )
+        row = item["data"]["rows"][0]
+        assert row["Legacy"]["value"] == "[SCRUBBED]"  # miscased Text still scrubbed
+        assert row["Secret"]["value"] == "[PASSWORD]"  # miscased Password still redacted
+        assert row["Options"]["value"] == ["[SCRUBBED]", "[SCRUBBED]"]  # list scrubbed elementwise
+        assert row["Mystery"]["value"] == "[SCRUBBED]"  # unknown type fails closed
+        assert row["Empty"]["value"] is None  # None has no text to scrub
+        assert row["Count"]["value"] == 7  # an unknown type's numeric value is left as-is
+
+    def test_data_payload_pii_is_actually_removed_end_to_end(self):
+        # With the real regex scrubber: no supplier phone number (top-level or
+        # nested) and no password value ever reaches the model in the payload.
+        client = MockBPClient()
+        item = tier1(client, RegexScrubber())["get_queue_item"](_exception_item_id(client))
+        blob = json.dumps(item["data"])
+        assert "07700 900123" not in blob
+        assert "07700 900456" not in blob
+        assert "s3cret-Pa55word" not in blob
+
+    def test_empty_data_collection_is_a_scrub_noop(self):
+        # An item with no payload still answers a data field; scrubbing a
+        # rows-less collection must not crash.
+        client = MockBPClient()
+        qid = next(q["id"] for q in client.get_queues() if q["name"] == "Invoices")
+        completed = client.get_queue_items(qid, state="Completed")[0]["id"]
+        assert tier1(client)["get_queue_item"](completed)["data"] == {"rows": []}
+
+    def test_non_collection_data_passes_through_untouched(self):
+        # Defensive: a null/odd-shaped `data` (e.g. an item the server returns
+        # with no collection) must survive rather than raise mid-scrub.
+        class OddClient(MockBPClient):
+            def get_queue_item(self, item_id):
+                return {"id": item_id, "exceptionReason": None, "data": None}
+
+        item = tier1(OddClient(), MarkerScrubber())["get_queue_item"](
+            "f3b2a190-8c47-4e2d-9b55-000000000402"
+        )
+        assert item["data"] is None
+
+
+class TestListItemAttempts:
+    def test_lists_attempt_history_latest_first(self):
+        client = MockBPClient()
+        qid = next(q["id"] for q in client.get_queues() if q["name"] == "Invoices")
+        result = tier1(client)["list_item_attempts"]("Invoices", _exception_item_id(client))
+        assert [a["attemptNumber"] for a in result["items"]] == [2, 1]
+        assert result["meta"]["sorted_by"].startswith("attemptNumber desc")
+        assert qid  # queue resolved by name
+
+    def test_resolves_queue_name_and_rejects_a_non_uuid_item(self):
+        with pytest.raises(ValueError, match="item_id must be a UUID"):
+            tier1()["list_item_attempts"]("Invoices", "INV-1002")
+
+    def test_exception_reason_is_scrubbed(self):
+        client = MockBPClient()
+        result = tier1(client, MarkerScrubber())["list_item_attempts"](
+            "Invoices", _exception_item_id(client)
+        )
+        # The first attempt carried an exception reason; the retry attempt's is null.
+        reasons = {a["exceptionReason"] for a in result["items"]}
+        assert reasons == {"[SCRUBBED]", None}
+
+    def test_unknown_queue_name_fails_with_suggestions(self):
+        with pytest.raises(ValueError, match="Did you mean: Invoices"):
+            tier1()["list_item_attempts"]("Invocies", _exception_item_id(MockBPClient()))
+
+
+class TestGetSession:
+    def test_returns_the_single_session(self):
+        client = MockBPClient()
+        sid = client.get_sessions()[0]["sessionId"]
+        assert tier1(client)["get_session"](sid)["sessionId"] == sid
+
+    def test_rejects_a_non_uuid_session_id(self):
+        with pytest.raises(ValueError, match="session_id must be a UUID"):
+            tier1()["get_session"]("session-7")
+
+    def test_exception_message_is_scrubbed(self):
+        client = MockBPClient()
+        failed = next(s for s in client.get_sessions() if s["status"] == "Terminated")
+        session = tier1(client, MarkerScrubber())["get_session"](failed["sessionId"])
+        assert session["exceptionMessage"] == "[SCRUBBED]"
+
+    def test_null_exception_message_survives_as_null(self):
+        client = MockBPClient()
+        ok = next(s for s in client.get_sessions() if s["status"] == "Completed")
+        session = tier1(client, MarkerScrubber())["get_session"](ok["sessionId"])
+        assert session["exceptionMessage"] is None
 
 
 class TestListSessions:
@@ -706,14 +867,17 @@ class FakeApp:
 
 
 class TestRegisterTools:
-    def test_registers_all_eleven_tools_by_name(self):
+    def test_registers_all_read_tools_by_name(self):
         app = FakeApp()
         names = register_tools(app, MockBPClient(), NullScrubber(), config=BPConfig())
         assert names == [
             "list_queues",
             "get_queue",
             "list_queue_items",
+            "get_queue_item",
+            "list_item_attempts",
             "list_sessions",
+            "get_session",
             "get_session_log",
             "list_resources",
             "list_schedules",

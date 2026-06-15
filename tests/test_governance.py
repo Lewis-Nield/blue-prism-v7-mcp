@@ -37,6 +37,7 @@ ALL_ACTION_TOOLS = {
     "stop_session",
     "set_schedule_enabled",
     "trigger_schedule",
+    "stop_schedule",
 }
 
 QUEUE_ONLY = ["Full Access to Queue Management"]
@@ -203,7 +204,7 @@ class TestBuildAuditLog:
 
 
 class TestBuildTier3Tools:
-    def test_full_permissions_build_all_six_in_order(self, tmp_path):
+    def test_full_permissions_build_all_action_tools_in_order(self, tmp_path):
         tools, _, _ = tier3(tmp_path)
         assert list(tools) == [
             "retry_queue_item",
@@ -212,6 +213,7 @@ class TestBuildTier3Tools:
             "stop_session",
             "set_schedule_enabled",
             "trigger_schedule",
+            "stop_schedule",
         ]
 
     def test_narrow_permissions_build_only_allowed_tools(self, tmp_path):
@@ -258,6 +260,7 @@ class TestBuildTier3Tools:
                 "Control Resource",
             ],
             "trigger_schedule": ["Edit Schedule"],
+            "stop_schedule": ["Edit Schedule"],
         }
 
 
@@ -276,7 +279,7 @@ class TestDryRunContract:
     def test_every_tool_names_its_action_and_audits_the_same_args(self, tmp_path):
         # The action name in the result is what the model reasons over, and
         # the audit line must carry the same tool name and the resolved args
-        # the result previews — one contract across all six tools.
+        # the result previews — one contract across every action tool.
         tools, audit, client = tier3(tmp_path)
         item = _exceptioned_item(client)
         session_id = client.get_sessions()[0]["sessionId"]
@@ -293,6 +296,7 @@ class TestDryRunContract:
                 lambda: tools["set_schedule_enabled"]("Daily Invoice Run", False),
             ),
             ("trigger_schedule", lambda: tools["trigger_schedule"]("Daily Invoice Run")),
+            ("stop_schedule", lambda: tools["stop_schedule"]("Daily Invoice Run")),
         ]
         results = [(name, call()) for name, call in calls]
         for name, result in results:
@@ -323,6 +327,7 @@ class TestDryRunContract:
             {"session_id": session_id},
             {"schedule": "Daily Invoice Run", "schedule_id": "1", "enabled": False},
             {"schedule": "Daily Invoice Run", "schedule_id": "1", "start_time": None},
+            {"schedule": "Daily Invoice Run", "schedule_id": "1"},
         ]
 
 
@@ -746,6 +751,33 @@ class TestTriggerSchedule:
         assert client.last_trigger == ("1", "2026-04-01T09:00:00")
 
 
+class TestStopSchedule:
+    def test_dry_run_is_the_default_and_changes_nothing(self, tmp_path):
+        tools, audit, client = tier3(tmp_path)
+        result = tools["stop_schedule"]("Daily Invoice Run")
+        assert result["dry_run"] is True
+        assert result["would"] == {"schedule": "Daily Invoice Run", "schedule_id": "1"}
+        assert "lastOutcome" not in client.get_schedules()[0]  # untouched
+        assert [e["status"] for e in read_audit(audit)] == ["dry_run"]
+
+    def test_live_run_stops_forwarding_the_resolved_id(self, tmp_path):
+        class RecordingClient(MockBPClient):
+            def stop_schedule(self, schedule_id):
+                self.last_stop = schedule_id
+                return super().stop_schedule(schedule_id)
+
+        client = RecordingClient()
+        tools, audit, _ = tier3(tmp_path, client=client)
+        result = tools["stop_schedule"]("Daily Invoice Run", dry_run=False)
+        assert result["dry_run"] is False
+        assert client.last_stop == "1"
+        assert [e["status"] for e in read_audit(audit)] == ["attempt", "success"]
+
+    def test_only_needs_edit_schedule_like_its_trigger_sibling(self):
+        assert "stop_schedule" in resolve_capabilities(["Edit Schedule"])
+        assert "stop_schedule" not in resolve_capabilities(["Retire Schedule"])
+
+
 # --- register_tools: the enable_actions gate ----------------------------------------
 
 
@@ -765,7 +797,10 @@ READ_TOOLS = [
     "list_queues",
     "get_queue",
     "list_queue_items",
+    "get_queue_item",
+    "list_item_attempts",
     "list_sessions",
+    "get_session",
     "get_session_log",
     "list_resources",
     "list_schedules",
@@ -804,6 +839,7 @@ class TestRegisterToolsGate:
             "stop_session",
             "set_schedule_enabled",
             "trigger_schedule",
+            "stop_schedule",
         ]
         startup = [json.loads(line) for line in path.read_text().splitlines()]
         assert [e["status"] for e in startup] == ["startup"]

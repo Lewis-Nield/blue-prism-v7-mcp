@@ -45,6 +45,7 @@ there is no permission model of its own to misconfigure. Two rules follow:
   | `set_schedule_enabled` (retire) | Edit Schedule **and** Retire Schedule |
   | `set_schedule_enabled` (unretire) | the retire pair **and** Create Schedule (enforced at call time, so retire-only accounts keep the tool) |
   | `trigger_schedule` | Edit Schedule |
+  | `stop_schedule` | Edit Schedule (same as `trigger_schedule`) |
 
   Grant the *least* of these that covers the actions you want exposed; the
   startup audit line records which tools registered and which were withheld,
@@ -148,7 +149,16 @@ it runs. Note a session can be created and started against a logged-out worker �
 it is the *process* that fails at run time if it depends on an interactive
 desktop/login session on the resource, not the start call itself. `stop_session`
 drives the same endpoint with `{status: Stopped}`; confirm against a running
-session that the stop request is accepted and the run winds down.
+session that the stop request is accepted and the run winds down. `stop_schedule`
+issues `DELETE /schedules/{id}/runs/active` — confirm against a schedule with an
+active run that the run is cancelled.
+
+The v0.3.0 diagnostic reads add two non-control checks (reads, so no
+`dry_run` gate, but worth confirming): `get_queue_item` returns item `data` only
+for queues that are unencrypted or use a database encryption key — on an
+application-server-encrypted queue the call returns a 4xx, so confirm the
+behaviour on the queue types your estate runs; and that `get_queue_item`'s
+type-aware scrub leaves no personal data in the payload your processes carry.
 
 ## Operational notes
 
