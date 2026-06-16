@@ -1,11 +1,12 @@
 """Tier 1 — visibility tools: read-only primitives over the v7 entities.
 
-Each tool closure's docstring IS the tool description an LLM client sees, so
-they spell out the envelope contract, the required scoping, and what was
-scrubbed — tight, single-purpose descriptions drive better tool selection.
+The domain logic lives on ``_Tier1ReadsMixin`` (composed into the embeddable
+``Engine``): each method resolves names, scrubs, and returns the FULL ranked
+records (a ``Ranked`` for list tools, a dict for single reads) — no truncation.
+``build_tier1_tools`` is the thin MCP adapter: each closure keeps the public
+signature and the docstring an LLM client sees, calls the engine method, and —
+for list tools — caps it to top-N via ``to_envelope``.
 
-The builder takes a client (live or mock — same surface) and a Scrubber; the
-returned closures carry clean signatures for FastMCP's schema introspection.
 PII boundaries here: ``exceptionReason`` on queue-item rows (lists and attempt
 history), ``exceptionMessage`` on session rows (lists and single-session
 detail), stage ``result`` text in session logs, and — only in the single-item
@@ -20,14 +21,14 @@ from typing import Callable
 
 import requests
 
-from ..pii import Scrubber
 from .common import (
     DEFAULT_LIMIT,
-    envelope,
-    make_cached_scrub,
+    Ranked,
+    rank,
     require_window,
     resolve_id,
     resource_urgency,
+    to_envelope,
     validate_choice,
     validate_uuid,
 )
@@ -83,26 +84,30 @@ def _deferred_counts(client, queue_ids: list) -> dict | None:
     }
 
 
-def build_tier1_tools(client, scrubber: Scrubber) -> list[Callable]:
-    """Build the visibility tools over *client*, scrubbing with *scrubber*."""
-    scrub_text = make_cached_scrub(scrubber)
+class _Tier1ReadsMixin:
+    """Domain methods for the visibility reads (mixed into ``Engine``).
 
-    def _scrubbed_item(item: dict) -> dict:
-        return {**item, "exceptionReason": scrub_text(item.get("exceptionReason"))}
+    Expects ``self.client`` (live or mock) and ``self.scrub_text`` (the cached,
+    None-safe text scrub) from the composing class. List methods return the full
+    ``Ranked`` records; single reads return the record dict.
+    """
 
-    def _scrubbed_session(session: dict) -> dict:
-        return {**session, "exceptionMessage": scrub_text(session.get("exceptionMessage"))}
+    def _scrubbed_item(self, item: dict) -> dict:
+        return {**item, "exceptionReason": self.scrub_text(item.get("exceptionReason"))}
 
-    def _scrubbed_stage(entry: dict) -> dict:
-        return {**entry, "result": scrub_text(entry.get("result"))}
+    def _scrubbed_session(self, session: dict) -> dict:
+        return {**session, "exceptionMessage": self.scrub_text(session.get("exceptionMessage"))}
 
-    def _scrubbed_collection(collection):
+    def _scrubbed_stage(self, entry: dict) -> dict:
+        return {**entry, "result": self.scrub_text(entry.get("result"))}
+
+    def _scrubbed_collection(self, collection):
         """Scrub a Blue Prism DataCollection in place-by-value (recurses rows)."""
         if not isinstance(collection, dict) or not isinstance(collection.get("rows"), list):
             return collection
         rows = [
             {
-                field: _scrubbed_value(cell) if isinstance(cell, dict) else cell
+                field: self._scrubbed_value(cell) if isinstance(cell, dict) else cell
                 for field, cell in row.items()
             }
             if isinstance(row, dict)
@@ -111,7 +116,7 @@ def build_tier1_tools(client, scrubber: Scrubber) -> list[Callable]:
         ]
         return {**collection, "rows": rows}
 
-    def _scrub_payload(value):
+    def _scrub_payload(self, value):
         """Scrub any DataValue payload shape, recursing nested collections.
 
         Strings go through the PII scrubber; lists (e.g. a RadioButtonsArray)
@@ -119,14 +124,14 @@ def build_tier1_tools(client, scrubber: Scrubber) -> list[Callable]:
         anything else (a number, boolean, or None) is already safe.
         """
         if isinstance(value, str):
-            return scrub_text(value)
+            return self.scrub_text(value)
         if isinstance(value, list):
-            return [_scrub_payload(v) for v in value]
+            return [self._scrub_payload(v) for v in value]
         if isinstance(value, dict):
-            return _scrubbed_collection(value)
+            return self._scrubbed_collection(value)
         return value
 
-    def _scrub_typed_value(value_type, value):
+    def _scrub_typed_value(self, value_type, value):
         """Apply the FAIL-CLOSED, type-aware scrub policy to one typed value.
 
         A diagnostic read must never leak a secret or a binary blob, so the
@@ -149,24 +154,24 @@ def build_tier1_tools(client, scrubber: Scrubber) -> list[Callable]:
             return f"[{vt.upper()} omitted]"
         if vt in _SCALAR_VALUE_TYPES:
             return value
-        return _scrub_payload(value)
+        return self._scrub_payload(value)
 
-    def _scrubbed_value(cell: dict) -> dict:
+    def _scrubbed_value(self, cell: dict) -> dict:
         """Scrub one DataValue cell, keyed on its ``valueType``.
 
         additionalParameters (a Binary's file path, etc.) is free text too, so
         it is scrubbed at the same boundary.
         """
         new = dict(cell)
-        new["value"] = _scrub_typed_value(cell.get("valueType"), cell.get("value"))
+        new["value"] = self._scrub_typed_value(cell.get("valueType"), cell.get("value"))
         extra = cell.get("additionalParameters")
         if isinstance(extra, list):
             new["additionalParameters"] = [
-                scrub_text(x) if isinstance(x, str) else x for x in extra
+                self.scrub_text(x) if isinstance(x, str) else x for x in extra
             ]
         return new
 
-    def _scrubbed_env_var(var: dict) -> dict:
+    def _scrubbed_env_var(self, var: dict) -> dict:
         """Scrub one environment variable type-aware, keyed on dataType.
 
         The value is a configuration payload carrying the same Blue Prism data
@@ -178,9 +183,208 @@ def build_tier1_tools(client, scrubber: Scrubber) -> list[Callable]:
         """
         return {
             **var,
-            "description": scrub_text(var.get("description")),
-            "value": _scrub_typed_value(var.get("dataType"), var.get("value")),
+            "description": self.scrub_text(var.get("description")),
+            "value": self._scrub_typed_value(var.get("dataType"), var.get("value")),
         }
+
+    def list_queues(self) -> Ranked:
+        """Rank every work queue by backlog, folding in the deferred count.
+
+        WorkQueueSummary carries every state count except deferred; that one is
+        folded in from the workQueueCompositions aggregate across the whole
+        result set, added only for queues the aggregate actually reported a
+        count for (an unknown count is omitted, never a fabricated zero). If the
+        whole aggregate read is denied or fails, the listing still stands and
+        signals it via ``meta.deferred_unavailable``.
+        """
+        ranked = rank(
+            self.client.get_queues(),
+            sort_key=lambda q: q.get("pendingItemCount", 0),
+            sorted_by="pendingItemCount desc",
+            reverse=True,
+        )
+        deferred = _deferred_counts(self.client, [q.get("id") for q in ranked.records])
+        if deferred is None:
+            return Ranked(ranked.records, ranked.sorted_by, {"deferred_unavailable": True})
+        records = [
+            {**q, "deferred": deferred[q["id"]]} if q.get("id") in deferred else q
+            for q in ranked.records
+        ]
+        return Ranked(records, ranked.sorted_by)
+
+    def get_queue(self, queue: str) -> dict:
+        """Return one work queue's full detail by name or id."""
+        queue_id = resolve_id(queue, self.client.get_queues(), entity="queue")
+        return self.client.get_queue(queue_id)
+
+    def list_queue_items(
+        self,
+        queue: str,
+        state: str,
+        start_date: str,
+        end_date: str,
+        status: str | None = None,
+    ) -> Ranked:
+        """Rank one queue's items by recency, filtered by state and date window."""
+        state = validate_choice(state, "state", ITEM_STATES)
+        require_window(start_date, end_date)
+        queue_id = resolve_id(queue, self.client.get_queues(), entity="queue")
+        items = self.client.get_queue_items(
+            queue_id, state=state, status=status, start_date=start_date, end_date=end_date
+        )
+        return rank(
+            [self._scrubbed_item(i) for i in items],
+            sort_key=lambda i: i.get("lastUpdated") or "",
+            sorted_by="lastUpdated desc",
+            reverse=True,
+        )
+
+    def get_queue_item(self, item_id: str) -> dict:
+        """Return one queue item in full, with its ``data`` collection scrubbed."""
+        item_id = validate_uuid(item_id, "item_id", hint=_ITEM_ID_HINT)
+        item = self.client.get_queue_item(item_id)
+        scrubbed = {**item, "exceptionReason": self.scrub_text(item.get("exceptionReason"))}
+        if "data" in scrubbed:
+            scrubbed["data"] = self._scrubbed_collection(scrubbed["data"])
+        return scrubbed
+
+    def list_item_attempts(self, queue: str, item_id: str) -> Ranked:
+        """Rank one item's attempt history, latest attempt first."""
+        queue_id = resolve_id(queue, self.client.get_queues(), entity="queue")
+        item_id = validate_uuid(item_id, "item_id", hint=_ITEM_ID_HINT)
+        attempts = self.client.get_item_attempts(queue_id, item_id)
+        return rank(
+            [self._scrubbed_item(a) for a in attempts],
+            sort_key=lambda a: a.get("attemptNumber") or 0,
+            sorted_by="attemptNumber desc (latest attempt first)",
+            reverse=True,
+        )
+
+    def list_sessions(
+        self,
+        start_date: str,
+        end_date: str,
+        process: str | None = None,
+        resource: str | None = None,
+        status: str | None = None,
+    ) -> Ranked:
+        """Rank run history (sessions) by recency within a date window, filtered."""
+        require_window(start_date, end_date)
+        if status is not None:
+            status = validate_choice(status, "status", SESSION_STATUSES)
+        sessions = self.client.get_sessions(start_date, end_date)
+        if process:
+            wanted = process.strip().casefold()
+            sessions = [s for s in sessions if str(s.get("processName", "")).casefold() == wanted]
+        if resource:
+            wanted = resource.strip().casefold()
+            sessions = [s for s in sessions if str(s.get("resourceName", "")).casefold() == wanted]
+        if status:
+            sessions = [s for s in sessions if s.get("status") == status]
+        return rank(
+            [self._scrubbed_session(s) for s in sessions],
+            sort_key=lambda s: s.get("startTime") or "",
+            sorted_by="startTime desc",
+            reverse=True,
+        )
+
+    def get_session(self, session_id: str) -> dict:
+        """Return one process run (session) in full by its id."""
+        session_id = validate_uuid(
+            session_id, "session_id", hint="Use the sessionId from list_sessions."
+        )
+        return self._scrubbed_session(self.client.get_session(session_id))
+
+    def get_session_log(self, session_id: str) -> Ranked:
+        """Rank one session's stage log latest-stage-first (failures end a log)."""
+        entries = self.client.get_session_log(session_id)
+        return rank(
+            [self._scrubbed_stage(e) for e in entries],
+            sort_key=lambda e: e.get("logNumber") or 0,
+            sorted_by="logNumber desc (latest stage first — failures end a log)",
+            reverse=True,
+        )
+
+    def list_resources(self) -> Ranked:
+        """Rank digital workers most-urgent-first (Missing/Offline/Warning lead)."""
+        return rank(
+            self.client.get_resources(),
+            sort_key=resource_urgency,
+            sorted_by="displayStatus urgency (Missing/Offline/Warning first), name",
+        )
+
+    def list_schedules(self) -> Ranked:
+        """Rank schedules active-first then alphabetical (retired last)."""
+        return rank(
+            self.client.get_schedules(),
+            sort_key=lambda s: (bool(s.get("isRetired")), str(s.get("name") or "")),
+            sorted_by="active first, then name (retired last)",
+        )
+
+    def list_processes(self) -> Ranked:
+        """Rank the published process catalogue alphabetically by name."""
+        return rank(
+            self.client.get_processes(),
+            sort_key=lambda p: str(p.get("processName") or ""),
+            sorted_by="processName",
+        )
+
+    def list_queue_configurations(self) -> Ranked:
+        """Rank active-queue configurations busiest-first; degrade below 7.4.
+
+        On a transport/HTTP failure (older estate without the 7.4 endpoint, or a
+        denied Queue Management read) returns an empty ``Ranked`` carrying an
+        ``unavailable`` note in its meta, rather than raising — so the tool
+        degrades visibly instead of failing the surface.
+        """
+        try:
+            configurations = self.client.get_queue_configurations()
+        except requests.RequestException as exc:
+            return Ranked(
+                [],
+                "activeQueueStats.activeSessions desc",
+                {
+                    "unavailable": (
+                        "queue configurations unavailable (requires Blue Prism 7.4+ "
+                        f"and Queue Management read access): {exc}"
+                    )
+                },
+            )
+        return rank(
+            configurations,
+            sort_key=lambda c: (c.get("activeQueueStats") or {}).get("activeSessions") or 0,
+            sorted_by="activeQueueStats.activeSessions desc",
+            reverse=True,
+        )
+
+    def list_resource_pools(self) -> Ranked:
+        """Rank resource pools largest-first (most members)."""
+        return rank(
+            self.client.get_resource_pools(),
+            sort_key=lambda p: p.get("members") or 0,
+            sorted_by="members desc",
+            reverse=True,
+        )
+
+    def list_environment_variables(self) -> Ranked:
+        """Rank environment variables alphabetically, scrubbed type-aware."""
+        return rank(
+            [self._scrubbed_env_var(v) for v in self.client.get_environment_variables()],
+            sort_key=lambda v: str(v.get("name") or ""),
+            sorted_by="name",
+        )
+
+    def list_process_groups(self) -> Ranked:
+        """Rank the process tree folders-first then alphabetical."""
+        return rank(
+            self.client.get_process_groups(),
+            sort_key=lambda n: (n.get("nodeType") != "Group", str(n.get("name") or "")),
+            sorted_by="folders first, then name",
+        )
+
+
+def build_tier1_tools(engine) -> list[Callable]:
+    """Build the visibility tools as thin adapters over *engine*'s domain methods."""
 
     def list_queues(limit: int = DEFAULT_LIMIT) -> dict:
         """List every work queue with its health counts.
@@ -198,29 +402,7 @@ def build_tier1_tools(client, scrubber: Scrubber) -> list[Callable]:
         count (biggest backlog first) and capped at `limit` (default 50).
         meta.truncated tells you whether you saw every queue.
         """
-        result = envelope(
-            client.get_queues(),
-            sort_key=lambda q: q.get("pendingItemCount", 0),
-            sorted_by="pendingItemCount desc",
-            limit=limit,
-            reverse=True,
-        )
-        # WorkQueueSummary carries every state count except deferred; fold that
-        # one in from the workQueueCompositions aggregate, but only for the
-        # queues actually returned (a cheaper request than the full estate). The
-        # field is added only for queues the aggregate actually reported a count
-        # for — an unknown count is omitted, never a fabricated zero. If the
-        # whole read is denied or fails, the listing still stands and degrades
-        # visibly via meta.deferred_unavailable.
-        deferred = _deferred_counts(client, [q.get("id") for q in result["items"]])
-        if deferred is None:
-            result["meta"]["deferred_unavailable"] = True
-        else:
-            result["items"] = [
-                {**q, "deferred": deferred[q["id"]]} if q.get("id") in deferred else q
-                for q in result["items"]
-            ]
-        return result
+        return to_envelope(engine.list_queues(), limit)
 
     def get_queue(queue: str) -> dict:
         """Return one work queue's full detail by name or id.
@@ -231,8 +413,7 @@ def build_tier1_tools(client, scrubber: Scrubber) -> list[Callable]:
         (case-insensitive), or its UUID. (The per-queue `deferred` count is not
         included here — list_queues folds that in across its result set.)
         """
-        queue_id = resolve_id(queue, client.get_queues(), entity="queue")
-        return client.get_queue(queue_id)
+        return engine.get_queue(queue)
 
     def list_queue_items(
         queue: str,
@@ -260,18 +441,8 @@ def build_tier1_tools(client, scrubber: Scrubber) -> list[Callable]:
         updated first, capped at `limit` (default 50); meta.truncated tells
         you whether you saw everything in the window.
         """
-        state = validate_choice(state, "state", ITEM_STATES)
-        require_window(start_date, end_date)
-        queue_id = resolve_id(queue, client.get_queues(), entity="queue")
-        items = client.get_queue_items(
-            queue_id, state=state, status=status, start_date=start_date, end_date=end_date
-        )
-        return envelope(
-            [_scrubbed_item(i) for i in items],
-            sort_key=lambda i: i.get("lastUpdated") or "",
-            sorted_by="lastUpdated desc",
-            limit=limit,
-            reverse=True,
+        return to_envelope(
+            engine.list_queue_items(queue, state, start_date, end_date, status), limit
         )
 
     def get_queue_item(item_id: str) -> dict:
@@ -293,12 +464,7 @@ def build_tier1_tools(client, scrubber: Scrubber) -> list[Callable]:
         application-server key; for those queues this call fails, and the
         other (no-data) item tools must be used instead.
         """
-        item_id = validate_uuid(item_id, "item_id", hint=_ITEM_ID_HINT)
-        item = client.get_queue_item(item_id)
-        scrubbed = {**item, "exceptionReason": scrub_text(item.get("exceptionReason"))}
-        if "data" in scrubbed:
-            scrubbed["data"] = _scrubbed_collection(scrubbed["data"])
-        return scrubbed
+        return engine.get_queue_item(item_id)
 
     def list_item_attempts(queue: str, item_id: str, limit: int = DEFAULT_LIMIT) -> dict:
         """List the attempt history for one work queue item.
@@ -314,16 +480,7 @@ def build_tier1_tools(client, scrubber: Scrubber) -> list[Callable]:
         first, capped at `limit` (default 50); meta.truncated tells you whether
         every attempt is shown.
         """
-        queue_id = resolve_id(queue, client.get_queues(), entity="queue")
-        item_id = validate_uuid(item_id, "item_id", hint=_ITEM_ID_HINT)
-        attempts = client.get_item_attempts(queue_id, item_id)
-        return envelope(
-            [_scrubbed_item(a) for a in attempts],
-            sort_key=lambda a: a.get("attemptNumber") or 0,
-            sorted_by="attemptNumber desc (latest attempt first)",
-            limit=limit,
-            reverse=True,
-        )
+        return to_envelope(engine.list_item_attempts(queue, item_id), limit)
 
     def list_sessions(
         start_date: str,
@@ -349,24 +506,8 @@ def build_tier1_tools(client, scrubber: Scrubber) -> list[Callable]:
         first, capped at `limit` (default 50); meta.truncated tells you
         whether you saw every session in the window.
         """
-        require_window(start_date, end_date)
-        if status is not None:
-            status = validate_choice(status, "status", SESSION_STATUSES)
-        sessions = client.get_sessions(start_date, end_date)
-        if process:
-            wanted = process.strip().casefold()
-            sessions = [s for s in sessions if str(s.get("processName", "")).casefold() == wanted]
-        if resource:
-            wanted = resource.strip().casefold()
-            sessions = [s for s in sessions if str(s.get("resourceName", "")).casefold() == wanted]
-        if status:
-            sessions = [s for s in sessions if s.get("status") == status]
-        return envelope(
-            [_scrubbed_session(s) for s in sessions],
-            sort_key=lambda s: s.get("startTime") or "",
-            sorted_by="startTime desc",
-            limit=limit,
-            reverse=True,
+        return to_envelope(
+            engine.list_sessions(start_date, end_date, process, resource, status), limit
         )
 
     def get_session(session_id: str) -> dict:
@@ -382,10 +523,7 @@ def build_tier1_tools(client, scrubber: Scrubber) -> list[Callable]:
         get_session_log on the same id to see the stage-by-stage detail of why
         the run failed.
         """
-        session_id = validate_uuid(
-            session_id, "session_id", hint="Use the sessionId from list_sessions."
-        )
-        return _scrubbed_session(client.get_session(session_id))
+        return engine.get_session(session_id)
 
     def get_session_log(session_id: str, limit: int = DEFAULT_LIMIT) -> dict:
         """Return the stage-level execution log for one session — why a run failed.
@@ -401,14 +539,7 @@ def build_tier1_tools(client, scrubber: Scrubber) -> list[Callable]:
         tells you whether earlier stages were cut. Raise `limit` to see more
         of the run's history.
         """
-        entries = client.get_session_log(session_id)
-        return envelope(
-            [_scrubbed_stage(e) for e in entries],
-            sort_key=lambda e: e.get("logNumber") or 0,
-            sorted_by="logNumber desc (latest stage first — failures end a log)",
-            limit=limit,
-            reverse=True,
-        )
+        return to_envelope(engine.get_session_log(session_id), limit)
 
     def list_resources(limit: int = DEFAULT_LIMIT) -> dict:
         """List the digital workers (runtime resources) and their status.
@@ -423,12 +554,7 @@ def build_tier1_tools(client, scrubber: Scrubber) -> list[Callable]:
         `limit` (default 50); meta.truncated tells you whether you saw every
         worker.
         """
-        return envelope(
-            client.get_resources(),
-            sort_key=resource_urgency,
-            sorted_by="displayStatus urgency (Missing/Offline/Warning first), name",
-            limit=limit,
-        )
+        return to_envelope(engine.list_resources(), limit)
 
     def list_schedules(limit: int = DEFAULT_LIMIT) -> dict:
         """List the schedules that run processes automatically.
@@ -442,12 +568,7 @@ def build_tier1_tools(client, scrubber: Scrubber) -> list[Callable]:
         first then alphabetical (retired ones sort last), capped at `limit`
         (default 50); meta.truncated tells you whether you saw every schedule.
         """
-        return envelope(
-            client.get_schedules(),
-            sort_key=lambda s: (bool(s.get("isRetired")), str(s.get("name") or "")),
-            sorted_by="active first, then name (retired last)",
-            limit=limit,
-        )
+        return to_envelope(engine.list_schedules(), limit)
 
     def list_processes(limit: int = DEFAULT_LIMIT) -> dict:
         """List the published automation processes (the process catalogue).
@@ -460,12 +581,7 @@ def build_tier1_tools(client, scrubber: Scrubber) -> list[Callable]:
         name, capped at `limit` (default 50); meta.truncated tells you whether
         you saw the whole catalogue.
         """
-        return envelope(
-            client.get_processes(),
-            sort_key=lambda p: str(p.get("processName") or ""),
-            sorted_by="processName",
-            limit=limit,
-        )
+        return to_envelope(engine.list_processes(), limit)
 
     def list_queue_configurations(limit: int = DEFAULT_LIMIT) -> dict:
         """Map each active work queue to the process and resources that drain it.
@@ -485,29 +601,7 @@ def build_tier1_tools(client, scrubber: Scrubber) -> list[Callable]:
         Needs Blue Prism 7.4 or later; against an older estate this returns no
         items with `meta.unavailable` explaining why, rather than failing.
         """
-        try:
-            configurations = client.get_queue_configurations()
-        except requests.RequestException as exc:
-            return {
-                "items": [],
-                "meta": {
-                    "total": 0,
-                    "returned": 0,
-                    "truncated": False,
-                    "sorted_by": "activeQueueStats.activeSessions desc",
-                    "unavailable": (
-                        "queue configurations unavailable (requires Blue Prism 7.4+ "
-                        f"and Queue Management read access): {exc}"
-                    ),
-                },
-            }
-        return envelope(
-            configurations,
-            sort_key=lambda c: (c.get("activeQueueStats") or {}).get("activeSessions") or 0,
-            sorted_by="activeQueueStats.activeSessions desc",
-            limit=limit,
-            reverse=True,
-        )
+        return to_envelope(engine.list_queue_configurations(), limit)
 
     def list_resource_pools(limit: int = DEFAULT_LIMIT) -> dict:
         """List the resource pools (groupings of digital workers) and their size.
@@ -519,13 +613,7 @@ def build_tier1_tools(client, scrubber: Scrubber) -> list[Callable]:
         Results come back as {"items": [...], "meta": {...}}, largest pool
         first (most members), capped at `limit` (default 50).
         """
-        return envelope(
-            client.get_resource_pools(),
-            sort_key=lambda p: p.get("members") or 0,
-            sorted_by="members desc",
-            limit=limit,
-            reverse=True,
-        )
+        return to_envelope(engine.list_resource_pools(), limit)
 
     def list_environment_variables(limit: int = DEFAULT_LIMIT) -> dict:
         """List the estate's environment variables (shared process configuration).
@@ -541,12 +629,7 @@ def build_tier1_tools(client, scrubber: Scrubber) -> list[Callable]:
         name, capped at `limit` (default 50); meta.truncated tells you whether
         you saw every variable.
         """
-        return envelope(
-            [_scrubbed_env_var(v) for v in client.get_environment_variables()],
-            sort_key=lambda v: str(v.get("name") or ""),
-            sorted_by="name",
-            limit=limit,
-        )
+        return to_envelope(engine.list_environment_variables(), limit)
 
     def list_process_groups(limit: int = DEFAULT_LIMIT) -> dict:
         """List the process tree — the folders and processes in the catalogue.
@@ -560,12 +643,7 @@ def build_tier1_tools(client, scrubber: Scrubber) -> list[Callable]:
         processes, alphabetical within each, capped at `limit` (default 50);
         meta.truncated tells you whether you saw the whole tree.
         """
-        return envelope(
-            client.get_process_groups(),
-            sort_key=lambda n: (n.get("nodeType") != "Group", str(n.get("name") or "")),
-            sorted_by="folders first, then name",
-            limit=limit,
-        )
+        return to_envelope(engine.list_process_groups(), limit)
 
     return [
         list_queues,

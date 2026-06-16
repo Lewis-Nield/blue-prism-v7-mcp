@@ -7,6 +7,10 @@ exception_summary and throughput_summary aggregate client-side over the Tier 1
 reads, under the same required-window scoping. estate_health and
 license_entitlement read the two licence /dashboards endpoints this server
 consumes: current limits vs usage, and the per-tier entitlement ceilings.
+
+As with Tier 1, the domain logic lives on ``_Tier2InsightMixin`` (composed into
+``Engine``) returning the full ranked records, and ``build_tier2_tools`` is the
+thin MCP adapter applying the envelope representation.
 """
 
 from __future__ import annotations
@@ -14,15 +18,15 @@ from __future__ import annotations
 from collections import Counter
 from typing import Callable
 
-from ..pii import Scrubber
 from .common import (
     DEFAULT_LIMIT,
-    envelope,
-    make_cached_scrub,
+    Ranked,
+    rank,
     read_or_unavailable,
     require_window,
     resolve_id,
     resource_urgency,
+    to_envelope,
 )
 
 # Resource display statuses that demand operator attention, i.e. the worker is
@@ -44,38 +48,26 @@ def _entitlement_tier(tier: dict | None) -> dict:
     return {friendly: tier.get(raw) for raw, friendly in _ENTITLEMENT_FIELDS.items()}
 
 
-def build_tier2_tools(client, scrubber: Scrubber) -> list[Callable]:
-    """Build the four insight tools over *client*, scrubbing with *scrubber*."""
-    scrub_text = make_cached_scrub(scrubber)
+class _Tier2InsightMixin:
+    """Domain methods for the insight tools (mixed into ``Engine``).
 
-    def exception_summary(
-        queue: str, start_date: str, end_date: str, limit: int = DEFAULT_LIMIT
-    ) -> dict:
-        """Summarise one queue's exceptions: counts grouped by exception reason.
+    Expects ``self.client`` and ``self.scrub_text`` from the composing class.
+    The summaries return ``Ranked``; ``license_entitlement`` returns a dict; and
+    ``estate_health`` returns a composite dict whose ``workers_requiring_attention``
+    is a ``Ranked`` (the one field the MCP adapter caps).
+    """
 
-        `queue` is a queue name (case-insensitive) or id; `start_date`/
-        `end_date` (ISO, REQUIRED) bound the items' last-updated time. Each
-        item gives a distinct exception reason (personal data already
-        removed), how many items hit it, when it first and last occurred in
-        the window, and the resources involved. Use it to find the dominant
-        failure mode before drilling into list_queue_items.
-
-        Reasons are grouped AFTER scrubbing, so messages that differ only in
-        personal data (names, references) fold into one bucket — counts
-        reflect failure modes, not distinct customers.
-
-        Results come back as {"items": [...], "meta": {...}}, most frequent
-        first, capped at `limit` (default 50).
-        """
+    def exception_summary(self, queue: str, start_date: str, end_date: str) -> Ranked:
+        """Group one queue's exceptions by (scrubbed) reason, ranked by count."""
         require_window(start_date, end_date)
-        queue_id = resolve_id(queue, client.get_queues(), entity="queue")
-        items = client.get_queue_items(
+        queue_id = resolve_id(queue, self.client.get_queues(), entity="queue")
+        items = self.client.get_queue_items(
             queue_id, state="Exceptioned", start_date=start_date, end_date=end_date
         )
 
         groups: dict[str, dict] = {}
         for item in items:
-            reason = scrub_text(item.get("exceptionReason")) or "(no reason recorded)"
+            reason = self.scrub_text(item.get("exceptionReason")) or "(no reason recorded)"
             when = item.get("exceptionedDate") or item.get("lastUpdated") or ""
             group = groups.setdefault(
                 reason,
@@ -95,34 +87,16 @@ def build_tier2_tools(client, scrubber: Scrubber) -> list[Callable]:
                 group["resources"].add(item["resource"])
 
         rows = [{**g, "resources": sorted(g["resources"])} for g in groups.values()]
-        return envelope(
-            rows,
-            sort_key=lambda g: g.get("count", 0),
-            sorted_by="count desc",
-            limit=limit,
-            reverse=True,
+        return rank(
+            rows, sort_key=lambda g: g.get("count", 0), sorted_by="count desc", reverse=True
         )
 
     def throughput_summary(
-        start_date: str,
-        end_date: str,
-        process: str | None = None,
-        limit: int = DEFAULT_LIMIT,
-    ) -> dict:
-        """Summarise session outcomes per process over a date window.
-
-        `start_date`/`end_date` (ISO) are REQUIRED. Each item gives, for one
-        process: total sessions, counts by outcome (completed, terminated,
-        stopped, other), the completion rate as a percentage of finished runs,
-        and the terminated runs split by cause (process errors vs internal
-        errors). Use it to see which processes are busiest and which are
-        failing. Optionally scope to one `process` name (case-insensitive).
-
-        Results come back as {"items": [...], "meta": {...}}, busiest first,
-        capped at `limit` (default 50).
-        """
+        self, start_date: str, end_date: str, process: str | None = None
+    ) -> Ranked:
+        """Aggregate session outcomes per process over a window, ranked by volume."""
         require_window(start_date, end_date)
-        sessions = client.get_sessions(start_date, end_date)
+        sessions = self.client.get_sessions(start_date, end_date)
         if process:
             wanted = process.strip().casefold()
             sessions = [s for s in sessions if str(s.get("processName", "")).casefold() == wanted]
@@ -158,13 +132,91 @@ def build_tier2_tools(client, scrubber: Scrubber) -> list[Callable]:
                     "terminated_internal_errors": reasons.get("InternalError", 0),
                 }
             )
-        return envelope(
+        return rank(
             rows,
             sort_key=lambda r: r.get("total_sessions", 0),
             sorted_by="total_sessions desc",
-            limit=limit,
             reverse=True,
         )
+
+    def estate_health(self) -> dict:
+        """Roll up worker status plus licence headroom (attention list as Ranked)."""
+        resources = self.client.get_resources()
+        attention = [r for r in resources if (r.get("displayStatus") or "") in _ATTENTION_STATUSES]
+        # A service account without dashboard permission — or a timeout /
+        # connection drop on this one extra read — shouldn't lose worker health
+        # too; the licence block degrades visibly instead (see read_or_unavailable).
+        license_usage = read_or_unavailable(
+            self.client.get_current_limits_and_usage, "licence read"
+        )
+        return {
+            "workers_total": len(resources),
+            "workers_by_status": dict(
+                Counter(str(r.get("displayStatus") or "(unknown)") for r in resources)
+            ),
+            "workers_requiring_attention": rank(
+                attention,
+                sort_key=resource_urgency,
+                sorted_by="displayStatus urgency (Missing/Offline/Warning), name",
+            ),
+            "license_usage": license_usage,
+        }
+
+    def license_entitlement(self) -> dict:
+        """Report the estate's entitlement ceilings by tier (or an unavailable note)."""
+        raw = read_or_unavailable(self.client.get_license_entitlement, "licence entitlement read")
+        if "unavailable" in raw:
+            return raw
+        return {
+            "active_license_types": raw.get("activeLicenseTypes") or [],
+            "enterprise": _entitlement_tier(raw.get("enterpriseEntitlement")),
+            "desktop": _entitlement_tier(raw.get("desktopEntitlement")),
+        }
+
+
+def build_tier2_tools(engine) -> list[Callable]:
+    """Build the four insight tools as thin adapters over *engine*'s domain methods."""
+
+    def exception_summary(
+        queue: str, start_date: str, end_date: str, limit: int = DEFAULT_LIMIT
+    ) -> dict:
+        """Summarise one queue's exceptions: counts grouped by exception reason.
+
+        `queue` is a queue name (case-insensitive) or id; `start_date`/
+        `end_date` (ISO, REQUIRED) bound the items' last-updated time. Each
+        item gives a distinct exception reason (personal data already
+        removed), how many items hit it, when it first and last occurred in
+        the window, and the resources involved. Use it to find the dominant
+        failure mode before drilling into list_queue_items.
+
+        Reasons are grouped AFTER scrubbing, so messages that differ only in
+        personal data (names, references) fold into one bucket — counts
+        reflect failure modes, not distinct customers.
+
+        Results come back as {"items": [...], "meta": {...}}, most frequent
+        first, capped at `limit` (default 50).
+        """
+        return to_envelope(engine.exception_summary(queue, start_date, end_date), limit)
+
+    def throughput_summary(
+        start_date: str,
+        end_date: str,
+        process: str | None = None,
+        limit: int = DEFAULT_LIMIT,
+    ) -> dict:
+        """Summarise session outcomes per process over a date window.
+
+        `start_date`/`end_date` (ISO) are REQUIRED. Each item gives, for one
+        process: total sessions, counts by outcome (completed, terminated,
+        stopped, other), the completion rate as a percentage of finished runs,
+        and the terminated runs split by cause (process errors vs internal
+        errors). Use it to see which processes are busiest and which are
+        failing. Optionally scope to one `process` name (case-insensitive).
+
+        Results come back as {"items": [...], "meta": {...}}, busiest first,
+        capped at `limit` (default 50).
+        """
+        return to_envelope(engine.throughput_summary(start_date, end_date, process), limit)
 
     def estate_health(limit: int = DEFAULT_LIMIT) -> dict:
         """Roll up estate health: digital worker status plus licence headroom.
@@ -179,26 +231,14 @@ def build_tier2_tools(client, scrubber: Scrubber) -> list[Callable]:
         denied or fails, license_usage carries an `unavailable` note instead
         of failing the whole health check.
         """
-        resources = client.get_resources()
-        attention = [r for r in resources if (r.get("displayStatus") or "") in _ATTENTION_STATUSES]
-        capped = envelope(
-            attention,
-            sort_key=resource_urgency,
-            sorted_by="displayStatus urgency (Missing/Offline/Warning), name",
-            limit=limit,
-        )
-        # A service account without dashboard permission — or a timeout /
-        # connection drop on this one extra read — shouldn't lose worker health
-        # too; the licence block degrades visibly instead (see read_or_unavailable).
-        license_usage = read_or_unavailable(client.get_current_limits_and_usage, "licence read")
+        health = engine.estate_health()
+        capped = to_envelope(health["workers_requiring_attention"], limit)
         return {
-            "workers_total": len(resources),
-            "workers_by_status": dict(
-                Counter(str(r.get("displayStatus") or "(unknown)") for r in resources)
-            ),
+            "workers_total": health["workers_total"],
+            "workers_by_status": health["workers_by_status"],
             "workers_requiring_attention": capped["items"],
             "attention_meta": capped["meta"],
-            "license_usage": license_usage,
+            "license_usage": health["license_usage"],
         }
 
     def license_entitlement() -> dict:
@@ -215,13 +255,6 @@ def build_tier2_tools(client, scrubber: Scrubber) -> list[Callable]:
         read is denied or fails, the result carries an `unavailable` note
         instead of erroring.
         """
-        raw = read_or_unavailable(client.get_license_entitlement, "licence entitlement read")
-        if "unavailable" in raw:
-            return raw
-        return {
-            "active_license_types": raw.get("activeLicenseTypes") or [],
-            "enterprise": _entitlement_tier(raw.get("enterpriseEntitlement")),
-            "desktop": _entitlement_tier(raw.get("desktopEntitlement")),
-        }
+        return engine.license_entitlement()
 
     return [exception_summary, throughput_summary, estate_health, license_entitlement]
