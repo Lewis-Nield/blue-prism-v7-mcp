@@ -650,8 +650,45 @@ class TestGetSessionLog:
         result = tier1(client, MarkerScrubber())["get_session_log"](
             self._failed_session(client)["sessionId"]
         )
-        failure = result["items"][0]
-        assert failure["result"] == "[SCRUBBED]"
+        # Every stage carrying result text is scrubbed; empty results stay empty.
+        with_text = [e for e in result["items"] if e["result"]]
+        assert with_text and all(e["result"] == "[SCRUBBED]" for e in with_text)
+
+    def test_errors_only_filters_to_exception_handling_stages(self):
+        client = MockBPClient()
+        result = tier1(client)["get_session_log"](
+            self._failed_session(client)["sessionId"], errors_only=True
+        )
+        assert result["items"] and all(
+            e["stageType"] in {"Exception", "Recover", "Resume"} for e in result["items"]
+        )
+
+    def test_window_bounds_stage_execution_time(self):
+        client = MockBPClient()
+        result = tier1(client)["get_session_log"](
+            self._failed_session(client)["sessionId"],
+            start_date="2026-03-02T10:00:00Z",
+            end_date="2026-03-02T10:01:00Z",
+        )
+        assert result["items"] and all(e["stageType"] != "Exception" for e in result["items"])
+
+    def test_reversed_window_fails_loudly(self):
+        client = MockBPClient()
+        with pytest.raises(ValueError, match="after end_date"):
+            tier1(client)["get_session_log"](
+                self._failed_session(client)["sessionId"],
+                start_date="2026-03-02",
+                end_date="2026-03-01",
+            )
+
+    def test_a_single_bound_is_accepted(self):
+        # Either bound may be omitted (the window only narrows an already-scoped
+        # read) — a lone bound must not trip the order check or crash on the
+        # missing one.
+        client = MockBPClient()
+        sid = self._failed_session(client)["sessionId"]
+        assert tier1(client)["get_session_log"](sid, start_date="2026-03-02")["items"]
+        assert tier1(client)["get_session_log"](sid, end_date="2026-03-03")["items"]
 
     def test_unknown_session_yields_an_empty_envelope(self):
         result = tier1()["get_session_log"]("no-such-session")
@@ -688,6 +725,59 @@ class TestListSchedules:
         )
         result = tier1(client)["list_schedules"]()
         assert [s["name"] for s in result["items"]] == ["Echo", "Zulu", "Alpha"]
+
+    def test_last_run_folds_in_where_the_schedule_has_run(self):
+        client = MockBPClient(
+            schedules=[
+                {"id": 1, "name": "Daily Invoice Run", "isRetired": False},
+                {"id": 9, "name": "Never Run", "isRetired": False},
+            ]
+        )
+        result = tier1(client)["list_schedules"]()
+        by_name = {s["name"]: s for s in result["items"]}
+        # Schedule 1 has runs → its latest outcome is folded in...
+        assert by_name["Daily Invoice Run"]["last_run"] == {
+            "status": "completed",
+            "startTime": "2026-03-09T06:00:00Z",
+            "endTime": "2026-03-09T06:12:40Z",
+            "duration": "00:12:40",
+        }
+        # ...one that never ran carries no last_run (never a fabricated one).
+        assert "last_run" not in by_name["Never Run"]
+        assert "last_run_unavailable" not in result["meta"]
+
+    def test_schedule_without_an_id_is_not_enriched(self):
+        # A schedule row with no id can't be looked up — it is skipped, not
+        # crashed on, and carries no last_run.
+        client = MockBPClient(schedules=[{"name": "Orphan", "isRetired": False}])
+        result = tier1(client)["list_schedules"]()
+        assert "last_run" not in result["items"][0]
+        assert "last_run_unavailable" not in result["meta"]
+
+    def test_an_id_less_schedule_does_not_stop_later_enrichment(self):
+        # An id-less row is skipped, not a hard stop — a schedule that sorts
+        # after it still gets its last run folded in.
+        client = MockBPClient(
+            schedules=[
+                {"name": "AAA No Id", "isRetired": False},
+                {"id": 1, "name": "BBB Daily Invoice Run", "isRetired": False},
+            ]
+        )
+        result = tier1(client)["list_schedules"]()
+        by_name = {s["name"]: s for s in result["items"]}
+        assert "last_run" not in by_name["AAA No Id"]
+        assert by_name["BBB Daily Invoice Run"]["last_run"]["status"] == "completed"
+
+    def test_last_run_read_failure_degrades_visibly(self):
+        client = MockBPClient()
+
+        def boom(_schedule_id):
+            raise requests.ConnectionError("schedule logs denied")
+
+        client.get_last_schedule_run = boom
+        result = tier1(client)["list_schedules"]()
+        assert result["meta"]["last_run_unavailable"] is True
+        assert all("last_run" not in s for s in result["items"])
 
 
 class TestListProcesses:
@@ -906,6 +996,151 @@ class TestExceptionSummary:
         summary = tier2()["exception_summary"]
         assert summary("Invoices", "2026-03-03", "2026-03-31")["items"] == []
         assert summary("Invoices", "2026-03-01", "2026-03-01")["items"] == []
+
+    def test_single_queue_summary_has_no_queues_field(self):
+        # The per-queue summary keeps its original row shape (no `queues`).
+        result = tier2()["exception_summary"]("Invoices", **WINDOW)
+        assert result["items"] and all("queues" not in g for g in result["items"])
+
+
+class TestEstateExceptionSummary:
+    def test_groups_one_reason_across_queues(self):
+        client = MockBPClient(
+            queues=[{"id": "qa", "name": "Alpha"}, {"id": "qb", "name": "Bravo"}],
+            queue_items=[
+                {
+                    "queue": "qa",
+                    "id": "i1",
+                    "state": "Exceptioned",
+                    "lastUpdated": "2026-03-02",
+                    "exceptionReason": "Timeout",
+                    "resource": "BOT-01",
+                },
+                {
+                    "queue": "qb",
+                    "id": "i2",
+                    "state": "Exceptioned",
+                    "lastUpdated": "2026-03-03",
+                    "exceptionReason": "Timeout",
+                    "resource": "BOT-02",
+                },
+            ],
+        )
+        result = tier2(client)["estate_exception_summary"](**WINDOW)
+        [group] = result["items"]
+        assert group["reason"] == "Timeout"
+        assert group["count"] == 2
+        assert group["queues"] == ["Alpha", "Bravo"]
+        assert group["resources"] == ["BOT-01", "BOT-02"]
+
+    def test_ranked_most_frequent_first_across_the_estate(self):
+        client = MockBPClient(
+            queues=[{"id": "qa", "name": "Alpha"}, {"id": "qb", "name": "Bravo"}],
+            queue_items=[
+                {
+                    "queue": "qa",
+                    "id": "i1",
+                    "state": "Exceptioned",
+                    "lastUpdated": "2026-03-02",
+                    "exceptionReason": "Rare",
+                },
+                {
+                    "queue": "qa",
+                    "id": "i2",
+                    "state": "Exceptioned",
+                    "lastUpdated": "2026-03-02",
+                    "exceptionReason": "Common",
+                },
+                {
+                    "queue": "qb",
+                    "id": "i3",
+                    "state": "Exceptioned",
+                    "lastUpdated": "2026-03-02",
+                    "exceptionReason": "Common",
+                },
+            ],
+        )
+        result = tier2(client)["estate_exception_summary"](**WINDOW)
+        assert [(g["reason"], g["count"]) for g in result["items"]] == [
+            ("Common", 2),
+            ("Rare", 1),
+        ]
+
+    def test_reasons_grouped_after_scrubbing(self):
+        client = MockBPClient(
+            queues=[{"id": "qa", "name": "Alpha"}, {"id": "qb", "name": "Bravo"}],
+            queue_items=[
+                {
+                    "queue": "qa",
+                    "id": "i1",
+                    "state": "Exceptioned",
+                    "lastUpdated": "2026-03-02",
+                    "exceptionReason": "anything",
+                },
+                {
+                    "queue": "qb",
+                    "id": "i2",
+                    "state": "Exceptioned",
+                    "lastUpdated": "2026-03-02",
+                    "exceptionReason": "different",
+                },
+            ],
+        )
+        result = tier2(client, MarkerScrubber())["estate_exception_summary"](**WINDOW)
+        # Both reasons scrub to the same marker → one bucket spanning both queues.
+        [group] = result["items"]
+        assert group["count"] == 2
+        assert group["queues"] == ["Alpha", "Bravo"]
+
+    def test_only_exceptioned_items_are_counted(self):
+        # The scan filters each queue to its Exceptioned items — a Completed
+        # item in the same window must not inflate any reason.
+        client = MockBPClient(
+            queues=[{"id": "qa", "name": "Alpha"}],
+            queue_items=[
+                {
+                    "queue": "qa",
+                    "id": "i1",
+                    "state": "Exceptioned",
+                    "lastUpdated": "2026-03-02",
+                    "exceptionReason": "Timeout",
+                },
+                {
+                    "queue": "qa",
+                    "id": "i2",
+                    "state": "Completed",
+                    "lastUpdated": "2026-03-02",
+                    "exceptionReason": None,
+                },
+            ],
+        )
+        result = tier2(client)["estate_exception_summary"](**WINDOW)
+        [group] = result["items"]
+        assert group["reason"] == "Timeout"
+        assert group["count"] == 1
+
+    def test_window_is_required(self):
+        with pytest.raises(ValueError):
+            tier2()["estate_exception_summary"](None, None)
+
+    def test_queue_without_an_id_is_skipped(self):
+        # A queue row carrying no id can't be drilled for items — it is skipped
+        # rather than crashing the estate-wide scan.
+        client = MockBPClient(
+            queues=[{"name": "NoId"}, {"id": "qb", "name": "Bravo"}],
+            queue_items=[
+                {
+                    "queue": "qb",
+                    "id": "i1",
+                    "state": "Exceptioned",
+                    "lastUpdated": "2026-03-02",
+                    "exceptionReason": "Timeout",
+                },
+            ],
+        )
+        result = tier2(client)["estate_exception_summary"](**WINDOW)
+        [group] = result["items"]
+        assert group["queues"] == ["Bravo"]
 
 
 class TestThroughputSummary:
@@ -1135,6 +1370,7 @@ class TestRegisterTools:
             "list_environment_variables",
             "list_process_groups",
             "exception_summary",
+            "estate_exception_summary",
             "throughput_summary",
             "estate_health",
             "license_entitlement",

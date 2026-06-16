@@ -87,8 +87,8 @@ day-one verification):
   `list_resources`, `list_schedules`, `list_processes`
 - **Context & topology:** `list_queue_configurations`, `list_resource_pools`,
   `list_environment_variables`, `list_process_groups`
-- **Insight:** `exception_summary`, `throughput_summary`, `estate_health`,
-  `license_entitlement`
+- **Insight:** `exception_summary`, `estate_exception_summary`,
+  `throughput_summary`, `estate_health`, `license_entitlement`
 - **Control** (off by default): `retry_queue_item`, `defer_queue_item`,
   `start_process`, `stop_session`, `set_schedule_enabled`, `trigger_schedule`,
   `stop_schedule`

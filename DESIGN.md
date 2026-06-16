@@ -103,11 +103,16 @@ library it was always implicitly built on.
   exception reason at each attempt is scrubbed)
 - `list_sessions` — run history; filter by process/resource/status/date
 - `get_session` — one session's detail by id (no date window), PII-scrubbed
-- `get_session_log` — stage-level log for one session (PII-scrubbed, size-capped)
+- `get_session_log` — stage-level log for one session (PII-scrubbed, size-capped).
+  Two optional server-side filters narrow a long run: `errors_only` returns just
+  the exception-handling stages (Exception/Recover/Resume), and a
+  `start_date`/`end_date` window bounds the stages' execution time — so "why did
+  this fail?" need not drag the whole log back
 - `list_resources` — digital workers + status
-- `list_schedules` — the schedule catalogue + retirement state. (The API holds
-  no next-run field anywhere, and last-outcome lives in the schedule run logs —
-  see the ground truth below; run-history enrichment is deferred.)
+- `list_schedules` — the schedule catalogue + retirement state, each schedule's
+  last run folded in (status, start/end, duration) from the schedule run logs,
+  added only where a schedule has actually run. (The API still holds no next-run
+  field anywhere.)
 - `list_processes` — published process catalogue
 - `list_queue_configurations` — the active queues' process→queue map: each
   active queue's assigned process and resource group plus its live activity
@@ -125,6 +130,10 @@ library it was always implicitly built on.
 - `exception_summary` — exceptioned items for one queue + window, grouped by
   *scrubbed* exception reason (grouping after scrubbing folds messages that
   differ only in personal data into one bucket)
+- `estate_exception_summary` — the same grouping across *every* queue in one
+  call (each reason group also recording which queues exhibit it), so the
+  dominant failure mode across the estate is one call rather than a loop over
+  each queue
 - `throughput_summary` — per-process session outcomes over a window: status
   counts, completion rate, and the terminationReason breakdown
 - `estate_health` — resource status rollup + the licence limits-vs-usage block
@@ -200,7 +209,8 @@ webhook plumbing.
 | `list_item_attempts` | `GET /workqueues/{id}/items/{itemId}/attempts` (→ `WorkQueueItemNoData[]`) | 7.2 |
 | `list_sessions` | `GET /sessions` | 7.0 |
 | `get_session` | `GET /sessions/{id}` (→ `SessionSummary`) | 7.0 |
-| `get_session_log` | `GET /sessions/{id}/logs` (`logslight` on 7.4+) | 7.0 |
+| `get_session_log` | `GET /sessions/{id}/logs` (`logslight` on 7.4+); `errors_only`→`stageType=Exception,Recover,Resume`, window→`resourceStartTime[gte]/[lte]` | 7.0 |
+| `list_schedules` last-run | `GET /scheduleLogs/{scheduleId}` (→ `ScheduleLogSummary`, latest row; not the deprecated `/schedules/{id}/logs`) | 7.1 |
 | `list_resources` | `GET /resources` | 7.0 |
 | `list_schedules` | `GET /schedules` | 7.0 |
 | `list_processes` | `GET /processes` | 7.1 |
@@ -288,9 +298,14 @@ Wire-level contract (identical across versions):
   (Item/Group), lastModified}` — a flat descendant list of the process tree.
 - **`ScheduleSummary` is the schedule definition only** (interval fields,
   `isRetired`; its `id` is an *integer*, unlike every other entity's UUID).
-  No next-run field exists anywhere in the API; per-run history (a status
-  enum, start/end, duration) lives in `GET /schedules/logs`. v1
-  `list_schedules` returns definitions; run-log enrichment is deferred.
+  No next-run field exists anywhere in the API; per-run history lives in the
+  schedule run logs. `list_schedules` folds in each schedule's last run from
+  **`GET /scheduleLogs/{scheduleId}`** (the current endpoint — `/schedules/logs`
+  and `/schedules/{id}/logs` return the spec's *deprecated* page type), read
+  newest-first and capped to one row. `ScheduleLogSummary` =
+  `scheduleLogId, startTime, endTime, duration, status` (the run outcome enum
+  pending/running/terminated/completed/partExceptioned), `serverName,
+  scheduleId, scheduleName`; the fold keeps status + the three timings.
 - **`GET /user/permissions` (7.1+) answers a flat JSON array of
   permission-name strings** — no envelope, no paging (verified on 7.5.1; the
   spec's example shows placeholder names). The Phase 5 capability resolver
@@ -440,15 +455,17 @@ Sequenced as:
   injected via `BPClient(config, cache=...)`, for a long-lived multi-threaded
   host sharing a client across workers. No tool gained or lost behaviour; the
   v0.1 surface is unchanged.
-- **Phase 9 — Fuller v7 read coverage.** Push the filtering the v7 API already
-  supports down into the reads the envelope currently caps client-side.
-  `get_session_log` gains an errors-only filter and a time window, and exposes the
-  API's token paging rather than top-N only (the client already probes `logslight`
-  on 7.4+). `list_schedules` gains last-outcome enrichment from
-  `GET /schedules/logs` — the run-history read v1 deferred — so a schedule carries
-  its last result, not just its definition. `exception_summary` gains an
-  estate-wide variant grouped across queues, so the dominant failure mode is one
-  call rather than a loop over every queue.
+- **Phase 9 — Fuller v7 read coverage.** *Shipped in v0.7.0.* Pushes the
+  filtering the v7 API already supports down into the reads the envelope capped
+  client-side. `get_session_log` gained an `errors_only` filter (server-side
+  `stageType=Exception,Recover,Resume`) and a `start_date`/`end_date` window
+  (`resourceStartTime` range), ordered newest-stage-first server-side, so a long
+  run is no longer dragged back in full to surface its failure. `list_schedules`
+  gained last-outcome enrichment from `GET /scheduleLogs/{scheduleId}` — the
+  run-history read v1 deferred — so a schedule carries its last result
+  (status, start/end, duration), folded in only where it has run.
+  `estate_exception_summary` is the estate-wide grouping across every queue, so
+  the dominant failure mode is one call rather than a loop over each queue.
 - **Phase 10 — `stop_session` (Tier 3).** *Pulled forward into v0.2.0 — see
   Post-v0.1.0 releases above.* The missing control sibling of
   `start_process`: `PATCH /sessions/{id}` with `{status: Stopped}`, the same

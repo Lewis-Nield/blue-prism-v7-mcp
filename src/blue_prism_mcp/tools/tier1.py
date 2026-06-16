@@ -30,6 +30,7 @@ from .common import (
     resource_urgency,
     to_envelope,
     validate_choice,
+    validate_optional_window,
     validate_uuid,
 )
 
@@ -53,6 +54,35 @@ SESSION_STATUSES = frozenset(
 # content scrubbed. Date/time stay here so an NER backend can't turn a real
 # date into a redaction marker.
 _SCALAR_VALUE_TYPES = frozenset({"number", "flag", "date", "datetime", "time", "timespan"})
+
+
+# The ScheduleLogSummary fields kept when folding a schedule's last run into its
+# row — the outcome and timing, not the estate plumbing (serverName, the log id).
+_LAST_RUN_FIELDS = ("status", "startTime", "endTime", "duration")
+
+
+def _last_runs(client, schedule_ids: list) -> dict | None:
+    """Map schedule id → its last-run summary via the schedule-log endpoint.
+
+    Returns None when the schedule-log read *fails* (denied/timeout) so the
+    caller can signal that distinctly rather than silently dropping the field —
+    the same degrade contract as _deferred_counts. On success returns
+    {id: {status, startTime, endTime, duration}} built only for schedules that
+    have actually run (a schedule with no runs answers None and is omitted, so
+    the caller never fabricates an outcome). One bounded call per schedule
+    (latest row only); schedules are a small set, and the reads are cached.
+    """
+    runs: dict = {}
+    for sid in schedule_ids:
+        if sid is None:
+            continue
+        try:
+            run = client.get_last_schedule_run(sid)
+        except requests.RequestException:
+            return None
+        if isinstance(run, dict):
+            runs[sid] = {k: run.get(k) for k in _LAST_RUN_FIELDS}
+    return runs
 
 
 def _deferred_counts(client, queue_ids: list) -> dict | None:
@@ -295,9 +325,24 @@ class _Tier1ReadsMixin:
         )
         return self._scrubbed_session(self.client.get_session(session_id))
 
-    def get_session_log(self, session_id: str) -> Ranked:
-        """Rank one session's stage log latest-stage-first (failures end a log)."""
-        entries = self.client.get_session_log(session_id)
+    def get_session_log(
+        self,
+        session_id: str,
+        errors_only: bool = False,
+        start_date: str | None = None,
+        end_date: str | None = None,
+    ) -> Ranked:
+        """Rank one session's stage log latest-stage-first (failures end a log).
+
+        ``errors_only`` and the optional start_date/end_date window are pushed
+        to the v7 server (the exception-handling stage types, and a range on the
+        per-stage execution time) so a long run is not dragged back in full just
+        to surface its failure.
+        """
+        validate_optional_window(start_date, end_date)
+        entries = self.client.get_session_log(
+            session_id, errors_only=errors_only, start_date=start_date, end_date=end_date
+        )
         return rank(
             [self._scrubbed_stage(e) for e in entries],
             sort_key=lambda e: e.get("logNumber") or 0,
@@ -314,12 +359,27 @@ class _Tier1ReadsMixin:
         )
 
     def list_schedules(self) -> Ranked:
-        """Rank schedules active-first then alphabetical (retired last)."""
-        return rank(
+        """Rank schedules active-first then alphabetical, folding in the last run.
+
+        The schedule definition carries no run history; each schedule's last
+        outcome (status, start/end, duration) is folded in from the schedule-log
+        endpoint, added only for schedules that have actually run (one that never
+        has carries no ``last_run`` field, never a fabricated one). If the whole
+        schedule-log read is denied or fails, the listing still stands and
+        signals it via ``meta.last_run_unavailable``.
+        """
+        ranked = rank(
             self.client.get_schedules(),
             sort_key=lambda s: (bool(s.get("isRetired")), str(s.get("name") or "")),
             sorted_by="active first, then name (retired last)",
         )
+        runs = _last_runs(self.client, [s.get("id") for s in ranked.records])
+        if runs is None:
+            return Ranked(ranked.records, ranked.sorted_by, {"last_run_unavailable": True})
+        records = [
+            {**s, "last_run": runs[s["id"]]} if s.get("id") in runs else s for s in ranked.records
+        ]
+        return Ranked(records, ranked.sorted_by)
 
     def list_processes(self) -> Ranked:
         """Rank the published process catalogue alphabetically by name."""
@@ -525,7 +585,13 @@ def build_tier1_tools(engine) -> list[Callable]:
         """
         return engine.get_session(session_id)
 
-    def get_session_log(session_id: str, limit: int = DEFAULT_LIMIT) -> dict:
+    def get_session_log(
+        session_id: str,
+        errors_only: bool = False,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        limit: int = DEFAULT_LIMIT,
+    ) -> dict:
         """Return the stage-level execution log for one session — why a run failed.
 
         `session_id` is the sessionId from list_sessions. Each entry gives the
@@ -534,12 +600,21 @@ def build_tier1_tools(engine) -> list[Callable]:
         most-recent-stage-first — the first items you see are the failure and
         what led to it.
 
+        Two optional filters narrow a long run server-side, so you fetch only
+        what you need to diagnose it: set `errors_only=True` to return just the
+        exception-handling stages (where an exception was raised, caught, or
+        resumed past) instead of every stage; and pass `start_date`/`end_date`
+        (ISO) to bound the stages' execution time. Both default to off (the full
+        log).
+
         Results come back as {"items": [...], "meta": {...}}, capped at `limit`
         (default 50) because long runs log thousands of stages; meta.truncated
-        tells you whether earlier stages were cut. Raise `limit` to see more
-        of the run's history.
+        tells you whether earlier stages were cut. Raise `limit`, or use
+        `errors_only`, to see the failure without paging the whole run.
         """
-        return to_envelope(engine.get_session_log(session_id), limit)
+        return to_envelope(
+            engine.get_session_log(session_id, errors_only, start_date, end_date), limit
+        )
 
     def list_resources(limit: int = DEFAULT_LIMIT) -> dict:
         """List the digital workers (runtime resources) and their status.
@@ -561,8 +636,13 @@ def build_tier1_tools(engine) -> list[Callable]:
 
         Each item gives the schedule's name, description, whether it is
         retired (disabled), its interval (Once/Minute/Hour/Day/Week/Month/
-        Year), task count, and calendar. The API exposes no next-run time;
-        run outcomes live in the schedule logs (not yet exposed here).
+        Year), task count, and calendar. Where a schedule has run, a `last_run`
+        object is folded in with its most recent outcome — status (completed,
+        terminated, running, pending, or partExceptioned), start and end times,
+        and duration; a schedule that has never run carries no `last_run`. (The
+        API still exposes no next-run time.) If the schedule-log read is denied
+        or fails, `meta.last_run_unavailable` is set and no schedule carries a
+        `last_run`.
 
         Results come back as {"items": [...], "meta": {...}}, active schedules
         first then alphabetical (retired ones sort last), capped at `limit`

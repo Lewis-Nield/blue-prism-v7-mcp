@@ -40,6 +40,13 @@ logger = logging.getLogger("blue_prism_mcp.client")
 # safety net for clock skew or server-side revocation.
 _TOKEN_EXPIRY_SKEW = 60.0
 
+# The session-log "errors-only" filter. The spec exposes no boolean error flag;
+# the Blue Prism error markers are the exception-handling stage types, so an
+# errors-only read narrows server-side to the stages where an exception was
+# raised (Exception), caught (Recover), or resumed past (Resume). stageType is
+# a form-style array param, so the values go comma-joined.
+_ERROR_STAGE_TYPES = "Exception,Recover,Resume"
+
 
 class BPClient:
     """Stateful client for one Blue Prism v7 estate.
@@ -319,6 +326,31 @@ class BPClient:
         """GET /schedules — schedules, next runs, last outcome."""
         return self._cached("schedules", lambda: self._get_collection("/schedules"))
 
+    def get_last_schedule_run(self, schedule_id) -> dict | None:
+        """GET /scheduleLogs/{id} — one schedule's most recent run, or None.
+
+        The schedule definition (get_schedules) carries no run history; per-run
+        outcomes live in the schedule logs. This reads the *current* endpoint
+        (`/scheduleLogs/{scheduleId}`, ScheduleLogSummary) — the parallel
+        `/schedules/{id}/logs` is the spec's *deprecated* variant. Ordered
+        newest-first (sortBy=StartTimeDesc) and capped to a single row
+        (itemsPerPage=1), so the answer is just the schedule's last run —
+        scheduleLogId, start/end, duration, and status (pending/running/
+        terminated/completed/partExceptioned) — without dragging its whole
+        history. A schedule that has never run answers an empty page (→ None);
+        the list_schedules tool folds the outcome in only where one is present.
+        """
+
+        def fetch() -> dict | None:
+            body = self._get(
+                f"/scheduleLogs/{schedule_id}",
+                params={"sortBy": "StartTimeDesc", "itemsPerPage": 1},
+            )
+            items, _ = self._unpack_page(body)
+            return items[0] if items else None
+
+        return self._cached(("last_schedule_run", str(schedule_id)), fetch)
+
     def get_sessions(
         self, start_date: str | None = None, end_date: str | None = None
     ) -> list[dict]:
@@ -425,12 +457,28 @@ class BPClient:
         """
         return self._cached(("session", session_id), lambda: self._get(f"/sessions/{session_id}"))
 
-    def get_session_log(self, session_id: str) -> list[dict]:
+    def get_session_log(
+        self,
+        session_id: str,
+        errors_only: bool = False,
+        start_date: str | None = None,
+        end_date: str | None = None,
+    ) -> list[dict]:
         """GET /sessions/{id}/logslight, falling back to /logs — the stage log.
 
         The highest-value agentic read ("why did this run fail?"). Stage results
         can carry item payloads, so the tool layer routes the result through the
         PII scrubber; the client returns it raw.
+
+        The read pushes the v7 server-side filters the endpoint supports so a
+        long run need not be dragged back in full: ``errors_only`` narrows to the
+        exception-handling stage types (Exception/Recover/Resume — see
+        _ERROR_STAGE_TYPES), and start_date/end_date bound the per-stage
+        execution time as a deepObject range on resourceStartTime
+        (resourceStartTime[gte]/[lte], the spec's RangeOrEqualFilter). The pages
+        are ordered newest-stage-first server-side (sortBy=LogNumberDesc) so a
+        consumer reading the raw client output sees failures — which end a log —
+        first; the tool/engine still ranks for the embeddable guarantee.
 
         logslight (7.4+) is shape-identical to /logs — same parameters, same
         SessionLogSummary items (verified field-by-field against the 7.5.1
@@ -440,20 +488,27 @@ class BPClient:
         means the session id itself is unknown (both endpoints 404 on that),
         and must not demote a 7.4+ estate to the slow path forever.
         """
+        params: dict[str, str] = {"sortBy": "LogNumberDesc"}
+        if errors_only:
+            params["stageType"] = _ERROR_STAGE_TYPES
+        if start_date:
+            params["resourceStartTime[gte]"] = start_date
+        if end_date:
+            params["resourceStartTime[lte]"] = end_date
 
         def produce() -> list:
             if self._log_path == "logs":
-                return self._get_collection(f"/sessions/{session_id}/logs")
+                return self._get_collection(f"/sessions/{session_id}/logs", base_params=params)
             try:
-                return self._get_collection(f"/sessions/{session_id}/logslight")
+                return self._get_collection(f"/sessions/{session_id}/logslight", base_params=params)
             except requests.HTTPError as exc:
                 if exc.response is None or exc.response.status_code != 404:
                     raise
-                items = self._get_collection(f"/sessions/{session_id}/logs")
+                items = self._get_collection(f"/sessions/{session_id}/logs", base_params=params)
                 self._log_path = "logs"
                 return items
 
-        return self._cached(("session_log", session_id), produce)
+        return self._cached(("session_log", session_id, errors_only, start_date, end_date), produce)
 
     def get_current_limits_and_usage(self) -> dict:
         """GET /dashboards/currentLimitsAndUsage — licence limits vs usage.

@@ -7,6 +7,41 @@ additive endpoint is a minor bump.
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-06-16
+Deeper reads — pushing the filtering the v7 API already supports down into the
+reads the envelope capped client-side, so a diagnosis fetches only what it needs.
+No new estate concepts, no change to the control surface.
+
+### Added
+- `estate_exception_summary` — the estate-wide sibling of `exception_summary`:
+  it groups exceptions across **every** queue in one call (grouped by scrubbed
+  reason, so messages differing only in personal data fold into one bucket),
+  each reason group also recording which `queues` exhibit it. The dominant
+  failure mode across the estate is now one tool call rather than a loop over
+  each queue. Window-scoped and required, like the per-queue summary.
+- `get_session_log` gains two optional server-side filters: `errors_only=True`
+  returns just the exception-handling stages (Exception/Recover/Resume — the
+  Blue Prism error markers, since the API exposes no boolean error flag), and
+  `start_date`/`end_date` bound the stages' execution time
+  (`resourceStartTime` range). The read is ordered newest-stage-first
+  server-side, so a long run is no longer dragged back in full to surface its
+  failure.
+
+### Changed
+- `list_schedules` now folds each schedule's **last run** into its row — status
+  (completed/terminated/running/pending/partExceptioned), start and end times,
+  and duration — read from `GET /scheduleLogs/{scheduleId}` (the current
+  endpoint; `/schedules/logs` is the spec's deprecated variant), newest-first
+  and capped to one row. The outcome is added only where a schedule has actually
+  run (never a fabricated one); if the schedule-log read is denied or fails the
+  listing still stands and sets `meta.last_run_unavailable`. The API still
+  exposes no next-run field.
+- New client reads `BPClient.get_last_schedule_run` and the filter arguments on
+  `BPClient.get_session_log`; `MockBPClient` mirrors both, and its session-log
+  and schedule-log fixtures gain the stage types, per-stage times, and run
+  history the filters exercise. These are additive — embedders on the v0.6.0
+  engine surface keep their existing calls.
+
 ## [0.6.0] — 2026-06-15
 Embeddable core — an internal architecture release, no new endpoints and **no
 change to the tool surface or behaviour**. It splits each read tool's logic from
@@ -157,7 +192,8 @@ First runnable release — the foundation, built in eight phases (see
 - FastMCP stdio server, a first-class mock run mode, console entrypoint, and
   deployment / day-one verification docs.
 
-[Unreleased]: https://github.com/8m7nyv54n5-ux/blue-prism-v7-mcp/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/8m7nyv54n5-ux/blue-prism-v7-mcp/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/8m7nyv54n5-ux/blue-prism-v7-mcp/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/8m7nyv54n5-ux/blue-prism-v7-mcp/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/8m7nyv54n5-ux/blue-prism-v7-mcp/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/8m7nyv54n5-ux/blue-prism-v7-mcp/compare/v0.3.0...v0.4.0

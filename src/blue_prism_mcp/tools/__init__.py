@@ -6,8 +6,8 @@ Tiers (see DESIGN.md):
         list_resources, list_schedules, list_processes, and the context/topology
         reads list_queue_configurations, list_resource_pools,
         list_environment_variables, list_process_groups
-    Tier 2 Insight   — exception_summary, throughput_summary, estate_health,
-        license_entitlement
+    Tier 2 Insight   — exception_summary, estate_exception_summary,
+        throughput_summary, estate_health, license_entitlement
     Tier 3 Control   — retry/defer queue items, start_process, stop_session,
         schedule control (set_schedule_enabled, trigger_schedule, stop_schedule).
         Registered ONLY when config.enable_actions is True (Phase 5).

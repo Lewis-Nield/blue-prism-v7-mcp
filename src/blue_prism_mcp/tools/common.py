@@ -185,6 +185,26 @@ def require_window(start_date: str | None, end_date: str | None) -> None:
         )
 
 
+def validate_optional_window(start_date: str | None, end_date: str | None) -> None:
+    """Validate an OPTIONAL date window: each bound ISO if given, ordered if both.
+
+    Unlike require_window (the high-volume reads that refuse to run unbounded),
+    this is for reads where a window only *narrows* an already-scoped result
+    (one session's stage log) — so either bound may be omitted, but a malformed
+    or reversed one still fails loudly rather than reaching the API as an opaque
+    400 or silently returning nothing.
+    """
+    validate_iso(start_date, "start_date", required=False)
+    validate_iso(end_date, "end_date", required=False)
+    if start_date and end_date:
+        start = datetime.fromisoformat(start_date).replace(tzinfo=None)
+        end = datetime.fromisoformat(end_date).replace(tzinfo=None)
+        if start > end:
+            raise ValueError(
+                f"start_date {start_date!r} is after end_date {end_date!r} — swap the bounds."
+            )
+
+
 def validate_choice(value: str, field: str, allowed: frozenset[str]) -> str:
     """Return the canonical casing of an enum value, or fail listing the choices.
 

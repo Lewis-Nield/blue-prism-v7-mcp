@@ -3,8 +3,9 @@
 Separate single-purpose tools rather than parameters on the primitives — tight
 descriptions drive better model tool-selection. No v7 endpoint aggregates
 exceptions or throughput (verified — see DESIGN.md's /dashboards verdict), so
-exception_summary and throughput_summary aggregate client-side over the Tier 1
-reads, under the same required-window scoping. estate_health and
+exception_summary (one queue), its estate-wide sibling estate_exception_summary
+(every queue in one call), and throughput_summary aggregate client-side over the
+Tier 1 reads, under the same required-window scoping. estate_health and
 license_entitlement read the two licence /dashboards endpoints this server
 consumes: current limits vs usage, and the per-tier entitlement ceilings.
 
@@ -48,6 +49,57 @@ def _entitlement_tier(tier: dict | None) -> dict:
     return {friendly: tier.get(raw) for raw, friendly in _ENTITLEMENT_FIELDS.items()}
 
 
+def _fold_exceptions(groups: dict, items: list, scrub_text, queue_name: str | None = None) -> None:
+    """Fold exceptioned items into ``groups`` keyed by their scrubbed reason.
+
+    Shared by the single-queue and estate-wide summaries: grouping AFTER
+    scrubbing folds messages that differ only in personal data into one bucket,
+    so counts reflect failure modes, not distinct customers. Each group tracks
+    its count, first/last occurrence, and the resources involved; the estate-wide
+    caller passes ``queue_name`` so a group also records which queues exhibit the
+    reason (the single-queue caller omits it — see _exception_rows).
+    """
+    for item in items:
+        reason = scrub_text(item.get("exceptionReason")) or "(no reason recorded)"
+        when = item.get("exceptionedDate") or item.get("lastUpdated") or ""
+        group = groups.setdefault(
+            reason,
+            {
+                "reason": reason,
+                "count": 0,
+                "first_seen": when,
+                "last_seen": when,
+                "resources": set(),
+                "queues": set(),
+            },
+        )
+        group["count"] += 1
+        if when:
+            group["first_seen"] = min(group["first_seen"] or when, when)
+            group["last_seen"] = max(group["last_seen"], when)
+        if item.get("resource"):
+            group["resources"].add(item["resource"])
+        if queue_name:
+            group["queues"].add(queue_name)
+
+
+def _exception_rows(groups: dict) -> list[dict]:
+    """Materialise grouped exceptions into rows: sets → sorted lists.
+
+    ``queues`` is included only when populated (the estate-wide summary), so the
+    single-queue summary's rows keep their original shape (reason, count,
+    first_seen, last_seen, resources).
+    """
+    rows = []
+    for group in groups.values():
+        row = {k: v for k, v in group.items() if k != "queues"}
+        row["resources"] = sorted(group["resources"])
+        if group["queues"]:
+            row["queues"] = sorted(group["queues"])
+        rows.append(row)
+    return rows
+
+
 class _Tier2InsightMixin:
     """Domain methods for the insight tools (mixed into ``Engine``).
 
@@ -64,31 +116,40 @@ class _Tier2InsightMixin:
         items = self.client.get_queue_items(
             queue_id, state="Exceptioned", start_date=start_date, end_date=end_date
         )
-
         groups: dict[str, dict] = {}
-        for item in items:
-            reason = self.scrub_text(item.get("exceptionReason")) or "(no reason recorded)"
-            when = item.get("exceptionedDate") or item.get("lastUpdated") or ""
-            group = groups.setdefault(
-                reason,
-                {
-                    "reason": reason,
-                    "count": 0,
-                    "first_seen": when,
-                    "last_seen": when,
-                    "resources": set(),
-                },
-            )
-            group["count"] += 1
-            if when:
-                group["first_seen"] = min(group["first_seen"] or when, when)
-                group["last_seen"] = max(group["last_seen"], when)
-            if item.get("resource"):
-                group["resources"].add(item["resource"])
-
-        rows = [{**g, "resources": sorted(g["resources"])} for g in groups.values()]
+        _fold_exceptions(groups, items, self.scrub_text)
         return rank(
-            rows, sort_key=lambda g: g.get("count", 0), sorted_by="count desc", reverse=True
+            _exception_rows(groups),
+            sort_key=lambda g: g.get("count", 0),
+            sorted_by="count desc",
+            reverse=True,
+        )
+
+    def estate_exception_summary(self, start_date: str, end_date: str) -> Ranked:
+        """Group exceptions across EVERY queue by (scrubbed) reason, ranked by count.
+
+        The estate-wide form of exception_summary: no v7 endpoint aggregates
+        exceptions, so it loops every queue's exceptioned items over the window
+        and folds them into one ranking — the dominant failure mode across the
+        estate in a single call rather than a loop over each queue. Each group
+        additionally records which ``queues`` exhibit the reason. The window is
+        required (the per-queue item reads refuse to run unbounded).
+        """
+        require_window(start_date, end_date)
+        groups: dict[str, dict] = {}
+        for queue in self.client.get_queues():
+            queue_id = queue.get("id")
+            if not queue_id:
+                continue
+            items = self.client.get_queue_items(
+                queue_id, state="Exceptioned", start_date=start_date, end_date=end_date
+            )
+            _fold_exceptions(groups, items, self.scrub_text, queue_name=queue.get("name"))
+        return rank(
+            _exception_rows(groups),
+            sort_key=lambda g: g.get("count", 0),
+            sorted_by="count desc",
+            reverse=True,
         )
 
     def throughput_summary(
@@ -198,6 +259,29 @@ def build_tier2_tools(engine) -> list[Callable]:
         """
         return to_envelope(engine.exception_summary(queue, start_date, end_date), limit)
 
+    def estate_exception_summary(
+        start_date: str, end_date: str, limit: int = DEFAULT_LIMIT
+    ) -> dict:
+        """Summarise exceptions across the WHOLE estate: counts grouped by reason.
+
+        The estate-wide version of exception_summary — use it to find the
+        dominant failure mode everywhere at once, instead of calling
+        exception_summary for each queue. `start_date`/`end_date` (ISO,
+        REQUIRED) bound the items' last-updated time. Each item gives a distinct
+        exception reason (personal data already removed), how many items hit it
+        across the estate, when it first and last occurred in the window, the
+        resources involved, and the `queues` it appeared in.
+
+        Reasons are grouped AFTER scrubbing, so messages that differ only in
+        personal data fold into one bucket — counts reflect failure modes, not
+        distinct customers. This reads every queue's exceptioned items, so on a
+        large estate prefer a tight window.
+
+        Results come back as {"items": [...], "meta": {...}}, most frequent
+        first, capped at `limit` (default 50).
+        """
+        return to_envelope(engine.estate_exception_summary(start_date, end_date), limit)
+
     def throughput_summary(
         start_date: str,
         end_date: str,
@@ -257,4 +341,10 @@ def build_tier2_tools(engine) -> list[Callable]:
         """
         return engine.license_entitlement()
 
-    return [exception_summary, throughput_summary, estate_health, license_entitlement]
+    return [
+        exception_summary,
+        estate_exception_summary,
+        throughput_summary,
+        estate_health,
+        license_entitlement,
+    ]

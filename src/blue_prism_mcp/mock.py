@@ -25,6 +25,11 @@ Seed it with your own data, or accept the small built-in fixtures below.
 
 from __future__ import annotations
 
+# The exception-handling stage types the errors-only session-log filter keeps
+# (mirrors the live client's _ERROR_STAGE_TYPES, held here so the mock stays
+# import-free of the client).
+_ERROR_STAGE_TYPES = frozenset({"Exception", "Recover", "Resume"})
+
 _DEFAULT_RESOURCES: list[dict] = [
     {
         "id": "5d2c8e0a-71b4-4a8e-9f30-000000000001",
@@ -308,20 +313,104 @@ _DEFAULT_ITEM_ATTEMPTS: dict[str, list[dict]] = {
     ],
 }
 
+# SessionLogSummary rows. stageType drives the errors-only filter (the
+# exception-handling stages Exception/Recover/Resume) and resourceStartTime is
+# the per-stage execution timestamp the time-window filter bounds.
 _DEFAULT_SESSION_LOGS: dict[str, list[dict]] = {
     "e8a9d7c2-5f10-4b3e-bd64-000000000301": [
-        {"logNumber": 1, "stageName": "Start", "stageType": "Start", "result": ""},
-        {"logNumber": 2, "stageName": "Read Invoice", "stageType": "Action", "result": "OK"},
-        {"logNumber": 3, "stageName": "Post to Ledger", "stageType": "Action", "result": "OK"},
+        {
+            "logNumber": 1,
+            "stageName": "Start",
+            "stageType": "Start",
+            "result": "",
+            "resourceStartTime": "2026-03-01T09:00:00Z",
+        },
+        {
+            "logNumber": 2,
+            "stageName": "Read Invoice",
+            "stageType": "Action",
+            "result": "OK",
+            "resourceStartTime": "2026-03-01T09:04:00Z",
+        },
+        {
+            "logNumber": 3,
+            "stageName": "Post to Ledger",
+            "stageType": "Action",
+            "result": "OK",
+            "resourceStartTime": "2026-03-01T09:08:30Z",
+        },
     ],
     "e8a9d7c2-5f10-4b3e-bd64-000000000302": [
-        {"logNumber": 1, "stageName": "Start", "stageType": "Start", "result": ""},
+        {
+            "logNumber": 1,
+            "stageName": "Start",
+            "stageType": "Start",
+            "result": "",
+            "resourceStartTime": "2026-03-02T10:00:00Z",
+        },
         {
             "logNumber": 2,
             "stageName": "Validate Customer",
             "stageType": "Action",
-            "result": "ERROR: Customer record not found for ref 4929 1234 5678 9012",
+            "result": "Lookup returned no match",
             "resultType": "Text",
+            "resourceStartTime": "2026-03-02T10:00:35Z",
+        },
+        {
+            "logNumber": 3,
+            "stageName": "Raise Not Found",
+            "stageType": "Exception",
+            "result": "Customer record not found for ref 4929 1234 5678 9012",
+            "resultType": "Text",
+            "resourceStartTime": "2026-03-02T10:01:05Z",
+        },
+        {
+            "logNumber": 4,
+            "stageName": "Handle Exception",
+            "stageType": "Recover",
+            "result": "",
+            "resourceStartTime": "2026-03-02T10:01:20Z",
+        },
+    ],
+}
+
+# ScheduleLogSummary rows keyed by schedule id (an integer in the API). The
+# newest run (by startTime) is a schedule's last outcome; list_schedules folds
+# it in. The active schedule has a clean recent run; the retired one's last run
+# terminated. A schedule absent here (or with an empty list) has never run.
+_DEFAULT_SCHEDULE_LOGS: dict[str, list[dict]] = {
+    "1": [
+        {
+            "scheduleLogId": 11,
+            "scheduleId": 1,
+            "scheduleName": "Daily Invoice Run",
+            "startTime": "2026-03-09T06:00:00Z",
+            "endTime": "2026-03-09T06:12:40Z",
+            "duration": "00:12:40",
+            "status": "completed",
+            "serverName": "BP-APP-01",
+        },
+        {
+            "scheduleLogId": 9,
+            "scheduleId": 1,
+            "scheduleName": "Daily Invoice Run",
+            "startTime": "2026-03-06T06:00:00Z",
+            "endTime": "2026-03-06T06:11:02Z",
+            "duration": "00:11:02",
+            "status": "completed",
+            "serverName": "BP-APP-01",
+        },
+    ],
+    "2": [
+        {
+            "scheduleLogId": 4,
+            "scheduleId": 2,
+            "scheduleName": "Weekly Reconciliation",
+            "startTime": "2026-02-22T07:00:00Z",
+            "endTime": "2026-02-22T07:03:18Z",
+            "duration": "00:03:18",
+            "status": "terminated",
+            "serverName": "BP-APP-02",
         },
     ],
 }
@@ -469,6 +558,7 @@ class MockBPClient:
         item_data: dict[str, dict] | None = None,
         item_attempts: dict[str, list[dict]] | None = None,
         session_logs: dict[str, list[dict]] | None = None,
+        schedule_logs: dict[str, list[dict]] | None = None,
         limits_and_usage: dict | None = None,
         license_entitlement: dict | None = None,
         deferred_by_queue: dict[str, int] | None = None,
@@ -501,7 +591,12 @@ class MockBPClient:
         self._session_logs = (
             session_logs
             if session_logs is not None
-            else {k: list(v) for k, v in _DEFAULT_SESSION_LOGS.items()}
+            else {k: [dict(e) for e in v] for k, v in _DEFAULT_SESSION_LOGS.items()}
+        )
+        self._schedule_logs = (
+            schedule_logs
+            if schedule_logs is not None
+            else {k: [dict(r) for r in v] for k, v in _DEFAULT_SCHEDULE_LOGS.items()}
         )
         self._limits_and_usage = (
             limits_and_usage if limits_and_usage is not None else dict(_DEFAULT_LIMITS_AND_USAGE)
@@ -623,8 +718,35 @@ class MockBPClient:
             return []
         return [dict(a) for a in self._item_attempts.get(item_id, [])]
 
-    def get_session_log(self, session_id: str) -> list[dict]:
-        return [dict(e) for e in self._session_logs.get(session_id, [])]
+    def get_session_log(
+        self,
+        session_id: str,
+        errors_only: bool = False,
+        start_date: str | None = None,
+        end_date: str | None = None,
+    ) -> list[dict]:
+        # Mirror the live server-side filters: errors_only narrows to the
+        # exception-handling stage types, the window bounds resourceStartTime,
+        # and the pages come back newest-stage-first (sortBy=LogNumberDesc).
+        entries = self._session_logs.get(session_id, [])
+        if errors_only:
+            entries = [e for e in entries if e.get("stageType") in _ERROR_STAGE_TYPES]
+        if start_date:
+            entries = [e for e in entries if (e.get("resourceStartTime") or "") >= start_date]
+        if end_date:
+            entries = [e for e in entries if _at_or_before(e.get("resourceStartTime"), end_date)]
+        entries = sorted(entries, key=lambda e: e.get("logNumber") or 0, reverse=True)
+        return [dict(e) for e in entries]
+
+    def get_last_schedule_run(self, schedule_id) -> dict | None:
+        # The most recent run (by startTime) for the schedule, or None when it
+        # has never run — mirrors /scheduleLogs/{id}?sortBy=StartTimeDesc capped
+        # to one row. Keyed by id as a string (schedule ids are integers).
+        runs = self._schedule_logs.get(str(schedule_id), [])
+        if not runs:
+            return None
+        latest = max(runs, key=lambda r: r.get("startTime") or "")
+        return dict(latest)
 
     def get_current_limits_and_usage(self) -> dict:
         return dict(self._limits_and_usage)
