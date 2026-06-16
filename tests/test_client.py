@@ -688,6 +688,88 @@ class TestSessionLogProbe:
         with pytest.raises(requests.HTTPError, match="boom"):
             client.get_session_log("sess-1")
 
+    def test_filters_are_pushed_as_server_side_query_params(self):
+        client, session = make_client()
+        session.get.return_value = _resp([{"stageName": "Raise"}])
+        client.get_session_log(
+            "sess-1",
+            errors_only=True,
+            start_date="2026-03-02T10:00:00Z",
+            end_date="2026-03-02T11:00:00Z",
+        )
+        params = session.get.call_args.kwargs["params"]
+        assert params["sortBy"] == "LogNumberDesc"
+        assert params["stageType"] == "Exception,Recover,Resume"
+        assert params["resourceStartTime[gte]"] == "2026-03-02T10:00:00Z"
+        assert params["resourceStartTime[lte]"] == "2026-03-02T11:00:00Z"
+
+    def test_default_read_sends_sort_but_no_filters(self):
+        client, session = make_client()
+        session.get.return_value = _resp([{"stageName": "Start"}])
+        client.get_session_log("sess-1")
+        params = session.get.call_args.kwargs["params"]
+        assert params["sortBy"] == "LogNumberDesc"
+        assert "stageType" not in params
+        assert "resourceStartTime[gte]" not in params
+
+    def test_filters_take_part_in_the_cache_key(self):
+        client, session = make_client()
+        session.get.return_value = _resp([{"stageName": "Start"}])
+        client.get_session_log("sess-1")
+        client.get_session_log("sess-1", errors_only=True)
+        assert session.get.call_count == 2  # a different filter set is a cache miss
+
+    def test_filters_survive_the_logslight_to_logs_fallback(self):
+        # The filters must reach /logs too — both on the 404 fallback and once
+        # the instance has pinned /logs (a pre-7.4 estate must still narrow).
+        client, session = make_client()
+        session.get.side_effect = [
+            _http_error_resp(404),  # logslight absent → fall back to /logs
+            _resp([{"stageName": "Raise"}]),  # /logs (fallback) → pin
+            _resp([{"stageName": "Raise"}]),  # next read goes straight to /logs
+        ]
+        client.get_session_log("sess-1", errors_only=True)
+        fallback = session.get.call_args_list[1]
+        assert fallback.args[0].endswith("/sessions/sess-1/logs")
+        assert fallback.kwargs["params"]["stageType"] == "Exception,Recover,Resume"
+        client.clear_cache()
+        client.get_session_log("sess-1", errors_only=True)  # pinned /logs path
+        assert session.get.call_args.kwargs["params"]["stageType"] == "Exception,Recover,Resume"
+
+
+class TestScheduleRunLog:
+    def test_reads_latest_run_from_the_current_endpoint(self):
+        client, session = make_client()
+        session.get.return_value = _resp(
+            {"items": [{"scheduleLogId": 11, "status": "completed"}], "pagingToken": None}
+        )
+        run = client.get_last_schedule_run(1)
+        assert run == {"scheduleLogId": 11, "status": "completed"}
+        call = session.get.call_args
+        assert call.args[0].endswith("/scheduleLogs/1")  # not the deprecated /schedules/{id}/logs
+        assert call.kwargs["params"] == {"sortBy": "StartTimeDesc", "itemsPerPage": 1}
+
+    def test_never_run_schedule_is_none(self):
+        client, session = make_client()
+        session.get.return_value = _resp({"items": [], "pagingToken": None})
+        assert client.get_last_schedule_run(2) is None
+
+    def test_is_cached_per_schedule_id(self):
+        client, session = make_client()
+        session.get.return_value = _resp({"items": [{"scheduleLogId": 1}]})
+        client.get_last_schedule_run(1)
+        client.get_last_schedule_run(1)
+        session.get.assert_called_once()
+
+    def test_distinct_schedule_ids_do_not_share_a_cache_entry(self):
+        # The cache key carries the schedule id, so one schedule's last run is
+        # never served for another.
+        client, session = make_client()
+        session.get.return_value = _resp({"items": [{"scheduleLogId": 1}]})
+        client.get_last_schedule_run(1)
+        client.get_last_schedule_run(2)
+        assert session.get.call_count == 2
+
 
 # --- Phase 2: Tier 3 writes (mocked HTTP) -------------------------------------
 
@@ -907,10 +989,63 @@ class TestMockExtended:
         client = MockBPClient()
         failed = next(s for s in client.get_sessions() if s["status"] == "Terminated")
         log = client.get_session_log(failed["sessionId"])
-        assert any(str(e.get("result", "")).startswith("ERROR") for e in log)
+        # Newest-stage-first (sortBy=LogNumberDesc), and the failing run carries
+        # an Exception stage.
+        assert [e["logNumber"] for e in log] == sorted((e["logNumber"] for e in log), reverse=True)
+        assert any(e.get("stageType") == "Exception" for e in log)
+
+    def test_get_session_log_errors_only_keeps_exception_handling_stages(self):
+        client = MockBPClient()
+        failed = next(s for s in client.get_sessions() if s["status"] == "Terminated")
+        log = client.get_session_log(failed["sessionId"], errors_only=True)
+        assert log and all(e["stageType"] in {"Exception", "Recover", "Resume"} for e in log)
+
+    def test_get_session_log_window_bounds_stage_time(self):
+        client = MockBPClient()
+        failed = next(s for s in client.get_sessions() if s["status"] == "Terminated")
+        # The Exception stage runs at 10:01:05; a window ending 10:01 excludes it.
+        early = client.get_session_log(
+            failed["sessionId"], start_date="2026-03-02T10:00:00Z", end_date="2026-03-02T10:01:00Z"
+        )
+        assert early and all(e["stageType"] != "Exception" for e in early)
 
     def test_get_session_log_unknown_session_is_empty(self):
         assert MockBPClient().get_session_log("nope") == []
+
+    def test_get_last_schedule_run(self):
+        client = MockBPClient()
+        run = client.get_last_schedule_run(1)
+        # The most recent run by startTime (the 2026-03-09 completion, not the
+        # earlier 2026-03-06 one).
+        assert run["startTime"] == "2026-03-09T06:00:00Z"
+        assert run["status"] == "completed"
+
+    def test_get_last_schedule_run_picks_the_latest_regardless_of_order(self):
+        # The selection is by startTime, not list position — seed the older run
+        # last so a position-based pick would get it wrong.
+        client = MockBPClient(
+            schedule_logs={
+                "1": [
+                    {
+                        "scheduleLogId": 9,
+                        "startTime": "2026-03-06T06:00:00Z",
+                        "status": "completed",
+                    },
+                    {
+                        "scheduleLogId": 11,
+                        "startTime": "2026-03-09T06:00:00Z",
+                        "status": "terminated",
+                    },
+                ]
+            }
+        )
+        run = client.get_last_schedule_run(1)
+        assert run["startTime"] == "2026-03-09T06:00:00Z"
+        assert run["status"] == "terminated"
+
+    def test_get_last_schedule_run_never_run_is_none(self):
+        client = MockBPClient(schedule_logs={})
+        assert client.get_last_schedule_run(1) is None
 
     def test_get_queue_item_carries_data_and_drops_internal_queue_key(self):
         # The single-item read returns WorkQueueItem (WITH `data`); the

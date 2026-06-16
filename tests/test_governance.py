@@ -810,6 +810,7 @@ READ_TOOLS = [
     "list_environment_variables",
     "list_process_groups",
     "exception_summary",
+    "estate_exception_summary",
     "throughput_summary",
     "estate_health",
     "license_entitlement",

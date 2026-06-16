@@ -41,7 +41,12 @@ there is no permission model of its own to misconfigure. Two rules follow:
   Process Definition). A read denied for lack of a clause surfaces as an error
   on that one tool, not a startup failure — and `list_queue_configurations`
   additionally needs **Blue Prism 7.4+**, degrading to an "unavailable" note on
-  older estates rather than failing.
+  older estates rather than failing. The v0.7.0 deeper reads add no new clause
+  in practice: `get_session_log`'s filters use the same permissions as the base
+  read, and `list_schedules`' last-run fold-in reads the schedule logs (a
+  Schedule-view clause — e.g. View Schedule — or System - Scheduler); if that
+  read is denied the listing still stands and sets `meta.last_run_unavailable`
+  rather than failing.
 - **Control tools are capability-gated at startup.** When actions are enabled,
   the server reads `GET /user/permissions` and registers only the action
   tools the account can actually execute — a tool the account cannot run does
