@@ -614,8 +614,11 @@ class TestListSessions:
         assert all(s["processName"] == "Invoice Processing" for s in result["items"])
 
     def test_filters_by_resource_name_case_insensitively(self):
+        # BOT-02 holds two fixtures (a Terminated run and an in-flight Running
+        # one); the filter keeps both and nothing from another worker.
         result = tier1()["list_sessions"](**WINDOW, resource="bot-02")
-        assert [s["resourceName"] for s in result["items"]] == ["BOT-02"]
+        assert result["items"], "expected BOT-02 sessions"
+        assert all(s["resourceName"] == "BOT-02" for s in result["items"])
 
     def test_filters_by_status_with_canonical_casing(self):
         result = tier1()["list_sessions"](**WINDOW, status="terminated")

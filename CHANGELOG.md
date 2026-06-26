@@ -7,6 +7,12 @@ additive endpoint is a minor bump.
 
 ## [Unreleased]
 
+### Changed
+- The mock estate now seeds one in-flight (`Running`) session, so mock mode
+  exercises the live-session reads (worker `current_sessions`, in-flight
+  staleness severity) and the `start_process` → `stop_session` workflow against a
+  standing target rather than only a freshly started one.
+
 ## [0.7.0] — 2026-06-16
 Deeper reads — pushing the filtering the v7 API already supports down into the
 reads the envelope capped client-side, so a diagnosis fetches only what it needs.
