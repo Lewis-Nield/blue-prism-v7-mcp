@@ -189,6 +189,23 @@ _DEFAULT_SESSIONS: list[dict] = [
         "exceptionType": None,
         "exceptionMessage": None,
     },
+    {
+        # An in-flight run: a mock estate is never all-finished, and the live-session
+        # reads (worker current_sessions, in-flight severity) and the stop_session
+        # workflow need a Running target to exercise. No endTime — it is still going.
+        "sessionId": "e8a9d7c2-5f10-4b3e-bd64-000000000304",
+        "sessionNumber": 4,
+        "processId": _PROC_ONBOARDING,
+        "processName": "Customer Onboarding",
+        "resourceId": "5d2c8e0a-71b4-4a8e-9f30-000000000002",
+        "resourceName": "BOT-02",
+        "status": "Running",
+        "startTime": "2026-03-09T08:30:00Z",
+        "endTime": None,
+        "terminationReason": "None",
+        "exceptionType": None,
+        "exceptionMessage": None,
+    },
 ]
 
 _QUEUE_INVOICES = "9b6f3a1c-2e45-4d07-8c11-000000000101"
