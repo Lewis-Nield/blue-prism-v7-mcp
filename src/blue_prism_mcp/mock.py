@@ -1142,26 +1142,27 @@ def _demo_history() -> list[dict]:
             )
             end_dt = start_dt + timedelta(minutes=4 if terminated else 11)
             stamp = "%Y-%m-%dT%H:%M:%SZ"
+            # Terminated runs land on k that is a multiple of term_every (always
+            # even), so vary the reason by the day, not k, to get a real mix of
+            # process vs internal errors across the backlog.
+            outcome = (
+                {
+                    "termination": "InternalError" if days_ago % 2 else "ProcessError",
+                    "exception_type": "System Exception",
+                    "exception_message": f"{proc_name} run failed",
+                }
+                if terminated
+                else {}
+            )
             number += 1
-            if terminated:
-                reason = "ProcessError" if k % 2 == 0 else "InternalError"
-                sessions.append(
-                    _session(
-                        f"e8a9d7c2-5f10-4b3e-bd64-{number:012d}", number, proc_id,
-                        proc_name, res_id, res_name, "Terminated",
-                        start_dt.strftime(stamp), end_dt.strftime(stamp),
-                        termination=reason, exception_type="System Exception",
-                        exception_message=f"{proc_name} run failed",
-                    )
+            sessions.append(
+                _session(
+                    f"e8a9d7c2-5f10-4b3e-bd64-{number:012d}", number, proc_id,
+                    proc_name, res_id, res_name,
+                    "Terminated" if terminated else "Completed",
+                    start_dt.strftime(stamp), end_dt.strftime(stamp), **outcome,
                 )
-            else:
-                sessions.append(
-                    _session(
-                        f"e8a9d7c2-5f10-4b3e-bd64-{number:012d}", number, proc_id,
-                        proc_name, res_id, res_name, "Completed",
-                        start_dt.strftime(stamp), end_dt.strftime(stamp),
-                    )
-                )
+            )
     return sessions
 
 

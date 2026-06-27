@@ -1266,6 +1266,10 @@ class TestDemoEstate:
             if s["status"] == "Terminated" and s["startTime"][:10] < _date(7)
         ]
         assert terminated
+        # Both failure modes appear, so throughput_summary's process-vs-internal
+        # error split is exercised rather than one reason being dead.
+        reasons = {s["terminationReason"] for s in terminated}
+        assert {"ProcessError", "InternalError"} <= reasons
 
     def test_workers_are_pooled_and_span_every_status(self):
         workers = demo_estate().get_resources()
