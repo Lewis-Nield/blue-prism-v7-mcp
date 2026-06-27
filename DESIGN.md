@@ -474,6 +474,17 @@ Sequenced as:
   `start_process`'s permission clause (a process permission **and** `Control
   Resource`); the Stopped transition is a day-one live-verification item — the
   same posture as the v1 writes the spec underdocuments.
+- **Phase 11 — `actor` on the audit line (planned).** The Tier 3 audit currently
+  records the tool, its arguments, and the event status — but not *who* invoked
+  it. Identity is a generic governance concern (it belongs here, not in a
+  consumer), so the audit line should gain an optional `actor` field threaded as
+  a parameter through `build_tier3_tools`' `_run` to `AuditLog.record` — never
+  through any prompt, and scrubbed like every other field (a subject/name, never
+  free text). Until this lands, a host that needs identity-bearing audit records
+  it in its own store at the propose/execute boundary; the Custera console does
+  exactly that for its Control phase. Pull this forward when an embedding host
+  (orchestration, or a live deployment) needs one canonical audit line carrying
+  identity rather than correlating two logs.
 
 ## Conventions
 - The stdio transport speaks JSON-RPC over stdout; nothing else may write there.
