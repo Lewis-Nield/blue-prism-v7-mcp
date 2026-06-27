@@ -66,11 +66,13 @@ class BPConfig:
     # Feature flags.
     enable_actions: bool = False  # gates the Tier 3 control tools
 
-    # What the server runs against: "live" (BPClient over the v7 REST API) or
-    # "mock" (MockBPClient — in-memory fixtures, no estate, no credentials).
-    # Mock mode exists so the server can be evaluated end-to-end in an MCP
-    # client with zero estate access. Unknown values fail loud in the server's
-    # client factory, mirroring how pii_backend fails in build_scrubber.
+    # What the server runs against: "live" (BPClient over the v7 REST API),
+    # "mock" (MockBPClient — the lean in-memory fixtures, no estate, no
+    # credentials), or "demo" (the same client seeded with a larger, populated
+    # estate — see mock.demo_estate). Mock and demo modes exist so the server
+    # can be evaluated end-to-end in an MCP client with zero estate access.
+    # Unknown values fail loud in the server's client factory, mirroring how
+    # pii_backend fails in build_scrubber.
     data_source: str = "live"
 
     # JSON-lines audit file for the action surface. REQUIRED when
