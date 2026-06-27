@@ -13,7 +13,7 @@ import pytest
 import requests
 
 from blue_prism_mcp.engine import Engine
-from blue_prism_mcp.mock import MockBPClient
+from blue_prism_mcp.mock import MockBPClient, _date
 from blue_prism_mcp.pii import NullScrubber, ScrubResult
 from blue_prism_mcp.tools.common import Ranked, to_envelope
 
@@ -29,7 +29,9 @@ def make_engine(client=None, scrubber=None) -> Engine:
     return Engine(client or MockBPClient(), scrubber or NullScrubber())
 
 
-WINDOW = {"start_date": "2026-03-01", "end_date": "2026-03-31"}
+# A wide "everything up to now" window spanning every relative-anchored default
+# fixture (oldest ~8 days back) without pinning an absolute calendar date.
+WINDOW = {"start_date": _date(3650), "end_date": _date(0)}
 
 
 class TestRankedShape:

@@ -14,7 +14,7 @@ import requests
 
 from blue_prism_mcp.config import BPConfig
 from blue_prism_mcp.engine import Engine
-from blue_prism_mcp.mock import MockBPClient
+from blue_prism_mcp.mock import MockBPClient, _date, _ts
 from blue_prism_mcp.pii import NullScrubber, RegexScrubber, ScrubResult
 from blue_prism_mcp.tools import (
     DEFAULT_LIMIT,
@@ -50,7 +50,11 @@ def tier2(client=None, scrubber=None) -> dict:
     return {t.__name__: t for t in build_tier2_tools(engine)}
 
 
-WINDOW = {"start_date": "2026-03-01", "end_date": "2026-03-31"}
+# A deliberately wide "everything up to now" window: it spans the relative-
+# anchored default fixtures (oldest ~8 days back) and any incidental dates the
+# self-seeding tests below use, without pinning an absolute calendar date. The
+# narrow-window tests that probe the bounds set their own off _date/_ts.
+WINDOW = {"start_date": _date(3650), "end_date": _date(0)}
 
 
 # --- The envelope ---------------------------------------------------------------
@@ -399,12 +403,12 @@ class TestListQueueItems:
         assert [i["id"] for i in result["items"]] == ["new", "old"]
 
     def test_window_bounds_are_forwarded_to_the_client(self):
-        # The Invoices fixtures hold a Completed item on 03-01 and an
-        # Exceptioned one on 03-02; each bound must actually reach the client
+        # The Invoices fixtures hold a Completed item 8 days back and an
+        # Exceptioned one 7 days back; each bound must actually reach the client
         # or the tool silently reads outside its stated window.
         items = tier1()["list_queue_items"]
-        assert items("Invoices", "Exceptioned", "2026-03-03", "2026-03-31")["items"] == []
-        assert items("Invoices", "Completed", "2026-03-01", "2026-03-01")["meta"]["total"] == 1
+        assert items("Invoices", "Exceptioned", _date(6), _date(0))["items"] == []
+        assert items("Invoices", "Completed", _date(8), _date(8))["meta"]["total"] == 1
 
     def test_status_text_filter_is_forwarded_to_the_client(self):
         client = MockBPClient(
@@ -602,10 +606,10 @@ class TestListSessions:
         assert starts == sorted(starts, reverse=True)
 
     def test_window_bounds_are_forwarded_to_the_client(self):
-        # Fixture sessions start 03-01, 03-02, and 03-05; a 03-02..03-04
-        # window must exclude both outer ones — each bound has to actually
-        # reach the client.
-        result = tier1()["list_sessions"]("2026-03-02", "2026-03-04")
+        # Fixture sessions start 8, 7, and 4 days back; a window spanning days
+        # 7..5 must exclude both outer ones — each bound has to actually reach
+        # the client.
+        result = tier1()["list_sessions"](_date(7), _date(5))
         assert [s["sessionNumber"] for s in result["items"]] == [2]
 
     def test_filters_by_process_name_case_insensitively(self):
@@ -670,8 +674,8 @@ class TestGetSessionLog:
         client = MockBPClient()
         result = tier1(client)["get_session_log"](
             self._failed_session(client)["sessionId"],
-            start_date="2026-03-02T10:00:00Z",
-            end_date="2026-03-02T10:01:00Z",
+            start_date=_ts(7, "10:00:00"),
+            end_date=_ts(7, "10:01:00"),
         )
         assert result["items"] and all(e["stageType"] != "Exception" for e in result["items"])
 
@@ -690,8 +694,8 @@ class TestGetSessionLog:
         # missing one.
         client = MockBPClient()
         sid = self._failed_session(client)["sessionId"]
-        assert tier1(client)["get_session_log"](sid, start_date="2026-03-02")["items"]
-        assert tier1(client)["get_session_log"](sid, end_date="2026-03-03")["items"]
+        assert tier1(client)["get_session_log"](sid, start_date=_date(7))["items"]
+        assert tier1(client)["get_session_log"](sid, end_date=_date(6))["items"]
 
     def test_unknown_session_yields_an_empty_envelope(self):
         result = tier1()["get_session_log"]("no-such-session")
@@ -741,8 +745,8 @@ class TestListSchedules:
         # Schedule 1 has runs → its latest outcome is folded in...
         assert by_name["Daily Invoice Run"]["last_run"] == {
             "status": "completed",
-            "startTime": "2026-03-09T06:00:00Z",
-            "endTime": "2026-03-09T06:12:40Z",
+            "startTime": _ts(1, "06:00:00"),
+            "endTime": _ts(1, "06:12:40"),
             "duration": "00:12:40",
         }
         # ...one that never ran carries no last_run (never a fabricated one).
@@ -1170,9 +1174,9 @@ class TestThroughputSummary:
         assert [r["process"] for r in result["items"]] == ["Customer Onboarding"]
 
     def test_window_bounds_are_forwarded_to_the_client(self):
-        # Fixture sessions start 03-01, 03-02, and 03-05; a 03-02..03-04
-        # window must keep only the middle one.
-        result = tier2()["throughput_summary"]("2026-03-02", "2026-03-04")
+        # Fixture sessions start 8, 7, and 4 days back; a window spanning days
+        # 7..5 must keep only the middle one.
+        result = tier2()["throughput_summary"](_date(7), _date(5))
         rows = {r["process"]: r["total_sessions"] for r in result["items"]}
         assert rows == {"Customer Onboarding": 1}
 

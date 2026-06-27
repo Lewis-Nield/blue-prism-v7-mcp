@@ -25,7 +25,7 @@ from blue_prism_mcp.governance import (
     resolve_capabilities,
     unsatisfied_clauses,
 )
-from blue_prism_mcp.mock import _DEFAULT_PERMISSIONS, MockBPClient
+from blue_prism_mcp.mock import _DEFAULT_PERMISSIONS, MockBPClient, _date
 from blue_prism_mcp.pii import NullScrubber
 from blue_prism_mcp.tools import build_tier3_tools, register_tools
 from blue_prism_mcp.tools.common import validate_uuid
@@ -865,9 +865,9 @@ class TestRegisterToolsGate:
         queues = by_name["list_queues"]()
         assert any(q["name"] == "Invoices" for q in queues["items"])
         # Exercises tier1's scrub boundary, so a mis-wired scrubber crashes too.
-        items = by_name["list_queue_items"]("Invoices", "Exceptioned", "2026-03-01", "2026-03-31")
+        items = by_name["list_queue_items"]("Invoices", "Exceptioned", _date(60), _date(0))
         assert items["meta"]["total"] >= 1
-        summary = by_name["exception_summary"]("Invoices", "2026-03-01", "2026-03-31")
+        summary = by_name["exception_summary"]("Invoices", _date(60), _date(0))
         assert summary["meta"]["total"] >= 0
         dry = by_name["retry_queue_item"](
             "Invoices",

@@ -29,7 +29,7 @@ from mcp.server.fastmcp import FastMCP
 from . import __version__
 from .client import BPClient
 from .config import BPConfig
-from .mock import MockBPClient
+from .mock import MockBPClient, demo_estate
 from .pii import ScrubberUnavailableError, build_scrubber
 from .tools import register_tools
 
@@ -79,6 +79,8 @@ def build_client(config: BPConfig) -> BPClient | MockBPClient:
     source = config.data_source
     if source == "mock":
         return MockBPClient()
+    if source == "demo":
+        return demo_estate()
     if source == "live":
         missing = [var for attr, var in _REQUIRED_CONNECTION_SETTINGS if not getattr(config, attr)]
         if missing:
@@ -88,7 +90,7 @@ def build_client(config: BPConfig) -> BPClient | MockBPClient:
                 "an estate via BP_DATA_SOURCE=mock."
             )
         return BPClient(config)
-    raise ValueError(f"Unknown data_source {source!r} — expected 'live' or 'mock'.")
+    raise ValueError(f"Unknown data_source {source!r} — expected 'live', 'mock', or 'demo'.")
 
 
 def build_server(config: BPConfig) -> FastMCP:

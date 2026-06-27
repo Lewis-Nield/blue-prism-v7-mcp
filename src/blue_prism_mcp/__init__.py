@@ -26,7 +26,7 @@ from .cache import Cache, TTLCache
 from .client import BPClient
 from .config import BPConfig
 from .engine import Engine
-from .mock import MockBPClient
+from .mock import MockBPClient, demo_estate
 from .pii import Scrubber, build_scrubber
 from .tools.common import Ranked
 
@@ -43,4 +43,5 @@ __all__ = [
     "TTLCache",
     "__version__",
     "build_scrubber",
+    "demo_estate",
 ]

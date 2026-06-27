@@ -100,6 +100,13 @@ class TestBuildClient:
         client = build_client(BPConfig(data_source="mock"))
         assert client.get_resources()  # fixtures present, no HTTP
 
+    def test_demo_source_builds_a_populated_offline_client(self):
+        # Demo mode is the same MockBPClient seeded with the larger estate: no
+        # credentials, and visibly richer than the lean default fixtures.
+        client = build_client(BPConfig(data_source="demo"))
+        assert isinstance(client, MockBPClient)
+        assert len(client.get_resources()) > len(MockBPClient().get_resources())
+
     def test_live_source_builds_the_real_client_without_network(self):
         # BPClient is lazy (first token fetch happens on first request), so
         # construction alone must not touch the network — no mocking needed.

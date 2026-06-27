@@ -7,11 +7,25 @@ additive endpoint is a minor bump.
 
 ## [Unreleased]
 
+### Added
+- `BP_DATA_SOURCE=demo` (and `demo_estate()`): a populated offline estate built
+  on the same `MockBPClient` — pooled workers across departments (working/idle/
+  offline), queues in varied health (an SLA-breaching backlog, a degrading one, a
+  paused one, plus a healthy bulk), in-flight and silently-stale `Running`
+  sessions, and a failed schedule. Lets the server (and a downstream console) be
+  evaluated end-to-end against a lively estate, while the lean default fixtures
+  stay the minimal substrate the unit tests assert against.
+
 ### Changed
 - The mock estate now seeds one in-flight (`Running`) session, so mock mode
   exercises the live-session reads (worker `current_sessions`, in-flight
   staleness severity) and the `start_process` → `stop_session` workflow against a
   standing target rather than only a freshly started one.
+- Mock fixture timestamps are now anchored relative to "now" (a module-level
+  anchor captured at import, offset by day) rather than hardcoded to a fixed
+  calendar date, so the estate always reads as the current day/week instead of
+  drifting stale. Date-dependent tests compute their expectations off the same
+  anchor helpers, so they stay green as time passes.
 
 ## [0.7.0] — 2026-06-16
 Deeper reads — pushing the filtering the v7 API already supports down into the

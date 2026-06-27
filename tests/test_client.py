@@ -16,7 +16,7 @@ import requests
 from blue_prism_mcp.cache import TTLCache
 from blue_prism_mcp.client import BPClient
 from blue_prism_mcp.config import BPConfig
-from blue_prism_mcp.mock import MockBPClient
+from blue_prism_mcp.mock import MockBPClient, _date, _ts, demo_estate
 
 
 def make_config(**overrides) -> BPConfig:
@@ -958,17 +958,18 @@ class TestMockExtended:
         client = MockBPClient()
         qid = _queue_id(client)
         items = client.get_queue_items(
-            qid, state="Exceptioned", start_date="2026-03-01", end_date="2026-03-31"
+            qid, state="Exceptioned", start_date=_date(60), end_date=_date(0)
         )
         assert items and all(i["queue"] == qid for i in items)
         assert all(i["state"] == "Exceptioned" for i in items)
 
     def test_get_queue_items_end_date_includes_the_whole_day(self):
         # Items carry full timestamps; a date-only end bound must include
-        # items updated later that same day.
+        # items updated later that same day. The exceptioned Invoices item sits
+        # 7 days back, the completed one 8 — so a single-day window isolates it.
         client = MockBPClient()
         items = client.get_queue_items(
-            _queue_id(client), start_date="2026-03-02", end_date="2026-03-02"
+            _queue_id(client), start_date=_date(7), end_date=_date(7)
         )
         assert [i["keyValue"] for i in items] == ["INV-1002"]
 
@@ -1005,7 +1006,7 @@ class TestMockExtended:
         failed = next(s for s in client.get_sessions() if s["status"] == "Terminated")
         # The Exception stage runs at 10:01:05; a window ending 10:01 excludes it.
         early = client.get_session_log(
-            failed["sessionId"], start_date="2026-03-02T10:00:00Z", end_date="2026-03-02T10:01:00Z"
+            failed["sessionId"], start_date=_ts(7, "10:00:00"), end_date=_ts(7, "10:01:00")
         )
         assert early and all(e["stageType"] != "Exception" for e in early)
 
@@ -1015,9 +1016,9 @@ class TestMockExtended:
     def test_get_last_schedule_run(self):
         client = MockBPClient()
         run = client.get_last_schedule_run(1)
-        # The most recent run by startTime (the 2026-03-09 completion, not the
-        # earlier 2026-03-06 one).
-        assert run["startTime"] == "2026-03-09T06:00:00Z"
+        # The most recent run by startTime (the day-1 completion, not the
+        # earlier day-4 one).
+        assert run["startTime"] == _ts(1, "06:00:00")
         assert run["status"] == "completed"
 
     def test_get_last_schedule_run_picks_the_latest_regardless_of_order(self):
@@ -1214,6 +1215,82 @@ class TestMockExtended:
         MockBPClient().set_schedule_enabled("Daily Invoice Run", False)
         fresh = [s for s in MockBPClient().get_schedules() if s["name"] == "Daily Invoice Run"][0]
         assert fresh["isRetired"] is False
+
+
+class TestDemoEstate:
+    """The populated demo estate: richer than the lean defaults, relative-dated,
+    and varied enough that severity bands and collapsed-healthy summaries have
+    real content to show."""
+
+    def test_is_materially_larger_than_the_lean_defaults(self):
+        demo, lean = demo_estate(), MockBPClient()
+        assert len(demo.get_resources()) > len(lean.get_resources())
+        assert len(demo.get_queues()) > len(lean.get_queues())
+        assert len(demo.get_sessions()) > len(lean.get_sessions())
+        assert len(demo.get_processes()) > len(lean.get_processes())
+        assert len(demo.get_schedules()) > len(lean.get_schedules())
+
+    def test_every_session_reads_recent(self):
+        # The whole point of the anchor: nothing dated to a stale calendar month.
+        starts = [s["startTime"][:10] for s in demo_estate().get_sessions()]
+        assert starts and all(d >= _date(30) for d in starts)
+
+    def test_workers_are_pooled_and_span_every_status(self):
+        workers = demo_estate().get_resources()
+        assert all(w["poolName"] for w in workers)
+        assert len({w["poolName"] for w in workers}) >= 3
+        statuses = {w["displayStatus"] for w in workers}
+        assert {"Working", "Idle", "Offline"} <= statuses
+
+    def test_queues_span_breach_paused_and_a_healthy_bulk(self):
+        queues = demo_estate().get_queues()
+        assert any(q["exceptionedItemCount"] > 10 for q in queues)  # an SLA breach
+        assert any(q["status"] == "Paused" for q in queues)
+        healthy = [q for q in queues if q["exceptionedItemCount"] == 0]
+        assert len(healthy) >= 3  # a real bulk for a collapsed-healthy summary
+
+    def test_has_in_flight_and_silently_stale_running_sessions(self):
+        running = [s for s in demo_estate().get_sessions() if s["status"] == "Running"]
+        assert len(running) >= 2 and all(s["endTime"] is None for s in running)
+        # At least one has been running for days — the stuck-session severity case.
+        assert any(s["startTime"][:10] <= _date(3) for s in running)
+
+    def test_carries_a_failed_schedule(self):
+        client = demo_estate()
+        outcomes = {
+            s["name"]: (client.get_last_schedule_run(s["id"]) or {}).get("status")
+            for s in client.get_schedules()
+        }
+        assert "terminated" in outcomes.values()
+        assert "completed" in outcomes.values()
+
+    def test_no_session_reads_as_starting_in_the_future(self):
+        # Today's sessions anchor to wall-clock now (_recent), not a fixed time
+        # of day, so they never read as the future whatever hour the estate boots.
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        starts = [s["startTime"] for s in demo_estate().get_sessions()]
+        assert starts and all(start <= now for start in starts)
+
+    def test_drill_in_items_reference_this_estate_only(self):
+        # Seeded explicitly rather than inherited from the lean fixtures, so a
+        # queue-item drill-in never names a worker that is not in this estate.
+        client = demo_estate()
+        workers = {w["name"] for w in client.get_resources()}
+        for queue in client.get_queues():
+            for item in client.get_queue_items(queue["id"]):
+                assert item["resource"] is None or item["resource"] in workers
+
+    def test_notable_sessions_carry_a_stage_log(self):
+        client = demo_estate()
+        logged = [s["sessionId"] for s in client.get_sessions() if client.get_session_log(s["sessionId"])]
+        assert logged  # the lean-fixture fallback (different ids) would leave this empty
+        assert any(
+            e["stageType"] == "Exception"
+            for sid in logged
+            for e in client.get_session_log(sid)
+        )
 
 
 @pytest.fixture(autouse=True)

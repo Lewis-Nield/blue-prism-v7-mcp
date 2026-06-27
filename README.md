@@ -71,7 +71,7 @@ day-one verification):
 | `BP_API_BASE_URL` | v7 API base, e.g. `https://<server>/api/v7` |
 | `BP_AUTH_URL` | Blue Prism Authentication Server, e.g. `https://<auth-server>` |
 | `BP_CLIENT_ID` / `BP_CLIENT_SECRET` | OAuth2 client-credentials (service account) |
-| `BP_DATA_SOURCE` | `live` (default) / `mock` — in-memory fixtures, no estate needed |
+| `BP_DATA_SOURCE` | `live` (default) / `mock` — lean in-memory fixtures / `demo` — a larger populated estate, no estate needed |
 | `BP_API_VERIFY_SSL` | TLS verification (default `true`) |
 | `BP_API_PAGING_MODE` | `token` (v7 default) / `offset` / `none` / `auto` |
 | `BP_ENABLE_ACTIONS` | gate the Tier 3 control tools (default `false`) |
