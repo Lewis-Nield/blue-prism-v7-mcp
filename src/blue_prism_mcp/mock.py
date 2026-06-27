@@ -25,7 +25,7 @@ Seed it with your own data, or accept the small built-in fixtures below.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 
 # Fixtures are anchored to a "now" captured once at import, so the mock estate
 # always reads as the current day/week rather than drifting stale against a
@@ -1090,6 +1090,81 @@ def _session(
     }
 
 
+# The published process / worker pairs the historical backlog cycles through.
+# Every processName matches the demo catalogue so throughput_summary buckets the
+# generated runs and the downstream daily zero-fill lines up with a real process.
+_DEMO_HISTORY_PROCESSES = [
+    (_PROC_INVOICES, "Invoice Processing", _D_BOT_F01, "BOT-F01"),
+    (_D_PROC_PAYMENTS, "Payment Run", _D_BOT_F02, "BOT-F02"),
+    (_D_PROC_PAYROLL, "Payroll Run", _D_BOT_H01, "BOT-H01"),
+    (_PROC_ONBOARDING, "Customer Onboarding", _D_BOT_O01, "BOT-O01"),
+    (_D_PROC_COMPLIANCE, "Compliance Screening", _D_BOT_O02, "BOT-O02"),
+]
+
+# How many complete days of finished-session history the demo backlog spans. The
+# Intelligence quarter view reads 90 days AND its prior-period delta reads the 90
+# before that, so the backlog covers both off real data rather than a flat zero
+# series. Anything dated within this window still reads as legitimate recent
+# operational history, not a stale calendar month.
+_DEMO_HISTORY_DAYS = 180
+
+
+def _demo_history() -> list[dict]:
+    """A deterministic ~180-day backlog of finished sessions for the demo estate.
+
+    Volume and outcomes vary by day so the throughput chart has shape and the
+    STP-rate KPI moves period to period: weekdays are busier than weekends, and a
+    small termination fraction worsens over the most recent fortnight (a degrading
+    signal the deltas should pick up). Every session is past-dated (the foreground
+    list owns today) and references this estate's own processes and workers. A
+    pure function of the day offset — no RNG — so get_sessions() is reproducible
+    run to run and the tests can assert against the shape.
+    """
+    sessions: list[dict] = []
+    number = 100  # clear of the dozen explicit foreground sessions (1..12)
+    for days_ago in range(1, _DEMO_HISTORY_DAYS + 1):
+        day = _TODAY - timedelta(days=days_ago)
+        weekend = day.weekday() >= 5
+        # A weekday base with a gentle reproducible wave; a much lighter weekend.
+        volume = (6 if weekend else 20) + (days_ago * 3) % 7
+        # ~1 in 8 runs terminates over the most recent fortnight, ~1 in 16 before
+        # — so the recent STP rate reads materially worse than the prior period.
+        term_every = 8 if days_ago <= 14 else 16
+        for k in range(volume):
+            proc_id, proc_name, res_id, res_name = _DEMO_HISTORY_PROCESSES[
+                (days_ago + k) % len(_DEMO_HISTORY_PROCESSES)
+            ]
+            terminated = k % term_every == 0
+            # Spread the runs across the working day; both ends are >= a day ago,
+            # so any time of day stays safely in the past.
+            start_dt = datetime.combine(
+                day, time(6 + k % 12, k * 7 % 60), tzinfo=timezone.utc
+            )
+            end_dt = start_dt + timedelta(minutes=4 if terminated else 11)
+            stamp = "%Y-%m-%dT%H:%M:%SZ"
+            number += 1
+            if terminated:
+                reason = "ProcessError" if k % 2 == 0 else "InternalError"
+                sessions.append(
+                    _session(
+                        f"e8a9d7c2-5f10-4b3e-bd64-{number:012d}", number, proc_id,
+                        proc_name, res_id, res_name, "Terminated",
+                        start_dt.strftime(stamp), end_dt.strftime(stamp),
+                        termination=reason, exception_type="System Exception",
+                        exception_message=f"{proc_name} run failed",
+                    )
+                )
+            else:
+                sessions.append(
+                    _session(
+                        f"e8a9d7c2-5f10-4b3e-bd64-{number:012d}", number, proc_id,
+                        proc_name, res_id, res_name, "Completed",
+                        start_dt.strftime(stamp), end_dt.strftime(stamp),
+                    )
+                )
+    return sessions
+
+
 def demo_estate() -> MockBPClient:
     """A populated, relative-dated MockBPClient for end-to-end evaluation."""
     resources = [
@@ -1213,6 +1288,9 @@ def demo_estate() -> MockBPClient:
         _session("e8a9d7c2-5f10-4b3e-bd64-0000000d0312", 12, _PROC_INVOICES,
                  "Invoice Processing", _D_BOT_F02, "BOT-F02", "Running",
                  _ts(5, "16:00:00"), None),
+        # The ~180-day finished-session backlog behind the foreground twelve: the
+        # volume substrate the throughput history and STP trend read off.
+        *_demo_history(),
     ]
 
     schedules = [

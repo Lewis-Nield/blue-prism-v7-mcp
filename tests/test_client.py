@@ -16,7 +16,13 @@ import requests
 from blue_prism_mcp.cache import TTLCache
 from blue_prism_mcp.client import BPClient
 from blue_prism_mcp.config import BPConfig
-from blue_prism_mcp.mock import MockBPClient, _date, _ts, demo_estate
+from blue_prism_mcp.mock import (
+    _DEMO_HISTORY_DAYS,
+    MockBPClient,
+    _date,
+    _ts,
+    demo_estate,
+)
 
 
 def make_config(**overrides) -> BPConfig:
@@ -1232,8 +1238,34 @@ class TestDemoEstate:
 
     def test_every_session_reads_recent(self):
         # The whole point of the anchor: nothing dated to a stale calendar month.
+        # The horizon is the history backlog's span — a quarter's worth of days is
+        # still legitimate recent operational history, not a stale month.
         starts = [s["startTime"][:10] for s in demo_estate().get_sessions()]
-        assert starts and all(d >= _date(30) for d in starts)
+        assert starts and all(d >= _date(_DEMO_HISTORY_DAYS) for d in starts)
+
+    def test_history_volume_varies_weekday_vs_weekend(self):
+        # The chart needs shape: weekdays must out-run weekends on average, so a
+        # flat series can never pass. Group the backlog by day, classify each, and
+        # compare the means.
+        from collections import Counter
+        from datetime import date
+
+        by_day = Counter(s["startTime"][:10] for s in demo_estate().get_sessions())
+        weekday = [n for d, n in by_day.items() if date.fromisoformat(d).weekday() < 5]
+        weekend = [n for d, n in by_day.items() if date.fromisoformat(d).weekday() >= 5]
+        assert weekday and weekend
+        assert sum(weekday) / len(weekday) > sum(weekend) / len(weekend)
+
+    def test_history_carries_terminations_beyond_the_foreground(self):
+        # The STP-rate KPI can only move if the backlog itself terminates runs —
+        # not just the three explicit foreground failures. Look past the recent
+        # foreground window for a generated Terminated run.
+        terminated = [
+            s
+            for s in demo_estate().get_sessions()
+            if s["status"] == "Terminated" and s["startTime"][:10] < _date(7)
+        ]
+        assert terminated
 
     def test_workers_are_pooled_and_span_every_status(self):
         workers = demo_estate().get_resources()
