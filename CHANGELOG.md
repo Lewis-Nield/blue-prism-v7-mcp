@@ -14,7 +14,11 @@ additive endpoint is a minor bump.
   paused one, plus a healthy bulk), in-flight and silently-stale `Running`
   sessions, and a failed schedule. Lets the server (and a downstream console) be
   evaluated end-to-end against a lively estate, while the lean default fixtures
-  stay the minimal substrate the unit tests assert against.
+  stay the minimal substrate the unit tests assert against. Behind the foreground
+  sessions the estate now also carries a deterministic ~180-day backlog of
+  finished runs — weekdays busier than weekends, a termination fraction that
+  worsens over the most recent fortnight — so a downstream throughput history and
+  STP-rate trend have real, varied shape rather than a flat recent week.
 
 ### Changed
 - The mock estate now seeds one in-flight (`Running`) session, so mock mode
