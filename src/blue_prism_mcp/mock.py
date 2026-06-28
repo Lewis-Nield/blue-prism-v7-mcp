@@ -116,9 +116,12 @@ _DEFAULT_QUEUES: list[dict] = [
         "maxAttempts": 3,
         "pendingItemCount": 12,
         "completedItemCount": 340,
-        "lockedItemCount": 1,
+        # No items locked: a backlog with nothing in progress — the stalled
+        # case the L2 severity scorer flags (a Running queue with no resource
+        # draining it), as distinct from a deep-but-flowing backlog.
+        "lockedItemCount": 0,
         "exceptionedItemCount": 5,
-        "totalItemCount": 358,
+        "totalItemCount": 357,
         "averageWorkTime": "00:01:24",
         "groupName": "Finance",
     },
@@ -1194,13 +1197,17 @@ def demo_estate() -> MockBPClient:
     ]
 
     queues = [
-        # An SLA-breaching queue: a heavy exception backlog on a live queue.
+        # Loaded but flowing: a deep backlog actively being drained (items
+        # locked, a resource working them). Routine load, not a problem — the
+        # severity scorer must read this as ok however deep the backlog.
         _queue(_QUEUE_INVOICES, "Invoices", "Finance", "Running",
                pending=120, completed=812, locked=3, exceptioned=47,
                average="00:02:10", key_field="Invoice Number"),
-        # Degrading: exceptions building but not yet critical.
+        # Stalled: a Running queue holding a heavy backlog with NOTHING in
+        # progress (no items locked) — no resource is draining it. The genuine
+        # stuck case the scorer flags critical, distinct from Invoices' flow.
         _queue(_D_QUEUE_PAYMENTS, "Payments", "Finance", "Running",
-               pending=64, completed=540, locked=2, exceptioned=18,
+               pending=64, completed=540, locked=0, exceptioned=18,
                average="00:01:48", key_field="Payment Ref"),
         # Paused: work held, a small backlog waiting.
         _queue(_QUEUE_ONBOARDING, "Onboarding", "Operations", "Paused",
