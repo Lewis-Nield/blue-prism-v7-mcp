@@ -147,6 +147,19 @@ class TestMockClient:
         assert client.get_environment_variables() == [{"name": "V"}]
         assert client.get_process_groups() == [{"name": "G"}]
 
+    def test_get_resource_utilization_filters_from_start_date(self):
+        client = MockBPClient()
+        rows = client.get_resource_utilization(_date(1))
+        assert rows and all(r["utilizationDate"] >= _date(1) for r in rows)
+        assert any(r["utilizationDate"] == _date(0) for r in rows)
+        assert not any(r["utilizationDate"] == _date(2) for r in rows)
+
+    def test_get_resource_utilization_seed_overrides_default(self):
+        client = MockBPClient(resource_utilization=[{"utilizationDate": "2020-01-01"}])
+        assert client.get_resource_utilization("2020-01-01") == [
+            {"utilizationDate": "2020-01-01"}
+        ]
+
 
 # --- Live client: auth (mocked HTTP) -------------------------------------------
 
@@ -405,6 +418,60 @@ class TestPagination:
         assert second_call_params["startIndex"] == 2
 
 
+class TestPageNumberPagination:
+    """_get_paged_by_number — the resourceUtilization-only pageNumber/pageSize scheme."""
+
+    def test_single_short_page_stops_immediately(self):
+        client, session = make_client()
+        session.get.return_value = _resp({"items": [{"id": 1}]})
+        result = client._get_paged_by_number("/dashboards/resourceUtilization", page_size=5)
+        assert result == [{"id": 1}]
+        assert session.get.call_count == 1
+
+    def test_follows_full_pages_until_a_short_one(self):
+        client, session = make_client()
+        session.get.side_effect = [
+            _resp({"items": [{"id": 1}, {"id": 2}]}),
+            _resp({"items": [{"id": 3}]}),
+        ]
+        result = client._get_paged_by_number("/dashboards/resourceUtilization", page_size=2)
+        assert result == [{"id": 1}, {"id": 2}, {"id": 3}]
+        assert session.get.call_count == 2
+
+    def test_page_number_starts_at_one_and_increments(self):
+        # The client mutates and reuses one params dict across calls, so the
+        # params must be snapshotted (copied) at call time, not read back off
+        # call_args_list afterwards (which would all alias the final state).
+        client, session = make_client()
+        seen_page_numbers: list[int] = []
+        seen_page_sizes: list[int] = []
+
+        def _answer(url, headers, params, json, verify, timeout):
+            seen_page_numbers.append(params["pageNumber"])
+            seen_page_sizes.append(params["pageSize"])
+            return _resp({"items": [{"id": 1}, {"id": 2}]} if len(seen_page_numbers) == 1 else {"items": []})
+
+        session.get.side_effect = _answer
+        client._get_paged_by_number("/dashboards/resourceUtilization", page_size=2)
+        assert seen_page_numbers == [1, 2]
+        assert seen_page_sizes == [2, 2]
+
+    def test_max_pages_cap(self):
+        client, session = make_client(max_pages=2)
+        session.get.return_value = _resp({"items": [{"id": 1}, {"id": 2}]})  # always full
+        result = client._get_paged_by_number("/dashboards/resourceUtilization", page_size=2)
+        assert session.get.call_count == 2
+        assert len(result) == 4
+
+    def test_base_params_pass_through(self):
+        client, session = make_client()
+        session.get.return_value = _resp({"items": []})
+        client._get_paged_by_number(
+            "/dashboards/resourceUtilization", base_params={"startDate": "2026-01-01"}
+        )
+        assert session.get.call_args.kwargs["params"]["startDate"] == "2026-01-01"
+
+
 # --- Phase 2: extended reads (mocked HTTP) ------------------------------------
 
 
@@ -479,6 +546,35 @@ class TestExtendedReads:
         assert client.get_license_entitlement() == {"activeLicenseTypes": ["Enterprise"]}
         assert session.get.call_args.args[0].endswith("/dashboards/licensesEntitlement")
         client.get_license_entitlement()
+        session.get.assert_called_once()  # cached
+
+    def test_get_resource_utilization(self):
+        client, session = make_client()
+        session.get.return_value = _resp(
+            {
+                "items": [
+                    {
+                        "resourceId": "r1",
+                        "digitalWorkerName": "BOT-01",
+                        "utilizationDate": "2026-06-01",
+                        "usages": [0] * 24,
+                    }
+                ]
+            }
+        )
+        result = client.get_resource_utilization("2026-06-01")
+        assert result == [
+            {
+                "resourceId": "r1",
+                "digitalWorkerName": "BOT-01",
+                "utilizationDate": "2026-06-01",
+                "usages": [0] * 24,
+            }
+        ]
+        assert session.get.call_args.args[0].endswith("/dashboards/resourceUtilization")
+        assert session.get.call_args.kwargs["params"]["startDate"] == "2026-06-01"
+        assert session.get.call_args.kwargs["params"]["pageNumber"] == 1
+        client.get_resource_utilization("2026-06-01")
         session.get.assert_called_once()  # cached
 
     def test_get_queue_configurations(self):

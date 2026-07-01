@@ -574,6 +574,37 @@ _DEFAULT_ENVIRONMENT_VARIABLES: list[dict] = [
     },
 ]
 
+def _shift_usages(active_hours: range, minutes_per_hour: int = 55) -> list[int]:
+    """A 24-int usages row: `minutes_per_hour` worked in each of `active_hours`, 0 elsewhere."""
+    return [minutes_per_hour if h in active_hours else 0 for h in range(24)]
+
+
+def _heat_row(resource_id: str, name: str, days_ago: int, usages: list[int]) -> dict:
+    """One resourceUtilization row: a worker's heat-map for a single day."""
+    return {
+        "resourceId": resource_id,
+        "digitalWorkerName": name,
+        "utilizationDate": _date(days_ago),
+        "usages": usages,
+    }
+
+
+# ResourceUtilization rows — one per worker per day, 24 ints of minutes worked
+# per hour. BOT-03 (offline) has no rows at all: the raw feed only reports
+# workers it actually has data for, so a worker absent from the estate's
+# activity is absent here too, not zero-filled.
+_DEFAULT_RESOURCE_UTILIZATION: list[dict] = [
+    _heat_row("5d2c8e0a-71b4-4a8e-9f30-000000000001", "BOT-01", 2, _shift_usages(range(8, 17))),
+    _heat_row("5d2c8e0a-71b4-4a8e-9f30-000000000001", "BOT-01", 1, _shift_usages(range(8, 17))),
+    _heat_row("5d2c8e0a-71b4-4a8e-9f30-000000000001", "BOT-01", 0, _shift_usages(range(8, 12))),
+    _heat_row(
+        "5d2c8e0a-71b4-4a8e-9f30-000000000002", "BOT-02", 2, _shift_usages(range(9, 18), 40)
+    ),
+    _heat_row(
+        "5d2c8e0a-71b4-4a8e-9f30-000000000002", "BOT-02", 1, _shift_usages(range(9, 18), 40)
+    ),
+]
+
 # ProcessGroupItem rows — the flat descendant list of the process tree: a
 # folder (Group) and the published processes (Items) within it.
 _DEFAULT_PROCESS_GROUPS: list[dict] = [
@@ -621,6 +652,7 @@ class MockBPClient:
         resource_pools: list[dict] | None = None,
         environment_variables: list[dict] | None = None,
         process_groups: list[dict] | None = None,
+        resource_utilization: list[dict] | None = None,
     ) -> None:
         self._resources = resources if resources is not None else list(_DEFAULT_RESOURCES)
         self._queues = queues if queues is not None else [dict(q) for q in _DEFAULT_QUEUES]
@@ -683,6 +715,11 @@ class MockBPClient:
             process_groups
             if process_groups is not None
             else [dict(g) for g in _DEFAULT_PROCESS_GROUPS]
+        )
+        self._resource_utilization = (
+            resource_utilization
+            if resource_utilization is not None
+            else [dict(r) for r in _DEFAULT_RESOURCE_UTILIZATION]
         )
         self._session_counter = 0
         # Start-up parameters applied per session id (kept out of the session
@@ -844,6 +881,15 @@ class MockBPClient:
 
     def get_user_permissions(self) -> list[str]:
         return list(self._permissions)
+
+    def get_resource_utilization(self, start_date: str) -> list[dict]:
+        # Mirrors the live endpoint's one param: rows from start_date onward,
+        # no end bound (the tool layer filters down to its window).
+        return [
+            dict(r)
+            for r in self._resource_utilization
+            if (r.get("utilizationDate") or "") >= start_date
+        ]
 
     # --- Tier 3 writes (mutate the in-memory fixtures) ----------------------
     # Return shapes mirror the live client: retry answers {"attemptId": n},
@@ -1744,6 +1790,21 @@ def demo_estate() -> MockBPClient:
 
     deferred_by_queue = {_QUEUE_INVOICES: 6, _D_QUEUE_PAYMENTS: 2}
 
+    # A week of per-worker heat-map so resource_utilization has a real spread
+    # to aggregate: F01/F02 run a full 9-5 most days (saturated), O01 a lighter
+    # shift, and H02/O03 (the offline pair) report no rows at all — the "no
+    # data for an offline worker" case the estate roll-up must still average
+    # correctly across.
+    resource_utilization = [
+        row
+        for days_ago in range(7)
+        for row in (
+            _heat_row(_D_BOT_F01, "BOT-F01", days_ago, _shift_usages(range(8, 17))),
+            _heat_row(_D_BOT_F02, "BOT-F02", days_ago, _shift_usages(range(8, 17), 50)),
+            _heat_row(_D_BOT_O01, "BOT-O01", days_ago, _shift_usages(range(9, 13), 35)),
+        )
+    ]
+
     limits_and_usage = {
         "publishedProcessesLimit": None,
         "publishedProcessesUsed": 5,
@@ -1767,4 +1828,5 @@ def demo_estate() -> MockBPClient:
         schedule_logs=schedule_logs,
         deferred_by_queue=deferred_by_queue,
         limits_and_usage=limits_and_usage,
+        resource_utilization=resource_utilization,
     )

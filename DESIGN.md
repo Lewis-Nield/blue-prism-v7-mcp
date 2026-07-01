@@ -439,12 +439,38 @@ Sequenced as:
     field-by-field on 7.5.1 — `licensesEntitlement` shipped as the
     `license_entitlement` tool and `workQueueCompositions`' one net-new datum
     (`deferred`) folded into `list_queues`. Schedule run-history is still Phase 9.
-  - *Utilisation insight (deferred derived tool):* a `resource_utilization`
-    Tier-2 tool aggregating `resourceUtilization`'s 24h heat-map into per-worker
-    "% of available minutes worked over a window" — genuinely useful to any
-    consumer, not console-only. Held back from v0.4.0 because it needs (a)
-    page-*number* paging support added to the client (the API's only such read)
-    and (b) a deliberate aggregation/denominator design. Its own small release.
+  - *Utilisation insight (deferred derived tool — shaped, ready to build):* a
+    `resource_utilization` Tier-2 tool aggregating `resourceUtilization`'s 24h
+    heat-map into per-worker "% of available minutes worked over a window" —
+    genuinely useful to any consumer, not console-only. Held back from v0.4.0
+    because it needs (a) page-*number* paging support added to the client (the
+    API's only such read) and (b) a deliberate aggregation/denominator design.
+    Its own small release. **Design resolved by an L2-first consumer spike
+    (Custera):**
+    - *Contract shape — return the per-worker daily grain, not a collapsed
+      scalar.* The raw feed is already per-worker-per-day; returning that grain
+      plus a windowed roll-up is both more opinion-free and pre-satisfies the
+      demanding consumer (a windowed trend). Collapsing to one window would be
+      the engine *adding* opinion. Alongside each % return the raw
+      worked-minutes so no consumer is locked into our denominator.
+    - *Denominator = wall-clock minutes in the window* (24 × days) — the honest,
+      opinion-free choice. "vs. scheduled/online minutes" is a consumer
+      reframe and stays out of L1. An offline day counts as 0% worked against
+      full wall-clock (idle *is* the signal), not excluded from the denominator.
+    - *Estate roll-up = total-worked ÷ total-wall-clock* (true estate duty
+      cycle), not a mean of per-worker %s, which diverge when windows differ.
+    - *L1/L2 line:* L1 returns numbers (paging, raw read, the mechanical
+      minutes-worked ÷ wall-clock aggregation). Thresholds, "saturated"/severity,
+      trend persistence, and any denominator reframe are the consumer's (L2).
+      Leak test: the moment a `saturated` flag or severity band is wanted in the
+      return, opinion has crossed down.
+    - *Paging:* add a generic `_get_paged_by_number` helper, not a one-off —
+      future page-number reads may appear.
+    - *Skip* `resourcesSummaryUtilization`: the per-worker feed sums to the same
+      estate figure, so the aggregate endpoint is redundant.
+    - *Mock:* seed a plausible per-worker heat-map in the demo/mock estates so
+      downstream consumers can exercise it (engine-PR-first: a consumer's CI may
+      build against engine `main` HEAD).
   - *Context/console:* `workqueues/configurations` (the process→queue map console
     severity needs — L2), `resources/pools`, environment-variable reads, process groups.
 - **North star (not a near-term gap):** 7.5's `subscriptions` PATCH and work-queue

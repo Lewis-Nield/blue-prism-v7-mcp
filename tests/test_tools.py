@@ -1339,6 +1339,117 @@ class TestLicenseEntitlement:
         assert str(error) in result["unavailable"]
 
 
+class TestResourceUtilization:
+    def test_a_row_with_a_malformed_date_is_skipped_not_a_crash(self):
+        client = MockBPClient(
+            resource_utilization=[
+                {
+                    "resourceId": "r1",
+                    "digitalWorkerName": "BOT-BAD",
+                    "utilizationDate": "not-a-date",
+                    "usages": [10] * 24,
+                },
+                {
+                    "resourceId": "r2",
+                    "digitalWorkerName": "BOT-MISSING",
+                    "utilizationDate": None,
+                    "usages": [10] * 24,
+                },
+                {
+                    "resourceId": "r3",
+                    "digitalWorkerName": "BOT-OK",
+                    "utilizationDate": _date(0),
+                    "usages": [10] * 24,
+                },
+            ]
+        )
+        result = tier2(client)["resource_utilization"](start_date=_date(0), end_date=_date(0))
+        assert [w["worker"] for w in result["workers"]] == ["BOT-OK"]
+
+    def test_aggregates_daily_and_windowed_per_worker(self):
+        result = tier2()["resource_utilization"](
+            start_date=_date(2), end_date=_date(0)
+        )
+        workers = {w["worker"]: w for w in result["workers"]}
+        assert set(workers) == {"BOT-01", "BOT-02"}
+
+        bot01 = workers["BOT-01"]
+        assert [d["date"] for d in bot01["daily"]] == [_date(2), _date(1), _date(0)]
+        assert [d["worked_minutes"] for d in bot01["daily"]] == [495, 495, 220]
+        assert bot01["daily"][0]["wall_clock_minutes"] == 1440
+        assert bot01["daily"][0]["utilization_pct"] == 34.4
+        assert bot01["window_worked_minutes"] == 1210
+        assert bot01["window_wall_clock_minutes"] == 3 * 1440
+        assert bot01["window_utilization_pct"] == 28.0
+
+        # BOT-02 has no row on the most recent day — its window denominator
+        # still counts the full 3-day window (an idle day is 0%, not excluded).
+        bot02 = workers["BOT-02"]
+        assert len(bot02["daily"]) == 2
+        assert bot02["window_worked_minutes"] == 720
+        assert bot02["window_wall_clock_minutes"] == 3 * 1440
+        assert bot02["window_utilization_pct"] == 16.7
+
+    def test_ranked_highest_windowed_utilization_first(self):
+        result = tier2()["resource_utilization"](start_date=_date(2), end_date=_date(0))
+        assert [w["worker"] for w in result["workers"]] == ["BOT-01", "BOT-02"]
+        assert result["workers_meta"]["sorted_by"] == "window_utilization_pct desc"
+
+    def test_estate_rollup_is_total_worked_over_total_wall_clock(self):
+        result = tier2()["resource_utilization"](start_date=_date(2), end_date=_date(0))
+        assert result["estate_worked_minutes"] == 1210 + 720
+        assert result["estate_wall_clock_minutes"] == 2 * 3 * 1440
+        assert result["estate_utilization_pct"] == 22.3
+
+    def test_a_worker_absent_from_the_window_is_absent_from_the_result(self):
+        # Only today is in the window; BOT-02 has no row for today at all.
+        result = tier2()["resource_utilization"](start_date=_date(0), end_date=_date(0))
+        assert [w["worker"] for w in result["workers"]] == ["BOT-01"]
+        assert result["estate_wall_clock_minutes"] == 1440
+
+    def test_an_estate_with_no_data_in_window_reports_none_not_a_crash(self):
+        result = tier2()["resource_utilization"](start_date=_date(365), end_date=_date(365))
+        assert result["workers"] == []
+        assert result["estate_worked_minutes"] == 0
+        assert result["estate_wall_clock_minutes"] == 0
+        assert result["estate_utilization_pct"] is None
+
+    def test_missing_window_fails_loudly(self):
+        with pytest.raises(ValueError):
+            tier2()["resource_utilization"](start_date=None, end_date=_date(0))
+
+    def test_workers_list_is_capped_by_limit(self):
+        result = tier2()["resource_utilization"](
+            start_date=_date(2), end_date=_date(0), limit=1
+        )
+        assert len(result["workers"]) == 1
+        assert result["workers_meta"]["truncated"] is True
+        assert result["workers_meta"]["total"] == 2
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            requests.HTTPError("403 Forbidden"),
+            requests.Timeout("read timed out"),
+            requests.ConnectionError("connection refused"),
+        ],
+        ids=["denied", "timeout", "connection"],
+    )
+    def test_read_failure_degrades_visibly_not_fatally(self, error):
+        class NoUtilizationClient(MockBPClient):
+            def get_resource_utilization(self, start_date):
+                raise error
+
+        result = tier2(NoUtilizationClient())["resource_utilization"](
+            start_date=_date(2), end_date=_date(0)
+        )
+        assert result["workers"] == []
+        assert result["estate_worked_minutes"] is None
+        assert result["estate_utilization_pct"] is None
+        assert result["unavailable"].startswith("resource utilization read failed:")
+        assert str(error) in result["unavailable"]
+
+
 # --- Registration ------------------------------------------------------------------
 
 
@@ -1381,6 +1492,7 @@ class TestRegisterTools:
             "throughput_summary",
             "estate_health",
             "license_entitlement",
+            "resource_utilization",
         ]
         assert [fn.__name__ for fn in app.registered] == names
 

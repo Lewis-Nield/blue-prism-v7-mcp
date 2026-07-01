@@ -8,6 +8,9 @@ exception_summary (one queue), its estate-wide sibling estate_exception_summary
 Tier 1 reads, under the same required-window scoping. estate_health and
 license_entitlement read the two licence /dashboards endpoints this server
 consumes: current limits vs usage, and the per-tier entitlement ceilings.
+resource_utilization aggregates the third — the resourceUtilization heat-map —
+into per-worker minutes-worked-vs-wall-clock, mechanically (no thresholds or
+severity; that stays a consumer's L2 call).
 
 As with Tier 1, the domain logic lives on ``_Tier2InsightMixin`` (composed into
 ``Engine``) returning the full ranked records, and ``build_tier2_tools`` is the
@@ -17,6 +20,7 @@ thin MCP adapter applying the envelope representation.
 from __future__ import annotations
 
 from collections import Counter
+from datetime import datetime
 from typing import Callable
 
 from .common import (
@@ -33,6 +37,11 @@ from .common import (
 # Resource display statuses that demand operator attention, i.e. the worker is
 # down or degraded rather than merely busy/idle.
 _ATTENTION_STATUSES = frozenset({"Missing", "Offline", "Warning"})
+
+# Wall-clock minutes in a day — resource_utilization's honest, opinion-free
+# denominator (see DESIGN.md): an offline day counts as 0% worked against the
+# full day, not excluded from the window.
+_MINUTES_PER_DAY = 24 * 60
 
 # The BaseEntitlement keys (all lowercase in the API) mapped to readable names.
 _ENTITLEMENT_FIELDS = {
@@ -234,9 +243,97 @@ class _Tier2InsightMixin:
             "desktop": _entitlement_tier(raw.get("desktopEntitlement")),
         }
 
+    def resource_utilization(self, start_date: str, end_date: str) -> dict:
+        """Per-worker minutes worked vs wall-clock time, per day and over the window.
+
+        The mechanical L1 aggregation over the resourceUtilization heat-map:
+        no thresholds, no "saturated" opinion (that's a consumer's L2 call —
+        see DESIGN.md). The client only takes a start bound, so rows are
+        filtered down to `end_date` here. Each worker's `daily` rows keep the
+        raw per-day worked-minutes and wall-clock-minutes alongside the
+        percentage, so no consumer is locked into this denominator; the
+        windowed roll-up sums those same two figures across the window rather
+        than averaging daily percentages (which would misweight short days).
+        The estate roll-up is total-worked ÷ total-wall-clock across every
+        worker that reported any data — a true duty cycle, not a mean of
+        per-worker percentages (which would diverge when workers' data spans
+        differ).
+        """
+        require_window(start_date, end_date)
+        start = datetime.fromisoformat(start_date).date()
+        end = datetime.fromisoformat(end_date).date()
+        raw = read_or_unavailable(
+            lambda: self.client.get_resource_utilization(start_date),
+            "resource utilization read",
+        )
+        if "unavailable" in raw:
+            return {
+                "workers": rank([], sort_key=lambda r: 0, sorted_by="window_utilization_pct desc"),
+                "estate_worked_minutes": None,
+                "estate_wall_clock_minutes": None,
+                "estate_utilization_pct": None,
+                **raw,
+            }
+
+        window_wall_clock = (end - start).days + 1
+        window_wall_clock *= _MINUTES_PER_DAY
+
+        by_worker: dict[str, dict] = {}
+        for row in raw:
+            try:
+                row_date = datetime.fromisoformat(str(row.get("utilizationDate"))).date()
+            except (ValueError, TypeError):
+                continue
+            if row_date < start or row_date > end:
+                continue
+            usages = row.get("usages") or []
+            minutes = sum(usages)
+            worker = by_worker.setdefault(
+                row.get("resourceId"),
+                {
+                    "resource_id": row.get("resourceId"),
+                    "worker": row.get("digitalWorkerName"),
+                    "daily": [],
+                    "window_worked_minutes": 0,
+                },
+            )
+            worker["daily"].append(
+                {
+                    "date": row_date.isoformat(),
+                    "worked_minutes": minutes,
+                    "wall_clock_minutes": _MINUTES_PER_DAY,
+                    "utilization_pct": round(minutes / _MINUTES_PER_DAY * 100, 1),
+                }
+            )
+            worker["window_worked_minutes"] += minutes
+
+        total_worked = 0
+        for worker in by_worker.values():
+            worker["daily"].sort(key=lambda d: d["date"])
+            worker["window_wall_clock_minutes"] = window_wall_clock
+            worker["window_utilization_pct"] = round(
+                worker["window_worked_minutes"] / window_wall_clock * 100, 1
+            )
+            total_worked += worker["window_worked_minutes"]
+
+        estate_wall_clock = window_wall_clock * len(by_worker)
+        estate_pct = round(total_worked / estate_wall_clock * 100, 1) if estate_wall_clock else None
+
+        return {
+            "workers": rank(
+                list(by_worker.values()),
+                sort_key=lambda r: r.get("window_utilization_pct", 0),
+                sorted_by="window_utilization_pct desc",
+                reverse=True,
+            ),
+            "estate_worked_minutes": total_worked,
+            "estate_wall_clock_minutes": estate_wall_clock,
+            "estate_utilization_pct": estate_pct,
+        }
+
 
 def build_tier2_tools(engine) -> list[Callable]:
-    """Build the four insight tools as thin adapters over *engine*'s domain methods."""
+    """Build the insight tools as thin adapters over *engine*'s domain methods."""
 
     def exception_summary(
         queue: str, start_date: str, end_date: str, limit: int = DEFAULT_LIMIT
@@ -341,10 +438,46 @@ def build_tier2_tools(engine) -> list[Callable]:
         """
         return engine.license_entitlement()
 
+    def resource_utilization(
+        start_date: str, end_date: str, limit: int = DEFAULT_LIMIT
+    ) -> dict:
+        """Per-worker utilisation over a window: minutes worked vs wall-clock time.
+
+        `start_date`/`end_date` (ISO dates, REQUIRED) bound the window. Each
+        worker's row gives `daily` entries (date, worked_minutes,
+        wall_clock_minutes, utilization_pct) plus a windowed roll-up —
+        `window_worked_minutes`, `window_wall_clock_minutes` (24h × the days in
+        the window — an idle day counts as 0% worked, it is not excluded), and
+        `window_utilization_pct`. Ranked highest windowed utilisation first,
+        capped at `limit` (default 50). `estate_worked_minutes`/
+        `estate_wall_clock_minutes`/`estate_utilization_pct` give the
+        estate-wide duty cycle — total worked over total wall-clock across every
+        worker that reported data, NOT an average of the per-worker
+        percentages. Only raw minutes and percentages are returned; deciding
+        what counts as "saturated" is a consumer judgement, not this tool's.
+
+        The utilisation read needs a permission the account may lack; if it is
+        denied or fails, the result carries an `unavailable` note instead of
+        erroring, with the roll-up fields left null.
+        """
+        result = engine.resource_utilization(start_date, end_date)
+        capped = to_envelope(result["workers"], limit)
+        response = {
+            "workers": capped["items"],
+            "workers_meta": capped["meta"],
+            "estate_worked_minutes": result["estate_worked_minutes"],
+            "estate_wall_clock_minutes": result["estate_wall_clock_minutes"],
+            "estate_utilization_pct": result["estate_utilization_pct"],
+        }
+        if "unavailable" in result:
+            response["unavailable"] = result["unavailable"]
+        return response
+
     return [
         exception_summary,
         estate_exception_summary,
         throughput_summary,
         estate_health,
         license_entitlement,
+        resource_utilization,
     ]
