@@ -7,6 +7,13 @@ additive endpoint is a minor bump.
 
 ## [Unreleased]
 
+### Fixed
+- `TTLCache` now purges expired entries on every `set()`, not just when the
+  same key is re-read — a key written once and never requested again used to
+  sit in the store forever. Bounds memory growth for a long-lived embedded
+  host doing many distinct per-id reads over days or weeks. No API or
+  behaviour change for reads.
+
 ## [0.8.0] — 2026-07-01
 A populated demo estate, so the server (and a downstream console) can be
 evaluated end-to-end without a live Blue Prism estate. No tool surface or

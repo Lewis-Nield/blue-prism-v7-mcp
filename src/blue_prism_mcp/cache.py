@@ -45,7 +45,10 @@ class TTLCache:
     within a short window, bound to one client instance rather than a
     process-global store. A single lock guards the whole store so concurrent
     workers sharing a client never see a half-written or torn entry (the expiry
-    delete in `get` must run under the lock too).
+    delete in `get` must run under the lock too). `set` also sweeps expired
+    entries so a long-lived host reading many distinct keys over days doesn't
+    grow the store unbounded — a key written once and never re-read would
+    otherwise sit forever, since `get` only expires the exact key it's asked for.
     """
 
     def __init__(self, ttl: float) -> None:
@@ -69,7 +72,13 @@ class TTLCache:
 
     def set(self, key: Any, value: Any) -> None:
         with self._lock:
-            self._store[key] = (time.monotonic(), value)
+            now = time.monotonic()
+            expired = [
+                k for k, (stored_at, _) in self._store.items() if now - stored_at >= self._ttl
+            ]
+            for k in expired:
+                del self._store[k]
+            self._store[key] = (now, value)
 
     def clear(self) -> None:
         with self._lock:
