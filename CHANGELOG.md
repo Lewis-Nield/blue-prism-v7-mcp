@@ -7,6 +7,10 @@ additive endpoint is a minor bump.
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-07-01
+Governance hardening for long-lived embedding hosts: identity on the audit
+line and a memory bound on the cache. No tool surface or control-plane change.
+
 ### Added
 - `bind_actor(actor, scrub_text)` in `governance.py`: a context manager that
   binds a per-call identity onto every Tier 3 audit line written inside it,

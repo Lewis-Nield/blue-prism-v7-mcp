@@ -12,7 +12,7 @@ is scrubbed at the tool boundary (optional Presidio backend).
 
 ## Status
 
-**Current release: v0.8.0** — see [CHANGELOG.md](CHANGELOG.md) for the full
+**Current release: v0.9.0** — see [CHANGELOG.md](CHANGELOG.md) for the full
 release history. The **v0.1.0 foundation** was built in eight phases against
 the plan in [DESIGN.md](DESIGN.md):
 
