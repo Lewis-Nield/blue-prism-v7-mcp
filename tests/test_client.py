@@ -974,9 +974,7 @@ class TestMockExtended:
         # items updated later that same day. The exceptioned Invoices item sits
         # 7 days back, the completed one 8 — so a single-day window isolates it.
         client = MockBPClient()
-        items = client.get_queue_items(
-            _queue_id(client), start_date=_date(7), end_date=_date(7)
-        )
+        items = client.get_queue_items(_queue_id(client), start_date=_date(7), end_date=_date(7))
         assert [i["keyValue"] for i in items] == ["INV-1002"]
 
     def test_get_queue_items_filters_by_user_status_text(self):
@@ -1320,12 +1318,12 @@ class TestDemoEstate:
 
     def test_notable_sessions_carry_a_stage_log(self):
         client = demo_estate()
-        logged = [s["sessionId"] for s in client.get_sessions() if client.get_session_log(s["sessionId"])]
+        logged = [
+            s["sessionId"] for s in client.get_sessions() if client.get_session_log(s["sessionId"])
+        ]
         assert logged  # the lean-fixture fallback (different ids) would leave this empty
         assert any(
-            e["stageType"] == "Exception"
-            for sid in logged
-            for e in client.get_session_log(sid)
+            e["stageType"] == "Exception" for sid in logged for e in client.get_session_log(sid)
         )
 
 

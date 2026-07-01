@@ -76,7 +76,7 @@ for the full annotated template. The short version:
 | `BP_API_BASE_URL` | v7 API base, e.g. `https://<server>/api/v7` — **required (live)** |
 | `BP_AUTH_URL` | Authentication Server base — **required (live)** |
 | `BP_CLIENT_ID` / `BP_CLIENT_SECRET` | service-account credentials — **required (live)** |
-| `BP_DATA_SOURCE` | `live` (default) / `mock` — mock runs the full surface on in-memory fixtures, no estate needed |
+| `BP_DATA_SOURCE` | `live` (default) / `mock` — lean in-memory fixtures / `demo` — a larger populated estate; both run the full surface with no estate needed |
 | `BP_API_VERIFY_SSL` | TLS verification (default `true`) |
 | `BP_PII_BACKEND` | `null` (default) / `regex` / `presidio` — fails loud at startup if the backend can't load |
 | `BP_PII_CUSTOM_PATTERNS` | JSON array of `{"name", "pattern"}` domain identifiers |
@@ -112,7 +112,9 @@ only, all logging goes to stderr. For Claude Desktop
 ```
 
 To evaluate without an estate, the whole `env` block can be just
-`{"BP_DATA_SOURCE": "mock"}`.
+`{"BP_DATA_SOURCE": "mock"}` — or `"demo"` for a larger, more realistic estate
+(varied queue health, in-flight/stale sessions, a failed schedule, months of
+session history) that's a better fit for a live walkthrough.
 
 ## Enabling the action surface
 

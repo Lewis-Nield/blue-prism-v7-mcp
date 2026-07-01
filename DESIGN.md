@@ -77,6 +77,18 @@ library it was always implicitly built on.
   client is lazy, so without that check a misconfigured server would register
   a tool surface where every call fails. Governance does not relax in mock
   mode: enabling actions still requires the audit path.
+- **`demo` is a populated sibling of `mock`, not a replacement (v0.8.0).**
+  `BP_DATA_SOURCE=demo` runs the same `MockBPClient` seeded with `demo_estate()`
+  — a lively, realistic estate (pooled workers across departments, queues in
+  varied health including a stalled-but-not-empty one, in-flight and silently
+  stale sessions, a failed schedule, and a deterministic ~180-day session
+  history with real weekday/weekend and error-mix shape) so a demo or a
+  downstream console has something worth looking at end-to-end. The lean
+  default `mock` fixtures stay untouched as the minimal substrate the unit
+  tests assert against — `demo` is additive, evaluation-only, and carries no
+  tool-surface or control-plane change. Fixture timestamps for both are
+  anchored relative to import time, never a hardcoded calendar date, so
+  neither estate drifts stale.
 - **Session-log read is in v1.** `get_session_log` is the highest-value agentic
   read ("why did this run fail?"). It is a second PII vector beyond exception
   messages (stage data can carry item payloads) and therefore routes through the
