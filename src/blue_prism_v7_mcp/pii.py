@@ -39,7 +39,7 @@ from typing import TYPE_CHECKING, Callable, Protocol, runtime_checkable
 if TYPE_CHECKING:
     from .config import BPConfig
 
-_log = logging.getLogger("blue_prism_mcp.pii")
+_log = logging.getLogger("blue_prism_v7_mcp.pii")
 
 # Replacement operator: (entity_type, matched_text) -> replacement text.
 Replacement = Callable[[str, str], str]
@@ -221,7 +221,7 @@ class PresidioScrubber:
             raise ScrubberUnavailableError(
                 "pii_backend is 'presidio' but the Presidio libraries are not "
                 "installed — install the package with the [pii] extra "
-                '(pip install "blue-prism-mcp[pii]").'
+                '(pip install "blue-prism-v7-mcp[pii]").'
             ) from exc
 
         self._operator_config = OperatorConfig

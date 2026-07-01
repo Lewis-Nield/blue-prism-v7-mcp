@@ -12,11 +12,11 @@ import json
 import pytest
 import requests
 
-from blue_prism_mcp.config import BPConfig
-from blue_prism_mcp.engine import Engine
-from blue_prism_mcp.mock import MockBPClient, _date, _ts
-from blue_prism_mcp.pii import NullScrubber, RegexScrubber, ScrubResult
-from blue_prism_mcp.tools import (
+from blue_prism_v7_mcp.config import BPConfig
+from blue_prism_v7_mcp.engine import Engine
+from blue_prism_v7_mcp.mock import MockBPClient, _date, _ts
+from blue_prism_v7_mcp.pii import NullScrubber, RegexScrubber, ScrubResult
+from blue_prism_v7_mcp.tools import (
     DEFAULT_LIMIT,
     build_tier1_tools,
     build_tier2_tools,
@@ -25,7 +25,7 @@ from blue_prism_mcp.tools import (
     register_tools,
     resolve_id,
 )
-from blue_prism_mcp.tools.common import require_window, validate_choice, validate_iso
+from blue_prism_v7_mcp.tools.common import require_window, validate_choice, validate_iso
 
 
 class MarkerScrubber:

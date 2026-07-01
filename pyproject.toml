@@ -3,7 +3,7 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "blue-prism-mcp"
+name = "blue-prism-v7-mcp"
 version = "0.10.0"
 description = "Distributable Model Context Protocol server for Blue Prism v7 Enterprise — governed LLM access to the estate over the supported REST API."
 readme = "README.md"
@@ -44,7 +44,7 @@ dev = [
 [project.scripts]
 # Console entrypoint: builds the server from the environment and runs the
 # stdio transport. See server.py and DEPLOYMENT.md.
-blue-prism-mcp = "blue_prism_mcp.server:main"
+blue-prism-v7-mcp = "blue_prism_v7_mcp.server:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -53,8 +53,8 @@ where = ["src"]
 testpaths = ["tests"]
 
 [tool.coverage.run]
-source = ["blue_prism_mcp"]
-# The `python -m blue_prism_mcp` shim is a three-line delegate to server.main.
+source = ["blue_prism_v7_mcp"]
+# The `python -m blue_prism_v7_mcp` shim is a three-line delegate to server.main.
 # It is exercised by the end-to-end tests (which launch the module as a
 # subprocess), but subprocess execution is invisible to in-process coverage,
 # so measuring it would force a permanent false gap. Omit it; the E2E proves it.
@@ -79,7 +79,7 @@ extend-select = ["B"]
 # working dir and runs the suite against each mutant; survivors flag behaviour
 # the tests don't actually pin. Expect equivalent mutants in the survivor list —
 # triage by hand, don't chase a 100% kill rate.
-source_paths = ["src/blue_prism_mcp/"]
+source_paths = ["src/blue_prism_v7_mcp/"]
 # test_handshake.py launches the packaged server as a real subprocess; that does
 # not survive mutmut's stream-capturing runner (I/O on a closed file) and it
 # pins no production logic the audit measures — it is an end-to-end smoke test.

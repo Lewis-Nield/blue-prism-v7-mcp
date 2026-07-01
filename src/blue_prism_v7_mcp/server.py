@@ -33,13 +33,13 @@ from .mock import MockBPClient, demo_estate
 from .pii import ScrubberUnavailableError, build_scrubber
 from .tools import register_tools
 
-_log = logging.getLogger("blue_prism_mcp.server")
+_log = logging.getLogger("blue_prism_v7_mcp.server")
 
-SERVER_NAME = "blue-prism-mcp"
+SERVER_NAME = "blue-prism-v7-mcp"
 
 # Marks the stderr handler _configure_logging installs, so a re-entrant call
 # recognises its own handler and stays idempotent instead of stacking more.
-_OUR_HANDLER_MARK = "_blue_prism_mcp_handler"
+_OUR_HANDLER_MARK = "_blue_prism_v7_mcp_handler"
 
 # Connection settings a LIVE deployment cannot run without, as (config
 # attribute, environment variable) pairs — the error names the env vars
@@ -161,7 +161,7 @@ def _configure_logging() -> None:
         setattr(handler, _OUR_HANDLER_MARK, True)
         root.addHandler(handler)
     root.setLevel(logging.WARNING)
-    logging.getLogger("blue_prism_mcp").setLevel(logging.INFO)
+    logging.getLogger("blue_prism_v7_mcp").setLevel(logging.INFO)
 
 
 def main() -> None:

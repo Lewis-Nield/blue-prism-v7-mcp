@@ -15,8 +15,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from blue_prism_mcp.config import BPConfig
-from blue_prism_mcp.governance import (
+from blue_prism_v7_mcp.config import BPConfig
+from blue_prism_v7_mcp.governance import (
     TOOL_PERMISSIONS,
     UNRETIRE_EXTRA_PERMISSION,
     AuditLog,
@@ -28,10 +28,10 @@ from blue_prism_mcp.governance import (
     unsatisfied_clauses,
     validate_actor,
 )
-from blue_prism_mcp.mock import _DEFAULT_PERMISSIONS, MockBPClient, _date
-from blue_prism_mcp.pii import NullScrubber
-from blue_prism_mcp.tools import build_tier3_tools, register_tools
-from blue_prism_mcp.tools.common import validate_uuid
+from blue_prism_v7_mcp.mock import _DEFAULT_PERMISSIONS, MockBPClient, _date
+from blue_prism_v7_mcp.pii import NullScrubber
+from blue_prism_v7_mcp.tools import build_tier3_tools, register_tools
+from blue_prism_v7_mcp.tools.common import validate_uuid
 
 ALL_ACTION_TOOLS = {
     "retry_queue_item",
@@ -512,7 +512,7 @@ class TestBindActor:
         # one every other tool-boundary field goes through) and passes it
         # into bind_actor, rather than a raw Scrubber — proves the two
         # actually compose, not just that bind_actor accepts a callable.
-        from blue_prism_mcp.tools.common import make_cached_scrub
+        from blue_prism_v7_mcp.tools.common import make_cached_scrub
 
         audit = make_audit(tmp_path)
         scrub_text = make_cached_scrub(NullScrubber())

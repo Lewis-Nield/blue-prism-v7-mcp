@@ -1,11 +1,20 @@
 # Changelog
 
-All notable changes to **blue-prism-mcp** are recorded here. The format follows
+All notable changes to **blue-prism-v7-mcp** are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Pre-1.0, every
 additive endpoint is a minor bump.
 
 ## [Unreleased]
+
+### Changed
+- **Renamed the project `blue-prism-mcp` → `blue-prism-v7-mcp`** (distribution,
+  console script, and import package `blue_prism_mcp` → `blue_prism_v7_mcp`),
+  matching the repository and stating the actual scope: this server targets the
+  v7 Enterprise REST API specifically, not Blue Prism generally. Breaking for
+  embedders (update the dependency name and imports); the environment contract
+  (`BP_*`) and the tool surface are unchanged. Done pre-publication, so no
+  released artifact carries the old name.
 
 ## [0.10.0] — 2026-07-01
 Utilisation insight: the `resourceUtilization` heat-map, aggregated into a
@@ -140,7 +149,7 @@ in-process (consuming ranked records to apply its own representation) and share
 one client safely across worker threads.
 
 ### Added
-- `Engine` — a first-class facade over the read surface (`blue_prism_mcp.Engine`)
+- `Engine` — a first-class facade over the read surface (`blue_prism_v7_mcp.Engine`)
   with one method per Tier 1 visibility and Tier 2 insight tool. Each returns the
   *domain* result — the full relevance-sorted records, already scrubbed at the
   PII boundaries, with **no top-N truncation** — as a `Ranked` (list tools) or a
@@ -151,7 +160,7 @@ one client safely across worker threads.
   meta) in `tools.common`. The existing `envelope()` is retained as the
   `to_envelope(rank(...))` composition.
 - `Cache` protocol and a thread-safe `TTLCache` default in a new
-  `blue_prism_mcp.cache` module. `BPClient` accepts an injected `cache=`
+  `blue_prism_v7_mcp.cache` module. `BPClient` accepts an injected `cache=`
   (defaulting to a per-instance `TTLCache`), so a long-lived multi-threaded host
   can supply a shared/Redis-backed store.
 - Public package exports for embedding: `Engine`, `Ranked`, `Cache`, `TTLCache`,
@@ -282,15 +291,15 @@ First runnable release — the foundation, built in eight phases (see
 - FastMCP stdio server, a first-class mock run mode, console entrypoint, and
   deployment / day-one verification docs.
 
-[Unreleased]: https://github.com/8m7nyv54n5-ux/blue-prism-v7-mcp/compare/v0.10.0...HEAD
-[0.10.0]: https://github.com/8m7nyv54n5-ux/blue-prism-v7-mcp/compare/v0.9.0...v0.10.0
-[0.9.0]: https://github.com/8m7nyv54n5-ux/blue-prism-v7-mcp/compare/v0.8.0...v0.9.0
-[0.8.0]: https://github.com/8m7nyv54n5-ux/blue-prism-v7-mcp/compare/v0.7.0...v0.8.0
-[0.7.0]: https://github.com/8m7nyv54n5-ux/blue-prism-v7-mcp/compare/v0.6.0...v0.7.0
-[0.6.0]: https://github.com/8m7nyv54n5-ux/blue-prism-v7-mcp/compare/v0.5.0...v0.6.0
-[0.5.0]: https://github.com/8m7nyv54n5-ux/blue-prism-v7-mcp/compare/v0.4.0...v0.5.0
-[0.4.0]: https://github.com/8m7nyv54n5-ux/blue-prism-v7-mcp/compare/v0.3.0...v0.4.0
-[0.3.0]: https://github.com/8m7nyv54n5-ux/blue-prism-v7-mcp/compare/v0.2.0...v0.3.0
-[0.2.0]: https://github.com/8m7nyv54n5-ux/blue-prism-v7-mcp/compare/v0.1.1...v0.2.0
-[0.1.1]: https://github.com/8m7nyv54n5-ux/blue-prism-v7-mcp/compare/v0.1.0...v0.1.1
-[0.1.0]: https://github.com/8m7nyv54n5-ux/blue-prism-v7-mcp/releases/tag/v0.1.0
+[Unreleased]: https://github.com/Lewis-Nield/blue-prism-v7-mcp/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/Lewis-Nield/blue-prism-v7-mcp/compare/v0.9.0...v0.10.0
+[0.9.0]: https://github.com/Lewis-Nield/blue-prism-v7-mcp/compare/v0.8.0...v0.9.0
+[0.8.0]: https://github.com/Lewis-Nield/blue-prism-v7-mcp/compare/v0.7.0...v0.8.0
+[0.7.0]: https://github.com/Lewis-Nield/blue-prism-v7-mcp/compare/v0.6.0...v0.7.0
+[0.6.0]: https://github.com/Lewis-Nield/blue-prism-v7-mcp/compare/v0.5.0...v0.6.0
+[0.5.0]: https://github.com/Lewis-Nield/blue-prism-v7-mcp/compare/v0.4.0...v0.5.0
+[0.4.0]: https://github.com/Lewis-Nield/blue-prism-v7-mcp/compare/v0.3.0...v0.4.0
+[0.3.0]: https://github.com/Lewis-Nield/blue-prism-v7-mcp/compare/v0.2.0...v0.3.0
+[0.2.0]: https://github.com/Lewis-Nield/blue-prism-v7-mcp/compare/v0.1.1...v0.2.0
+[0.1.1]: https://github.com/Lewis-Nield/blue-prism-v7-mcp/compare/v0.1.0...v0.1.1
+[0.1.0]: https://github.com/Lewis-Nield/blue-prism-v7-mcp/releases/tag/v0.1.0

@@ -10,8 +10,8 @@ import sys
 
 import pytest
 
-from blue_prism_mcp.config import BPConfig
-from blue_prism_mcp.pii import (
+from blue_prism_v7_mcp.config import BPConfig
+from blue_prism_v7_mcp.pii import (
     NullScrubber,
     PresidioScrubber,
     RegexScrubber,
@@ -146,7 +146,7 @@ def test_regex_scrubber_adjacent_spans_do_not_count_as_overlapping():
 
 def test_regex_scrubber_audit_log_names_types_but_never_content(caplog):
     # The audit-trail contract: entity types are logged, raw PII never is.
-    with caplog.at_level("INFO", logger="blue_prism_mcp.pii"):
+    with caplog.at_level("INFO", logger="blue_prism_v7_mcp.pii"):
         RegexScrubber().scrub("mail maria@example.com about NI QQ 12 34 56 C")
     messages = " ".join(r.getMessage() for r in caplog.records)
     assert "EMAIL_ADDRESS" in messages and "UK_NI_NUMBER" in messages

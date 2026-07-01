@@ -11,7 +11,7 @@ python -m spacy download en_core_web_sm   # only needed for the [pii] backend
 ## The checks
 
 ```bash
-pytest --cov=blue_prism_mcp --cov-report=term-missing   # tests + coverage
+pytest --cov=blue_prism_v7_mcp --cov-report=term-missing   # tests + coverage
 ruff check .                                            # lint (E/F + bugbear)
 mutmut run && mutmut results                            # mutation audit (periodic)
 ```
