@@ -1,6 +1,6 @@
 """Tests for the environment-variable contract of BPConfig (Phase 1)."""
 
-from blue_prism_mcp.config import BPConfig
+from blue_prism_v7_mcp.config import BPConfig
 
 
 def test_from_env_defaults_with_empty_environment():
@@ -41,7 +41,7 @@ def test_from_env_reads_all_fields():
             "BP_API_PAGE_OFFSET_PARAM": "skip",
             "BP_ENABLE_ACTIONS": "true",
             "BP_DATA_SOURCE": "mock",
-            "BP_AUDIT_LOG_PATH": "/var/log/blue-prism-mcp/audit.jsonl",
+            "BP_AUDIT_LOG_PATH": "/var/log/blue-prism-v7-mcp/audit.jsonl",
             "BP_PII_BACKEND": "regex",
             "BP_PII_SPACY_MODEL": "en_core_web_lg",
             "BP_PII_CUSTOM_PATTERNS": '[{"name": "CLIENT_REF", "pattern": "CLT-\\\\d{8}"}]',
@@ -63,7 +63,7 @@ def test_from_env_reads_all_fields():
     assert cfg.page_offset_param == "skip"
     assert cfg.enable_actions is True
     assert cfg.data_source == "mock"
-    assert cfg.audit_log_path == "/var/log/blue-prism-mcp/audit.jsonl"
+    assert cfg.audit_log_path == "/var/log/blue-prism-v7-mcp/audit.jsonl"
     assert cfg.pii_backend == "regex"
     assert cfg.pii_spacy_model == "en_core_web_lg"
     assert cfg.pii_custom_patterns == (("CLIENT_REF", "CLT-\\d{8}"),)

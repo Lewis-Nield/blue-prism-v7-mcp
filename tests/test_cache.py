@@ -10,7 +10,7 @@ from __future__ import annotations
 import threading
 import time
 
-from blue_prism_mcp.cache import MISS, Cache, TTLCache
+from blue_prism_v7_mcp.cache import MISS, Cache, TTLCache
 
 
 class TestTTLCache:
@@ -33,7 +33,7 @@ class TestTTLCache:
 
     def test_entry_expires_at_the_ttl_boundary(self, monkeypatch):
         clock = [1000.0]
-        monkeypatch.setattr("blue_prism_mcp.cache.time.monotonic", lambda: clock[0])
+        monkeypatch.setattr("blue_prism_v7_mcp.cache.time.monotonic", lambda: clock[0])
         cache = TTLCache(ttl=30)
         cache.set("k", "v")
         clock[0] += 29.0
@@ -44,7 +44,7 @@ class TestTTLCache:
     def test_ttl_zero_always_misses(self, monkeypatch):
         # A tied monotonic() reading must still expire (>= boundary), so ttl=0
         # is a working "never cache" setting regardless of clock resolution.
-        monkeypatch.setattr("blue_prism_mcp.cache.time.monotonic", lambda: 1000.0)
+        monkeypatch.setattr("blue_prism_v7_mcp.cache.time.monotonic", lambda: 1000.0)
         cache = TTLCache(ttl=0)
         cache.set("k", "v")
         assert cache.get("k") is MISS
@@ -65,7 +65,7 @@ class TestTTLCache:
         # has to do the sweeping for keys nobody reads again (the long-lived
         # embedded-host scenario).
         clock = [1000.0]
-        monkeypatch.setattr("blue_prism_mcp.cache.time.monotonic", lambda: clock[0])
+        monkeypatch.setattr("blue_prism_v7_mcp.cache.time.monotonic", lambda: clock[0])
         cache = TTLCache(ttl=30)
         for i in range(50):
             cache.set(f"stale{i}", i)  # each write is never read again
@@ -83,7 +83,7 @@ class TestTTLCache:
         # expired exactly at the TTL, not just strictly past it) — otherwise
         # the two expiry checks disagree on a tied monotonic() reading.
         clock = [1000.0]
-        monkeypatch.setattr("blue_prism_mcp.cache.time.monotonic", lambda: clock[0])
+        monkeypatch.setattr("blue_prism_v7_mcp.cache.time.monotonic", lambda: clock[0])
         cache = TTLCache(ttl=30)
         cache.set("k", "v")
         clock[0] += 30.0  # exactly at the boundary

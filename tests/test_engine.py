@@ -12,10 +12,10 @@ from __future__ import annotations
 import pytest
 import requests
 
-from blue_prism_mcp.engine import Engine
-from blue_prism_mcp.mock import MockBPClient, _date
-from blue_prism_mcp.pii import NullScrubber, ScrubResult
-from blue_prism_mcp.tools.common import Ranked, to_envelope
+from blue_prism_v7_mcp.engine import Engine
+from blue_prism_v7_mcp.mock import MockBPClient, _date
+from blue_prism_v7_mcp.pii import NullScrubber, ScrubResult
+from blue_prism_v7_mcp.tools.common import Ranked, to_envelope
 
 
 class MarkerScrubber:

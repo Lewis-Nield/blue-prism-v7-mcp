@@ -14,11 +14,11 @@ import sys
 import pytest
 from mcp.server.fastmcp import FastMCP
 
-from blue_prism_mcp.client import BPClient
-from blue_prism_mcp.config import BPConfig
-from blue_prism_mcp.mock import MockBPClient
-from blue_prism_mcp.pii import ScrubberUnavailableError
-from blue_prism_mcp.server import SERVER_NAME, build_client, build_server, main
+from blue_prism_v7_mcp.client import BPClient
+from blue_prism_v7_mcp.config import BPConfig
+from blue_prism_v7_mcp.mock import MockBPClient
+from blue_prism_v7_mcp.pii import ScrubberUnavailableError
+from blue_prism_v7_mcp.server import SERVER_NAME, build_client, build_server, main
 
 CONNECTION_ENV_VARS = ("BP_API_BASE_URL", "BP_AUTH_URL", "BP_CLIENT_ID", "BP_CLIENT_SECRET")
 
@@ -72,7 +72,7 @@ def tool_names(app: FastMCP) -> set[str]:
 def clean_logging():
     """Snapshot/restore root logging state — main() adds a root handler."""
     root = logging.getLogger()
-    pkg = logging.getLogger("blue_prism_mcp")
+    pkg = logging.getLogger("blue_prism_v7_mcp")
     saved = (list(root.handlers), root.level, pkg.level)
     yield
     root.handlers[:], root.level, pkg.level = saved[0], saved[1], saved[2]
@@ -164,18 +164,18 @@ class TestBuildServer:
         assert tool_names(app) == READ_TOOLS
 
     def test_handshake_reports_this_artifacts_version(self):
-        # serverInfo.version must identify blue-prism-mcp, not the mcp
+        # serverInfo.version must identify blue-prism-v7-mcp, not the mcp
         # library FastMCP defaults to.
-        import blue_prism_mcp
+        import blue_prism_v7_mcp
 
         app = build_server(BPConfig(data_source="mock"))
-        assert app._mcp_server.version == blue_prism_mcp.__version__
+        assert app._mcp_server.version == blue_prism_v7_mcp.__version__
 
     def test_version_wiring_fails_loud_when_the_private_seam_is_gone(self):
         # The mcp pins are ranges: a future-compatible release could rename or
         # drop FastMCP._mcp_server.version. Better a loud, actionable startup
         # error than a silently wrong version in every handshake.
-        from blue_prism_mcp.server import _apply_server_version
+        from blue_prism_v7_mcp.server import _apply_server_version
 
         class NoSeam:  # FastMCP-shaped enough to call, missing the version seam
             pass
@@ -184,7 +184,7 @@ class TestBuildServer:
             _apply_server_version(NoSeam(), "9.9.9")
 
     def test_version_wiring_happy_path_sets_the_lowlevel_version(self):
-        from blue_prism_mcp.server import _apply_server_version
+        from blue_prism_v7_mcp.server import _apply_server_version
 
         class Seam:
             version = None
@@ -235,7 +235,7 @@ class TestBuildServer:
         assert "4929 1234" not in blob  # the fixture's raw reference never leaves
 
     def test_startup_line_reports_the_surface_without_secrets(self, caplog):
-        with caplog.at_level(logging.INFO, logger="blue_prism_mcp.server"):
+        with caplog.at_level(logging.INFO, logger="blue_prism_v7_mcp.server"):
             build_server(BPConfig(data_source="mock", client_secret="s3cret"))
         startup = caplog.records[-1].getMessage()
         assert "21 tools" in startup
@@ -279,7 +279,7 @@ class TestMain:
         # A seam failure in build_server routes through main()'s startup-error
         # net: an operator sees a one-line message, not an AttributeError
         # traceback, and the transport never starts.
-        from blue_prism_mcp import server
+        from blue_prism_v7_mcp import server
 
         bare_env.setenv("BP_DATA_SOURCE", "mock")
 
@@ -297,7 +297,7 @@ class TestMain:
     def test_repeated_configuration_does_not_stack_handlers(self, clean_logging):
         # main() may run more than once in-process; logging setup must be
         # idempotent or every line would duplicate per extra handler.
-        from blue_prism_mcp.server import _configure_logging
+        from blue_prism_v7_mcp.server import _configure_logging
 
         _configure_logging()
         after_first = len(logging.getLogger().handlers)
@@ -318,5 +318,5 @@ class TestMain:
         assert sys.stderr in streams
         assert all(stream is not sys.stdout for stream in streams)
         # Our own startup lines stay visible; libraries are capped at WARNING.
-        assert logging.getLogger("blue_prism_mcp").level == logging.INFO
+        assert logging.getLogger("blue_prism_v7_mcp").level == logging.INFO
         assert root.level == logging.WARNING

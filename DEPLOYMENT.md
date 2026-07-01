@@ -1,6 +1,6 @@
 # Deployment
 
-How to run blue-prism-mcp against a Blue Prism v7 Enterprise estate: the
+How to run blue-prism-v7-mcp against a Blue Prism v7 Enterprise estate: the
 service account it needs, the environment contract, wiring it into an MCP
 client, and the day-one verification checklist for the action surface.
 
@@ -21,8 +21,8 @@ client, and the day-one verification checklist for the action surface.
 ## Install
 
 ```bash
-pip install blue-prism-mcp            # light base: MCP runtime + HTTP client
-pip install "blue-prism-mcp[pii]"     # + Presidio NER scrubbing (optional)
+pip install blue-prism-v7-mcp            # light base: MCP runtime + HTTP client
+pip install "blue-prism-v7-mcp[pii]"     # + Presidio NER scrubbing (optional)
 python -m spacy download en_core_web_sm   # only for [pii]
 ```
 
@@ -98,7 +98,7 @@ only, all logging goes to stderr. For Claude Desktop
 {
   "mcpServers": {
     "blue-prism": {
-      "command": "blue-prism-mcp",
+      "command": "blue-prism-v7-mcp",
       "env": {
         "BP_API_BASE_URL": "https://bp-api.example.com/api/v7",
         "BP_AUTH_URL": "https://bp-auth.example.com",

@@ -1,6 +1,6 @@
-# blue-prism-mcp
+# blue-prism-v7-mcp
 
-[![CI](https://github.com/8m7nyv54n5-ux/blue-prism-v7-mcp/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/8m7nyv54n5-ux/blue-prism-v7-mcp/actions/workflows/ci.yml)
+[![CI](https://github.com/Lewis-Nield/blue-prism-v7-mcp/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Lewis-Nield/blue-prism-v7-mcp/actions/workflows/ci.yml)
 
 A distributable **Model Context Protocol (MCP) server for Blue Prism v7
 Enterprise**. It gives an LLM agent governed access to a Blue Prism estate over
@@ -41,21 +41,21 @@ gracefully to 7.1, but the control tools need 7.2).
 ## Install
 
 ```bash
-pip install blue-prism-mcp            # light base: MCP runtime + HTTP client
-pip install "blue-prism-mcp[pii]"     # + Presidio PII scrubbing
+pip install blue-prism-v7-mcp            # light base: MCP runtime + HTTP client
+pip install "blue-prism-v7-mcp[pii]"     # + Presidio PII scrubbing
 python -m spacy download en_core_web_sm   # if using [pii] (lg/_trf: better recall)
 ```
 
 ## Run
 
-The `blue-prism-mcp` console script speaks the MCP stdio transport — point any
+The `blue-prism-v7-mcp` console script speaks the MCP stdio transport — point any
 MCP client at it (see [DEPLOYMENT.md](DEPLOYMENT.md) for a Claude Desktop
 config example and the full rollout guide). To try the entire tool surface
 with no estate and no credentials:
 
 ```bash
-BP_DATA_SOURCE=mock blue-prism-mcp   # lean fixtures — what the unit tests assert against
-BP_DATA_SOURCE=demo blue-prism-mcp   # a populated estate — best for a demo or walkthrough
+BP_DATA_SOURCE=mock blue-prism-v7-mcp   # lean fixtures — what the unit tests assert against
+BP_DATA_SOURCE=demo blue-prism-v7-mcp   # a populated estate — best for a demo or walkthrough
 ```
 
 `demo` runs the same offline client seeded with a larger, lived-in estate:
@@ -111,7 +111,7 @@ full relevance-sorted records — already scrubbed, with name resolution and lou
 validation — leaving the representation (paging, shaping) to the host:
 
 ```python
-from blue_prism_mcp import Engine, BPClient, BPConfig, build_scrubber
+from blue_prism_v7_mcp import Engine, BPClient, BPConfig, build_scrubber
 
 config = BPConfig(...)            # or BPConfig.from_env()
 engine = Engine(BPClient(config), build_scrubber(config))

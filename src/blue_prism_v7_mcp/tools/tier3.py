@@ -46,7 +46,7 @@ from .common import (
     validate_uuid,
 )
 
-_log = logging.getLogger("blue_prism_mcp.tier3")
+_log = logging.getLogger("blue_prism_v7_mcp.tier3")
 
 _ITEM_ID_HINT = "Use list_queue_items to find the item's id (not its key value)."
 

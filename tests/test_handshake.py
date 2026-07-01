@@ -6,7 +6,7 @@ can never silently regress, and proves the surface against a genuine MCP client
 rather than hand-rolled frames.
 
 Two angles, both launching the actual artifact as a subprocess
-(``python -m blue_prism_mcp``, mock data source — no estate, no credentials):
+(``python -m blue_prism_v7_mcp``, mock data source — no estate, no credentials):
 
   * the real ``mcp`` client driving initialize -> tools/list -> tools/call, and
   * a raw subprocess asserting that nothing but JSON-RPC ever reaches stdout.
@@ -25,7 +25,7 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.types import LATEST_PROTOCOL_VERSION
 
-from blue_prism_mcp import __version__
+from blue_prism_v7_mcp import __version__
 
 # The full read surface the mock server must advertise — the same set
 # build_server registers, asserted here through a real client handshake.
@@ -55,7 +55,7 @@ READ_TOOLS = {
 
 # Launch the artifact the way an operator would, but by module so PATH
 # resolution of the console script never enters the picture.
-_LAUNCH = [sys.executable, "-m", "blue_prism_mcp"]
+_LAUNCH = [sys.executable, "-m", "blue_prism_v7_mcp"]
 
 # A window bounding both end-to-end paths — the raw subprocess and the real
 # client session — so a deadlock or protocol mismatch fails loudly instead of
@@ -108,7 +108,7 @@ class TestRealClientHandshake:
 
         # serverInfo identifies THIS artifact and THIS version (the guarded
         # _mcp_server.version seam, now observed through a real client).
-        assert init.serverInfo.name == "blue-prism-mcp"
+        assert init.serverInfo.name == "blue-prism-v7-mcp"
         assert init.serverInfo.version == __version__
 
         # The mock server advertises exactly the read surface.
@@ -175,5 +175,5 @@ class TestStdoutHygiene:
             assert message.get("jsonrpc") == "2.0"
 
         # And the startup log line went where it belongs: stderr, not stdout.
-        assert "blue-prism-mcp ready" in proc.stderr
-        assert "blue-prism-mcp ready" not in proc.stdout
+        assert "blue-prism-v7-mcp ready" in proc.stderr
+        assert "blue-prism-v7-mcp ready" not in proc.stdout

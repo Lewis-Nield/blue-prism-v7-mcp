@@ -13,10 +13,10 @@ from unittest.mock import MagicMock
 import pytest
 import requests
 
-from blue_prism_mcp.cache import TTLCache
-from blue_prism_mcp.client import BPClient
-from blue_prism_mcp.config import BPConfig
-from blue_prism_mcp.mock import (
+from blue_prism_v7_mcp.cache import TTLCache
+from blue_prism_v7_mcp.client import BPClient
+from blue_prism_v7_mcp.config import BPConfig
+from blue_prism_v7_mcp.mock import (
     _DEMO_HISTORY_DAYS,
     MockBPClient,
     _date,
@@ -290,7 +290,7 @@ class TestBPClient:
     def test_an_injected_cache_is_the_one_used(self):
         # The embeddable core (Phase 8) lets a host inject a shared cache; prove
         # the client reads/writes through the injected instance, not a default.
-        from blue_prism_mcp.cache import MISS
+        from blue_prism_v7_mcp.cache import MISS
 
         class SpyCache:
             def __init__(self):

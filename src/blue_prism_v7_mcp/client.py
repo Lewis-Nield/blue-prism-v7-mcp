@@ -33,7 +33,7 @@ import requests
 from .cache import MISS, Cache, TTLCache
 from .config import BPConfig
 
-logger = logging.getLogger("blue_prism_mcp.client")
+logger = logging.getLogger("blue_prism_v7_mcp.client")
 
 # Refresh the OAuth2 token this many seconds before its stated expiry, so a
 # token never goes stale mid-request. The 401 retry in _request remains the
