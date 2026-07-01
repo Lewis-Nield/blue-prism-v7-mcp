@@ -486,17 +486,41 @@ Sequenced as:
   `start_process`'s permission clause (a process permission **and** `Control
   Resource`); the Stopped transition is a day-one live-verification item — the
   same posture as the v1 writes the spec underdocuments.
-- **Phase 11 — `actor` on the audit line (planned).** The Tier 3 audit currently
-  records the tool, its arguments, and the event status — but not *who* invoked
-  it. Identity is a generic governance concern (it belongs here, not in a
-  consumer), so the audit line should gain an optional `actor` field threaded as
-  a parameter through `build_tier3_tools`' `_run` to `AuditLog.record` — never
-  through any prompt, and scrubbed like every other field (a subject/name, never
-  free text). Until this lands, a host that needs identity-bearing audit records
-  it in its own store at the propose/execute boundary; the Custera console does
-  exactly that for its Control phase. Pull this forward when an embedding host
-  (orchestration, or a live deployment) needs one canonical audit line carrying
-  identity rather than correlating two logs.
+- **Phase 11 — `actor` on the audit line.** The Tier 3 audit records the tool,
+  its arguments, and the event status; identity — *who* invoked it — is a
+  generic governance concern (it belongs here, not in a consumer). A first
+  pass threaded `actor` as a **build-time** parameter (`register_tools` →
+  `build_tier3_tools` → `_run` → `AuditLog.record`, fixed once per
+  registration) but that shape cannot fit a host like the Custera console:
+  its `ControlFacade` builds the engine's tool closures **once**, long-lived
+  and shared, while `ControlService.propose`/`.execute` take a *different*
+  `Actor` **per call** on that same shared facade. A build-time actor can
+  only express one identity per built tool set.
+  The shape that fits: `bind_actor(actor, scrub_text)` in `governance.py`, a
+  context manager over an ambient `contextvars.ContextVar` that
+  `AuditLog.record` reads — never a tool parameter, so identity never enters
+  the model-facing schema, and `build_tier3_tools`/`register_tools` need no
+  `actor` param at all. `scrub_text` is the same cached scrub function every
+  other tool-boundary field already goes through (`make_cached_scrub`, built
+  once — e.g. an engine's `scrub_text`), not a raw `Scrubber`: code review on
+  the first draft surfaced that an actor identity recurs across a session's
+  calls at least as often as row text does, so it belongs behind the same
+  cache rather than re-scrubbing on every bind. A host wraps each dispatch in
+  it (e.g. Custera's `ControlService` wraps each
+  `self._facade.dry_run(...)`/`.execute(...)` call in
+  `with bind_actor(actor.sub, engine.scrub_text): ...`) and every audit line
+  written inside picks up that identity, scrubbed like any other name.
+  `ContextVar` propagates through `asyncio.create_task` and
+  `asyncio.to_thread`/anyio's `to_thread.run_sync` (the path FastAPI's
+  sync-route dispatch uses) — verified, not assumed, since both explicitly
+  copy the calling context before handing off. It does **not** propagate into
+  a bare `loop.run_in_executor` call, which submits to the executor with no
+  context copy; a host dispatching that way must route through
+  `asyncio.to_thread` instead or lose the bound actor silently. The
+  standalone server never binds one, so its audit lines are unaffected.
+  Consuming this from Custera's `ControlService` (wiring `bind_actor` around
+  each dispatch, retiring the `proposed_by`/`executed_by` store workaround or
+  keeping it alongside) is a Custera-side change, tracked there.
 
 ## Conventions
 - The stdio transport speaks JSON-RPC over stdout; nothing else may write there.

@@ -22,6 +22,14 @@ Two pieces gate every action tool:
    status code — because exception *messages* can echo request/response
    content, and estate exception text is a scrub target.
 
+   Each line can also carry an `actor` — the identity of who invoked the
+   action. Identity is per-call, not per-process (an embedding host may
+   share one long-lived tool set across many end users), so `actor` is
+   never a tool parameter: a host binds it around each dispatch with
+   `bind_actor`, which sets an ambient `contextvars.ContextVar` that
+   `AuditLog.record` reads. The standalone server never binds one, so its
+   audit lines simply carry no `actor`.
+
 Both fail loud: actions enabled without an audit path, an unwritable audit
 file, or a failed permissions call refuse to start rather than running an
 action surface ungoverned — the same posture as the PII backend selection.
@@ -30,9 +38,11 @@ action surface ungoverned — the same posture as the PII backend selection.
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable, Iterator
 
 # The documented permission names per endpoint (7.5.1 spec, endpoint
 # descriptions). A tool's requirement is a tuple of clauses; every clause must
@@ -68,6 +78,59 @@ TOOL_PERMISSIONS: dict[str, tuple[tuple[str, ...], ...]] = {
 }
 
 UNRETIRE_EXTRA_PERMISSION = "Create Schedule"
+
+_MAX_ACTOR_LEN = 256
+
+_actor_var: ContextVar[str | None] = ContextVar("bp_mcp_actor", default=None)
+
+
+def validate_actor(value: str | None) -> str | None:
+    """Return a bounded, non-empty *actor* identity, or None if none was given.
+
+    `actor` is a host-supplied identity, never a prompt argument, so a value
+    that is empty after stripping or absurdly long is a caller bug worth
+    naming rather than silently truncating or dropping.
+    """
+    if value is None:
+        return None
+    stripped = str(value).strip()
+    if not stripped:
+        raise ValueError("actor must not be empty when supplied.")
+    if len(stripped) > _MAX_ACTOR_LEN:
+        raise ValueError(f"actor must be at most {_MAX_ACTOR_LEN} characters; got {len(stripped)}.")
+    return stripped
+
+
+@contextmanager
+def bind_actor(
+    actor: str | None, scrub_text: Callable[[str | None], str | None]
+) -> Iterator[None]:
+    """Bind *actor* onto every audit line `AuditLog.record` writes inside this
+    context, validated and scrubbed like any other name reaching the log.
+
+    A host wraps each dispatch to a shared, long-lived tool set in this —
+    never a tool parameter, so identity never enters the model-facing
+    schema. *scrub_text* is the same cached scrub function every other
+    tool-boundary field already goes through (`make_cached_scrub`, built
+    once — e.g. an engine's `scrub_text`), not a raw `Scrubber`: an actor
+    identity recurs across a session's calls at least as often as row text
+    does, so it belongs behind the same cache.
+
+    `contextvars.ContextVar` propagates automatically into an
+    `asyncio.create_task` and into `asyncio.to_thread` (and anyio's
+    `to_thread.run_sync`, the path FastAPI's sync-route dispatch uses) —
+    both explicitly copy the calling context before handing off. It does
+    NOT propagate into a bare `loop.run_in_executor` call, which submits to
+    the executor with no context copy; a host dispatching that way would
+    lose the bound actor silently and must wrap the call in
+    `asyncio.to_thread` (or copy the context itself) instead.
+    """
+    scrubbed = scrub_text(validate_actor(actor))
+    token = _actor_var.set(scrubbed)
+    try:
+        yield
+    finally:
+        _actor_var.reset(token)
 
 
 def holds(permissions: Iterable[str], required: str) -> bool:
@@ -126,6 +189,9 @@ class AuditLog:
             "status": status,
             "args": args,
         }
+        actor = _actor_var.get()
+        if actor is not None:
+            entry["actor"] = actor
         if detail is not None:
             entry["detail"] = detail
         with self.path.open("a", encoding="utf-8") as handle:

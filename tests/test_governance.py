@@ -8,6 +8,7 @@ All tool tests run over MockBPClient, whose writes mutate the in-memory
 fixtures — so "the dry run changed nothing" is a real read-back assertion.
 """
 
+import asyncio
 import inspect
 import json
 from types import SimpleNamespace
@@ -20,10 +21,12 @@ from blue_prism_mcp.governance import (
     UNRETIRE_EXTRA_PERMISSION,
     AuditLog,
     audit_detail,
+    bind_actor,
     build_audit_log,
     holds,
     resolve_capabilities,
     unsatisfied_clauses,
+    validate_actor,
 )
 from blue_prism_mcp.mock import _DEFAULT_PERMISSIONS, MockBPClient, _date
 from blue_prism_mcp.pii import NullScrubber
@@ -414,6 +417,151 @@ class TestAuditDetail:
         exc = RuntimeError("boom")
         exc.response = object()
         assert audit_detail(exc) == "RuntimeError"
+
+
+class TestValidateActor:
+    def test_none_passes_through(self):
+        assert validate_actor(None) is None
+
+    def test_strips_whitespace(self):
+        assert validate_actor("  alice@example.com  ") == "alice@example.com"
+
+    @pytest.mark.parametrize("value", ["", "   "])
+    def test_empty_after_stripping_fails_loud(self, value):
+        with pytest.raises(ValueError, match="actor must not be empty"):
+            validate_actor(value)
+
+    def test_over_length_fails_loud(self):
+        with pytest.raises(ValueError, match="256 characters"):
+            validate_actor("x" * 257)
+
+    def test_at_the_length_boundary_passes(self):
+        assert validate_actor("x" * 256) == "x" * 256
+
+
+def _passthrough(text):
+    return text
+
+
+def _upper(text):
+    # Makes scrubbing observable: a passthrough would make "bind_actor
+    # scrubs" indistinguishable from "bind_actor forgot to scrub".
+    return text.upper() if text is not None else None
+
+
+class TestBindActor:
+    def test_sets_the_actor_on_every_line_recorded_inside(self, tmp_path):
+        audit = make_audit(tmp_path)
+        with bind_actor("alice", _passthrough):
+            audit.record("t", {}, status="dry_run")
+        assert read_audit(audit)[0]["actor"] == "alice"
+
+    def test_no_actor_bound_means_no_actor_field(self, tmp_path):
+        audit = make_audit(tmp_path)
+        audit.record("t", {}, status="dry_run")
+        assert "actor" not in read_audit(audit)[0]
+
+    def test_resets_after_the_context_exits(self, tmp_path):
+        audit = make_audit(tmp_path)
+        with bind_actor("alice", _passthrough):
+            pass
+        audit.record("t", {}, status="dry_run")
+        assert "actor" not in read_audit(audit)[0]
+
+    def test_resets_even_when_the_body_raises(self, tmp_path):
+        audit = make_audit(tmp_path)
+        with pytest.raises(RuntimeError):
+            with bind_actor("alice", _passthrough):
+                raise RuntimeError("boom")
+        audit.record("t", {}, status="dry_run")
+        assert "actor" not in read_audit(audit)[0]
+
+    def test_nested_binds_restore_the_outer_actor(self, tmp_path):
+        audit = make_audit(tmp_path)
+        with bind_actor("alice", _passthrough):
+            with bind_actor("bob", _passthrough):
+                audit.record("t", {}, status="dry_run")
+            audit.record("t", {}, status="dry_run")
+        actors = [e["actor"] for e in read_audit(audit)]
+        assert actors == ["bob", "alice"]
+
+    def test_actor_is_scrubbed_before_it_reaches_the_audit_line(self, tmp_path):
+        audit = make_audit(tmp_path)
+        with bind_actor("alice", _upper):
+            audit.record("t", {}, status="dry_run")
+        assert read_audit(audit)[0]["actor"] == "ALICE"
+
+    def test_none_actor_never_lands_on_the_audit_line(self, tmp_path):
+        # scrub_text is called with None (it's contractually None-safe, like
+        # make_cached_scrub's wrapper), but nothing must bind onto the line.
+        audit = make_audit(tmp_path)
+        with bind_actor(None, _passthrough):
+            audit.record("t", {}, status="dry_run")
+        assert "actor" not in read_audit(audit)[0]
+
+    def test_invalid_actor_is_rejected_before_binding(self, tmp_path):
+        audit = make_audit(tmp_path)
+        with pytest.raises(ValueError, match="actor must not be empty"):
+            with bind_actor("   ", _passthrough):
+                pass  # pragma: no cover - validate_actor raises before the body runs
+        audit.record("t", {}, status="dry_run")
+        assert "actor" not in read_audit(audit)[0]
+
+    def test_composes_with_the_real_cached_scrub_helper(self, tmp_path):
+        # The intended wiring: a host builds one cached scrub_text (the same
+        # one every other tool-boundary field goes through) and passes it
+        # into bind_actor, rather than a raw Scrubber — proves the two
+        # actually compose, not just that bind_actor accepts a callable.
+        from blue_prism_mcp.tools.common import make_cached_scrub
+
+        audit = make_audit(tmp_path)
+        scrub_text = make_cached_scrub(NullScrubber())
+        with bind_actor("alice", scrub_text):
+            audit.record("t", {}, status="dry_run")
+        assert read_audit(audit)[0]["actor"] == "alice"
+
+    @pytest.mark.parametrize(
+        "dispatch, propagates",
+        [
+            ("create_task", True),
+            ("to_thread", True),
+            ("run_in_executor", False),
+        ],
+    )
+    def test_contextvar_propagation_across_asyncio_dispatch(
+        self, tmp_path, dispatch, propagates
+    ):
+        # An embedding host dispatches per-request work across asyncio's
+        # concurrency primitives; the bound actor must follow wherever
+        # contextvars actually propagate, and must NOT silently reappear
+        # where they don't. asyncio.create_task and asyncio.to_thread (like
+        # anyio's to_thread.run_sync, the path FastAPI's sync-route dispatch
+        # uses) explicitly copy the calling context before handing off; a
+        # bare loop.run_in_executor call submits directly, with no copy.
+        audit = make_audit(tmp_path)
+
+        def record():
+            audit.record("t", {}, status="dry_run")
+
+        async def record_task():
+            record()
+
+        async def run():
+            with bind_actor("alice", _passthrough):
+                if dispatch == "create_task":
+                    await asyncio.create_task(record_task())
+                elif dispatch == "to_thread":
+                    await asyncio.to_thread(record)
+                else:
+                    loop = asyncio.get_running_loop()
+                    await loop.run_in_executor(None, record)
+
+        asyncio.run(run())
+        entry = read_audit(audit)[0]
+        if propagates:
+            assert entry["actor"] == "alice"
+        else:
+            assert "actor" not in entry
 
 
 class TestPostWriteAuditFailures:
