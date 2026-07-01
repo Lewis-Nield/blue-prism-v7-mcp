@@ -7,6 +7,22 @@ additive endpoint is a minor bump.
 
 ## [Unreleased]
 
+### Added
+- `bind_actor(actor, scrub_text)` in `governance.py`: a context manager that
+  binds a per-call identity onto every Tier 3 audit line written inside it,
+  via an ambient `contextvars.ContextVar` that `AuditLog.record` reads. An
+  embedding host wraps each dispatch to its (long-lived, shared) tool set in
+  this — `actor` is never a tool parameter, so identity never enters the
+  model-facing schema and a single built tool set can attribute a different
+  identity to each call. `scrub_text` is a cached scrub function
+  (`make_cached_scrub`, e.g. an engine's `scrub_text`), the same one every
+  other tool-boundary field already goes through, not a raw `Scrubber` — an
+  actor identity recurs across a session at least as often as row text does.
+  Propagates through `asyncio.create_task` and `asyncio.to_thread`/anyio's
+  `to_thread.run_sync` (the path FastAPI's sync-route dispatch uses); does
+  **not** propagate into a bare `loop.run_in_executor` call. The standalone
+  server never binds one, so its audit lines are unaffected.
+
 ### Fixed
 - `TTLCache` now purges expired entries on every `set()`, not just when the
   same key is re-read — a key written once and never requested again used to
