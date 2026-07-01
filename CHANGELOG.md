@@ -7,18 +7,25 @@ additive endpoint is a minor bump.
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-07-01
+A populated demo estate, so the server (and a downstream console) can be
+evaluated end-to-end without a live Blue Prism estate. No tool surface or
+control-plane change — fixtures and mock-mode behaviour only.
+
 ### Added
 - `BP_DATA_SOURCE=demo` (and `demo_estate()`): a populated offline estate built
   on the same `MockBPClient` — pooled workers across departments (working/idle/
   offline), queues in varied health (an SLA-breaching backlog, a degrading one, a
-  paused one, plus a healthy bulk), in-flight and silently-stale `Running`
-  sessions, and a failed schedule. Lets the server (and a downstream console) be
-  evaluated end-to-end against a lively estate, while the lean default fixtures
-  stay the minimal substrate the unit tests assert against. Behind the foreground
-  sessions the estate now also carries a deterministic ~180-day backlog of
-  finished runs — weekdays busier than weekends, a termination fraction that
-  worsens over the most recent fortnight — so a downstream throughput history and
-  STP-rate trend have real, varied shape rather than a flat recent week.
+  stalled-but-not-empty one, a paused one, plus a healthy flowing bulk),
+  in-flight and silently-stale `Running` sessions, and a failed schedule. Lets
+  the server be evaluated end-to-end against a lively estate, while the lean
+  default fixtures stay the minimal substrate the unit tests assert against.
+  Behind the foreground sessions the estate also carries a deterministic
+  ~180-day backlog of finished runs — weekdays busier than weekends, a
+  termination fraction that worsens over the most recent fortnight, and a
+  genuine mix of process/internal error reasons — so a downstream throughput
+  history and STP-rate trend have real, varied shape rather than a flat recent
+  week.
 
 ### Changed
 - The mock estate now seeds one in-flight (`Running`) session, so mock mode
@@ -30,6 +37,16 @@ additive endpoint is a minor bump.
   calendar date, so the estate always reads as the current day/week instead of
   drifting stale. Date-dependent tests compute their expectations off the same
   anchor helpers, so they stay green as time passes.
+- The demo estate's queue fixtures now distinguish a deep-but-flowing backlog
+  (items locked and being worked) from a stalled one (pending work, nothing
+  locked) — a pending count alone isn't a problem, an undrained one is.
+
+### Fixed
+- The demo history's terminated runs always carried the same failure reason
+  (`ProcessError`) — an always-true guard made `InternalError` unreachable, so
+  `throughput_summary`'s process-vs-internal error split was silently always
+  zero on the backlog. The reason now varies by day, giving the backlog a real
+  mix of both.
 
 ## [0.7.0] — 2026-06-16
 Deeper reads — pushing the filtering the v7 API already supports down into the
@@ -216,7 +233,8 @@ First runnable release — the foundation, built in eight phases (see
 - FastMCP stdio server, a first-class mock run mode, console entrypoint, and
   deployment / day-one verification docs.
 
-[Unreleased]: https://github.com/8m7nyv54n5-ux/blue-prism-v7-mcp/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/8m7nyv54n5-ux/blue-prism-v7-mcp/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/8m7nyv54n5-ux/blue-prism-v7-mcp/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/8m7nyv54n5-ux/blue-prism-v7-mcp/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/8m7nyv54n5-ux/blue-prism-v7-mcp/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/8m7nyv54n5-ux/blue-prism-v7-mcp/compare/v0.4.0...v0.5.0

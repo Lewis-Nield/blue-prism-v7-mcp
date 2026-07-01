@@ -12,8 +12,9 @@ is scrubbed at the tool boundary (optional Presidio backend).
 
 ## Status
 
-The **v0.1.0 foundation** was built in eight phases against the plan in
-[DESIGN.md](DESIGN.md):
+**Current release: v0.8.0** — see [CHANGELOG.md](CHANGELOG.md) for the full
+release history. The **v0.1.0 foundation** was built in eight phases against
+the plan in [DESIGN.md](DESIGN.md):
 
 - [x] Phase 0 — Scaffold
 - [x] Phase 1 — Decouple the client into `BPClient`
@@ -53,8 +54,17 @@ config example and the full rollout guide). To try the entire tool surface
 with no estate and no credentials:
 
 ```bash
-BP_DATA_SOURCE=mock blue-prism-mcp
+BP_DATA_SOURCE=mock blue-prism-mcp   # lean fixtures — what the unit tests assert against
+BP_DATA_SOURCE=demo blue-prism-mcp   # a populated estate — best for a demo or walkthrough
 ```
+
+`demo` runs the same offline client seeded with a larger, lived-in estate:
+worker pools across departments, queues in varied health (an SLA-breaching
+backlog, a stalled one, a paused one, a healthy flowing one), an in-flight and
+a silently-stale session, a failed schedule, and months of session history —
+enough shape to point `throughput_summary` or `estate_health` at and get a real
+answer back. `mock` stays deliberately lean; use it if you're integrating
+against the tool surface rather than looking at it.
 
 Live mode fails loud at startup — missing connection settings, an unloadable
 PII backend, or a missing audit path refuse to start rather than serve a
