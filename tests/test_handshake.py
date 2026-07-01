@@ -50,6 +50,7 @@ READ_TOOLS = {
     "throughput_summary",
     "estate_health",
     "license_entitlement",
+    "resource_utilization",
 }
 
 # Launch the artifact the way an operator would, but by module so PATH

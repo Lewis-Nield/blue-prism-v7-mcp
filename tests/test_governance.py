@@ -962,6 +962,7 @@ READ_TOOLS = [
     "throughput_summary",
     "estate_health",
     "license_entitlement",
+    "resource_utilization",
 ]
 
 

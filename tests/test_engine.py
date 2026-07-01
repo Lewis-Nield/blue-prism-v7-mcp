@@ -127,6 +127,15 @@ class TestEstateHealthComposite:
         assert "workers_total" in health and "license_usage" in health
 
 
+class TestResourceUtilizationComposite:
+    """resource_utilization returns a composite whose workers list is a Ranked."""
+
+    def test_workers_is_a_ranked_for_the_adapter_to_cap(self):
+        result = make_engine().resource_utilization(_date(2), _date(0))
+        assert isinstance(result["workers"], Ranked)
+        assert "estate_utilization_pct" in result
+
+
 class TestValidationStaysInTheDomain:
     """An embedder gets the same loud validation the MCP tools do."""
 

@@ -287,6 +287,40 @@ class BPClient:
 
         return collected
 
+    def _get_paged_by_number(
+        self, path: str, base_params: dict | None = None, *, page_size: int | None = None
+    ) -> list:
+        """Fetch every page of a page-NUMBER-paged endpoint and return a flat list.
+
+        `resourceUtilization` is the API's one endpoint paged by pageNumber/
+        pageSize rather than the itemsPerPage/pagingToken token scheme every
+        other collection uses (see get_resource_utilization) — kept generic,
+        not a one-off, so a future page-number-paged read can reuse it. Pages
+        start at 1 (the API's convention; distinct from the offset scheme's
+        0-based start) and the loop stops on a short page (fewer items than
+        requested) or an empty one, capped by max_pages like the token/offset
+        loop.
+        """
+        cfg = self._config
+        size = page_size or cfg.page_size
+        params = dict(base_params or {})
+        params["pageSize"] = size
+        collected: list = []
+        for page in range(1, cfg.max_pages + 1):
+            params["pageNumber"] = page
+            body = self._get(path, params=params)
+            items, _ = self._unpack_page(body)
+            collected.extend(items)
+            if len(items) < size:
+                break
+        else:
+            logger.warning(
+                "Page-number pagination hit max_pages (%d) for %s — results may be incomplete",
+                cfg.max_pages,
+                path,
+            )
+        return collected
+
     def _cached(self, key: Any, produce: Callable[[], Any]) -> Any:
         """Return a cached read for `key`, computing and storing it on a miss.
 
@@ -537,6 +571,34 @@ class BPClient:
         return self._cached(
             "license_entitlement",
             lambda: self._get("/dashboards/licensesEntitlement"),
+        )
+
+    def get_resource_utilization(self, start_date: str) -> list[dict]:
+        """GET /dashboards/resourceUtilization — per-worker daily heat-map.
+
+        The third `/dashboards` read this server consumes (with
+        currentLimitsAndUsage and licensesEntitlement): one row per worker per
+        day from `start_date` onward — {resourceId, digitalWorkerName,
+        utilizationDate, usages} where `usages` is 24 ints of minutes worked
+        per hour. The API's only page-NUMBER-paged read (pageNumber/pageSize,
+        not the itemsPerPage/pagingToken scheme everywhere else — see
+        _get_paged_by_number) and its only param is `start_date`; there is no
+        end-bound param, so the resource_utilization tool filters the returned
+        rows down to its window client-side. Backs the resource_utilization
+        Tier-2 tool's aggregation; left out as a raw read (see DESIGN.md) since
+        a heat-map feed is chart MI, not an LLM-shaped fact.
+
+        Cached on `start_date` alone (unlike the other windowed reads, which
+        key on both bounds) because that is the read's whole input — the fetch
+        itself is already unbounded above `start_date`, so a second call with
+        the same start and a different end_date correctly reuses it rather
+        than repeating the same page walk.
+        """
+        return self._cached(
+            ("resource_utilization", start_date),
+            lambda: self._get_paged_by_number(
+                "/dashboards/resourceUtilization", base_params={"startDate": start_date}
+            ),
         )
 
     def get_queue_compositions(self, queue_ids: list[str]) -> list[dict]:
