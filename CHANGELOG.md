@@ -7,6 +7,28 @@ additive endpoint is a minor bump.
 
 ## [Unreleased]
 
+## [0.10.0] — 2026-07-01
+Utilisation insight: the `resourceUtilization` heat-map, aggregated into a
+per-worker duty cycle. Closes out the deferred estate-insight item from
+v0.4.0. No control-plane change.
+
+### Added
+- `resource_utilization(start_date, end_date)`: aggregates the
+  `resourceUtilization` heat-map (one row per worker per day, 24 hourly
+  minutes) into per-worker daily and windowed worked-minutes/wall-clock-
+  minutes/utilisation percentages, plus an estate-wide duty cycle (total
+  worked over total wall-clock — not a mean of per-worker percentages, which
+  would diverge when workers' reporting spans differ). An idle day counts as
+  0% against the full window rather than being excluded from the denominator,
+  so the figure reflects true availability. Mechanical L1 aggregation only —
+  no thresholds or "saturated" opinion; that stays a consumer's L2 call.
+  Degrades to an `unavailable` note if the read is denied or fails, like the
+  other `/dashboards` reads.
+- `BPClient._get_paged_by_number`: a generic page-NUMBER-paged fetch helper
+  (`pageNumber`/`pageSize`), backing `get_resource_utilization` —
+  `resourceUtilization` is the API's only endpoint on this scheme; everywhere
+  else is token-paged.
+
 ## [0.9.0] — 2026-07-01
 Governance hardening for long-lived embedding hosts: identity on the audit
 line and a memory bound on the cache. No tool surface or control-plane change.
@@ -260,7 +282,9 @@ First runnable release — the foundation, built in eight phases (see
 - FastMCP stdio server, a first-class mock run mode, console entrypoint, and
   deployment / day-one verification docs.
 
-[Unreleased]: https://github.com/8m7nyv54n5-ux/blue-prism-v7-mcp/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/8m7nyv54n5-ux/blue-prism-v7-mcp/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/8m7nyv54n5-ux/blue-prism-v7-mcp/compare/v0.9.0...v0.10.0
+[0.9.0]: https://github.com/8m7nyv54n5-ux/blue-prism-v7-mcp/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/8m7nyv54n5-ux/blue-prism-v7-mcp/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/8m7nyv54n5-ux/blue-prism-v7-mcp/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/8m7nyv54n5-ux/blue-prism-v7-mcp/compare/v0.5.0...v0.6.0
