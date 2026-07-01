@@ -439,14 +439,13 @@ Sequenced as:
     field-by-field on 7.5.1 — `licensesEntitlement` shipped as the
     `license_entitlement` tool and `workQueueCompositions`' one net-new datum
     (`deferred`) folded into `list_queues`. Schedule run-history is still Phase 9.
-  - *Utilisation insight (deferred derived tool — shaped, ready to build):* a
-    `resource_utilization` Tier-2 tool aggregating `resourceUtilization`'s 24h
-    heat-map into per-worker "% of available minutes worked over a window" —
-    genuinely useful to any consumer, not console-only. Held back from v0.4.0
-    because it needs (a) page-*number* paging support added to the client (the
-    API's only such read) and (b) a deliberate aggregation/denominator design.
-    Its own small release. **Design resolved by an L2-first consumer spike
-    (Custera):**
+  - *Utilisation insight (DELIVERED v0.10.0):* a `resource_utilization` Tier-2
+    tool aggregating `resourceUtilization`'s 24h heat-map into per-worker "% of
+    available minutes worked over a window" — genuinely useful to any consumer,
+    not console-only. Held back from v0.4.0 because it needed (a) page-*number*
+    paging support added to the client (the API's only such read) and (b) a
+    deliberate aggregation/denominator design. Shipped as its own small release.
+    **Design resolved by an L2-first consumer spike (Custera):**
     - *Contract shape — return the per-worker daily grain, not a collapsed
       scalar.* The raw feed is already per-worker-per-day; returning that grain
       plus a windowed roll-up is both more opinion-free and pre-satisfies the
