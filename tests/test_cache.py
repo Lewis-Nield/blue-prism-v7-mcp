@@ -59,6 +59,37 @@ class TestTTLCache:
     def test_satisfies_the_cache_protocol(self):
         assert isinstance(TTLCache(ttl=30), Cache)
 
+    def test_set_sweeps_expired_entries_so_growth_stays_bounded(self, monkeypatch):
+        # A key written once and never re-requested must not sit in the store
+        # forever: get() only expires the exact key it's asked for, so set()
+        # has to do the sweeping for keys nobody reads again (the long-lived
+        # embedded-host scenario).
+        clock = [1000.0]
+        monkeypatch.setattr("blue_prism_mcp.cache.time.monotonic", lambda: clock[0])
+        cache = TTLCache(ttl=30)
+        for i in range(50):
+            cache.set(f"stale{i}", i)  # each write is never read again
+        clock[0] += 40.0  # every prior entry is now well past the ttl
+
+        for i in range(50):
+            cache.set(f"fresh{i}", i)
+        # only the fresh writes remain — the store settles to one TTL window's
+        # worth of distinct keys, not the full 100 ever written.
+        assert len(cache._store) == 50
+        assert all(k.startswith("fresh") for k in cache._store)
+
+    def test_sweep_uses_the_same_ttl_boundary_as_get(self, monkeypatch):
+        # The sweep must expire on the same >= boundary as get() (an entry is
+        # expired exactly at the TTL, not just strictly past it) — otherwise
+        # the two expiry checks disagree on a tied monotonic() reading.
+        clock = [1000.0]
+        monkeypatch.setattr("blue_prism_mcp.cache.time.monotonic", lambda: clock[0])
+        cache = TTLCache(ttl=30)
+        cache.set("k", "v")
+        clock[0] += 30.0  # exactly at the boundary
+        cache.set("other", "v2")  # triggers the sweep
+        assert "k" not in cache._store
+
     def test_concurrent_set_and_get_stay_consistent(self):
         # Many threads hammering the same cache must never raise or corrupt the
         # store; the lock guards the read-modify (expiry delete) in get too.
