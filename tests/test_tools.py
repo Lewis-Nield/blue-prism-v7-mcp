@@ -1340,6 +1340,32 @@ class TestLicenseEntitlement:
 
 
 class TestResourceUtilization:
+    def test_a_row_with_a_malformed_date_is_skipped_not_a_crash(self):
+        client = MockBPClient(
+            resource_utilization=[
+                {
+                    "resourceId": "r1",
+                    "digitalWorkerName": "BOT-BAD",
+                    "utilizationDate": "not-a-date",
+                    "usages": [10] * 24,
+                },
+                {
+                    "resourceId": "r2",
+                    "digitalWorkerName": "BOT-MISSING",
+                    "utilizationDate": None,
+                    "usages": [10] * 24,
+                },
+                {
+                    "resourceId": "r3",
+                    "digitalWorkerName": "BOT-OK",
+                    "utilizationDate": _date(0),
+                    "usages": [10] * 24,
+                },
+            ]
+        )
+        result = tier2(client)["resource_utilization"](start_date=_date(0), end_date=_date(0))
+        assert [w["worker"] for w in result["workers"]] == ["BOT-OK"]
+
     def test_aggregates_daily_and_windowed_per_worker(self):
         result = tier2()["resource_utilization"](
             start_date=_date(2), end_date=_date(0)
