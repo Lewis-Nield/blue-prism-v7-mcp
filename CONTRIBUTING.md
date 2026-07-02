@@ -13,11 +13,15 @@ python -m spacy download en_core_web_sm   # only needed for the [pii] backend
 ```bash
 pytest --cov=blue_prism_v7_mcp --cov-report=term-missing   # tests + coverage
 ruff check .                                            # lint (E/F + bugbear)
+ruff format --check .                                   # formatting
+mypy                                                    # types (src/, see pyproject)
 mutmut run && mutmut results                            # mutation audit (periodic)
 ```
 
-`pytest` and `ruff check` run in CI on every PR and must pass. `mutmut` does
-**not** run in CI — it's a per-phase audit you run by hand (see below).
+`pytest` (with the 100% coverage gate), `ruff check`, `ruff format --check`,
+and `mypy` run in CI on every PR — across Python 3.11–3.13 — and must pass.
+`mutmut` does **not** run in CI — it's a per-phase audit you run by hand (see
+below).
 
 ## Before opening a PR: the degenerate-input pass
 
