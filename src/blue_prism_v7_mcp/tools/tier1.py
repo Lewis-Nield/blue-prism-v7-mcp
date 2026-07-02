@@ -48,6 +48,13 @@ SESSION_STATUSES = frozenset(
     {"Pending", "Running", "Terminated", "Stopped", "Completed", "Stopping", "Warning"}
 )
 
+# The scheduleLogStatus QUERY enum (Capitalised per the 7.5.1 spec; the API
+# spells the same statuses lowercase in responses). validate_choice
+# canonicalises case-insensitively to these, which is what the filter wants.
+SCHEDULE_LOG_STATUSES = frozenset(
+    {"Pending", "Running", "Terminated", "Completed", "PartExceptioned"}
+)
+
 # DataValue value-types (casefolded) whose value is a non-text scalar — a
 # number, boolean, or an ISO date/time string. The item-data scrubber keeps
 # these untouched; every other type (including unknown ones) has its string
@@ -62,27 +69,49 @@ _LAST_RUN_FIELDS = ("status", "startTime", "endTime", "duration")
 
 
 def _last_runs(client, schedule_ids: list) -> dict | None:
-    """Map schedule id → its last-run summary via the schedule-log endpoint.
+    """Map schedule id → its last-run summary via the schedule-log sweep.
 
     Returns None when the schedule-log read *fails* (denied/timeout) so the
     caller can signal that distinctly rather than silently dropping the field —
     the same degrade contract as _deferred_counts. On success returns
     {id: {status, startTime, endTime, duration}} built only for schedules that
-    have actually run (a schedule with no runs answers None and is omitted, so
-    the caller never fabricates an outcome). One bounded call per schedule
-    (latest row only); schedules are a small set, and the reads are cached.
+    have actually run (one with no runs appears in no log and is omitted, so
+    the caller never fabricates an outcome). The client answers the whole set
+    in one newest-first paged sweep of the plural schedule log, falling back
+    per-schedule only for long-dormant stragglers — one request for the common
+    case, not one per schedule. The sweep keys by string (schedule ids are
+    integers in the API); the result maps back to the caller's own id values.
     """
-    runs: dict = {}
-    for sid in schedule_ids:
-        if sid is None:
+    ids = [sid for sid in schedule_ids if sid is not None]
+    try:
+        runs = client.get_latest_schedule_runs(ids)
+    except requests.RequestException:
+        return None
+    return {
+        sid: {k: runs[str(sid)].get(k) for k in _LAST_RUN_FIELDS} for sid in ids if str(sid) in runs
+    }
+
+
+def _chain_order(initial_task_id, tasks: list[dict]) -> dict:
+    """Map task id → its position in the chain walk from the initial task.
+
+    Depth-first from the schedule's initialTaskId, following each task's
+    onSuccessTaskId before its onFailureTaskId (the failure branch is pushed
+    first so the success path pops — and therefore ranks — first). Tasks the
+    walk never reaches (orphaned by a broken link, or a missing initial id)
+    get no position; the caller sorts them after the chain.
+    """
+    by_id = {t.get("id"): t for t in tasks if isinstance(t, dict) and t.get("id") is not None}
+    order: dict = {}
+    stack = [initial_task_id]
+    while stack:
+        task_id = stack.pop()
+        if task_id is None or task_id in order or task_id not in by_id:
             continue
-        try:
-            run = client.get_last_schedule_run(sid)
-        except requests.RequestException:
-            return None
-        if isinstance(run, dict):
-            runs[sid] = {k: run.get(k) for k in _LAST_RUN_FIELDS}
-    return runs
+        order[task_id] = len(order)
+        stack.append(by_id[task_id].get("onFailureTaskId"))
+        stack.append(by_id[task_id].get("onSuccessTaskId"))
+    return order
 
 
 def _deferred_counts(client, queue_ids: list) -> dict | None:
@@ -384,6 +413,84 @@ class _Tier1ReadsMixin:
         ]
         return Ranked(records, ranked.sorted_by)
 
+    def get_schedule(self, schedule: str) -> dict:
+        """Return one schedule's full definition by name or id.
+
+        Richer than a list_schedules row: the single read carries the complete
+        interval definition (start/end dates, time zone, DST flag, and the
+        per-interval detail objects with their calendar ids) — the full input
+        for reasoning about when the schedule should run. Descriptions stay
+        unscrubbed, matching list_schedules (admin-authored catalogue text,
+        not a payload boundary).
+        """
+        schedule_id = resolve_id(schedule, self.client.get_schedules(), entity="schedule")
+        return self.client.get_schedule(schedule_id)
+
+    def list_schedule_tasks(self, schedule: str) -> Ranked:
+        """Rank one schedule's tasks in chain order, folding in their sessions.
+
+        Each task row gains a ``sessions`` list — the {processName,
+        resourceName, taskSessionId} triples saying what the task runs and
+        where — fetched per task (bounded by the schedule's small task count,
+        and cached). If any session read fails (denied/timeout) the tasks
+        still stand without the fold and ``meta.sessions_unavailable`` is set,
+        the same visible-degrade contract as the list_schedules last-run fold.
+        Order is the execution chain walked from the schedule's initialTaskId
+        (success path first, failure branches after, unreachable tasks last).
+        """
+        schedules = self.client.get_schedules()
+        schedule_id = resolve_id(schedule, schedules, entity="schedule")
+        row = next((s for s in schedules if str(s.get("id")) == str(schedule_id)), None)
+        initial = row.get("initialTaskId") if row else None
+        tasks = self.client.get_schedule_tasks(schedule_id)
+        meta: dict = {}
+        try:
+            tasks = [{**t, "sessions": self.client.get_task_sessions(t.get("id"))} for t in tasks]
+        except requests.RequestException:
+            meta = {"sessions_unavailable": True}
+        order = _chain_order(initial, tasks)
+        after_chain = len(order)
+        ranked = rank(
+            tasks,
+            sort_key=lambda t: (order.get(t.get("id"), after_chain), str(t.get("id"))),
+            sorted_by="chain order from the initial task (success path first; unreachable last)",
+        )
+        return Ranked(ranked.records, ranked.sorted_by, meta)
+
+    def list_schedule_logs(
+        self,
+        schedule: str | None = None,
+        status: str | None = None,
+        start_date: str | None = None,
+        end_date: str | None = None,
+    ) -> Ranked:
+        """Rank schedule run history newest-first, optionally scoped and filtered.
+
+        Without a schedule this sweeps every schedule's runs in one read (each
+        row carries scheduleId and scheduleName); with one it scopes to that
+        schedule. status filters server-side on the run outcome; the optional
+        window bounds the runs' start time. No scrub targets: a
+        ScheduleLogSummary carries outcome, timing, and names only — no
+        exception text.
+        """
+        validate_optional_window(start_date, end_date)
+        if status is not None:
+            status = validate_choice(status, "status", SCHEDULE_LOG_STATUSES)
+        schedule_id = (
+            resolve_id(schedule, self.client.get_schedules(), entity="schedule")
+            if schedule
+            else None
+        )
+        logs = self.client.get_schedule_logs(
+            schedule_id=schedule_id, status=status, start_date=start_date, end_date=end_date
+        )
+        return rank(
+            logs,
+            sort_key=lambda r: r.get("startTime") or "",
+            sorted_by="startTime desc",
+            reverse=True,
+        )
+
     def list_processes(self) -> Ranked:
         """Rank the published process catalogue alphabetically by name."""
         return rank(
@@ -653,6 +760,72 @@ def build_tier1_tools(engine) -> list[Callable]:
         """
         return to_envelope(engine.list_schedules(), limit)
 
+    def get_schedule(schedule: str) -> dict:
+        """Return one schedule's full definition — when and how it runs.
+
+        `schedule` is the schedule name as shown in list_schedules
+        (case-insensitive) or its id. Beyond the list row (name, description,
+        retirement state, task count) this carries the complete timing
+        definition: the interval type (Once/Minute/Hour/Day/Week/Month/Year),
+        start and end dates (a null end date means it runs indefinitely), time
+        zone and daylight-saving flag, and the per-interval details — e.g.
+        which weekdays a weekly schedule fires on, or the working-day calendar
+        a daily one follows. Use it to answer "when should this schedule run?"
+        or to inspect a schedule before triggering or retiring it.
+
+        Returns the single schedule object, not a list envelope. Follow it
+        with list_schedule_tasks to see what the schedule executes, or
+        list_schedule_logs for its run history.
+        """
+        return engine.get_schedule(schedule)
+
+    def list_schedule_tasks(schedule: str, limit: int = DEFAULT_LIMIT) -> dict:
+        """List one schedule's tasks — what it executes, in what order, where.
+
+        `schedule` is the schedule name (case-insensitive, as shown in
+        list_schedules) or its id. Each task gives its name and description,
+        the failure policy (`failFastOnError`), the links to the task that
+        runs next on success and on failure (`onSuccessTaskId`/
+        `onFailureTaskId` with their names), and a `sessions` list — the
+        process each scheduled session runs and the digital worker it targets.
+        Use it to see exactly what a schedule does and to pin down which task
+        (and which process, on which worker) a failed run stopped at.
+
+        Results come back as {"items": [...], "meta": {...}} in execution
+        order — the chain walked from the schedule's initial task, success
+        path first, failure branches after — capped at `limit` (default 50).
+        If the per-task session read is denied or fails,
+        `meta.sessions_unavailable` is set and tasks carry no `sessions`.
+        """
+        return to_envelope(engine.list_schedule_tasks(schedule), limit)
+
+    def list_schedule_logs(
+        schedule: str | None = None,
+        status: str | None = None,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        limit: int = DEFAULT_LIMIT,
+    ) -> dict:
+        """List schedule run history — what ran, when, and how it ended.
+
+        With no arguments this sweeps every schedule's recent runs in one call
+        (each row carries the scheduleName), so "what ran overnight and what
+        failed?" is a single read. Optionally narrow by `schedule` (name or
+        id), by `status` (Pending, Running, Completed, Terminated, or
+        PartExceptioned — Terminated and PartExceptioned are the failures),
+        and by a `start_date`/`end_date` (ISO) window on the runs' start time.
+
+        Each run gives the schedule it belongs to, start and end times,
+        duration, the server it ran on, and its outcome. Use list_sessions for
+        the individual process runs behind a schedule run, and
+        list_schedule_tasks to see which task a failure stopped at.
+
+        Results come back as {"items": [...], "meta": {...}}, most recent run
+        first, capped at `limit` (default 50); meta.truncated tells you
+        whether you saw every run in scope.
+        """
+        return to_envelope(engine.list_schedule_logs(schedule, status, start_date, end_date), limit)
+
     def list_processes(limit: int = DEFAULT_LIMIT) -> dict:
         """List the published automation processes (the process catalogue).
 
@@ -739,6 +912,9 @@ def build_tier1_tools(engine) -> list[Callable]:
         get_session_log,
         list_resources,
         list_schedules,
+        get_schedule,
+        list_schedule_tasks,
+        list_schedule_logs,
         list_processes,
         list_queue_configurations,
         list_resource_pools,

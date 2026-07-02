@@ -47,6 +47,14 @@ _TOKEN_EXPIRY_SKEW = 60.0
 # a form-style array param, so the values go comma-joined.
 _ERROR_STAGE_TYPES = "Exception,Recover,Resume"
 
+# Page budget for the last-run sweep (get_latest_schedule_runs). Sorted
+# newest-first, the first few pages of the plural schedule log cover every
+# schedule that has run recently — the common case — so the sweep answers the
+# whole estate in one paged read instead of one request per schedule. Schedules
+# still unseen after this many pages are long-dormant outliers; they fall back
+# to the bounded per-schedule read rather than walking the full run history.
+_LATEST_RUNS_MAX_PAGES = 3
+
 
 class BPClient:
     """Stateful client for one Blue Prism v7 estate.
@@ -384,6 +392,127 @@ class BPClient:
             return items[0] if items else None
 
         return self._cached(("last_schedule_run", str(schedule_id)), fetch)
+
+    def get_latest_schedule_runs(self, schedule_ids: list) -> dict[str, dict]:
+        """Map schedule id (as str) → its most recent run, in one paged sweep.
+
+        The per-schedule read (get_last_schedule_run) costs one request per
+        schedule per refresh — the N-calls bottleneck at hundreds of schedules.
+        The plural `GET /scheduleLogs` (7.1+) carries scheduleId/scheduleName on
+        every ScheduleLogSummary row, so one newest-first sweep yields the
+        latest run for every schedule that has run recently: the first row seen
+        per schedule IS its last run. The sweep stops as soon as every wanted
+        schedule is covered (or the page budget runs out — see
+        _LATEST_RUNS_MAX_PAGES), and only the leftovers — long-dormant
+        schedules whose last run predates the swept window, or a gateway that
+        doesn't token-page — fall back to the per-schedule read, so the worst
+        case is the old behaviour and the common case is one request. A
+        schedule that has never run appears in no log and is absent from the
+        result (the caller folds nothing in — never a fabricated outcome).
+        Keys are strings both ways (schedule ids are integers in the API, but
+        interpolate into paths as strings everywhere in this client).
+        """
+        wanted = {str(sid) for sid in schedule_ids if sid is not None}
+        if not wanted:
+            return {}
+
+        def fetch() -> dict[str, dict]:
+            cfg = self._config
+            runs: dict[str, dict] = {}
+            params: dict = {"sortBy": "StartTimeDesc", cfg.page_size_param: cfg.page_size}
+            token: str | None = None
+            for _ in range(_LATEST_RUNS_MAX_PAGES):
+                if token is not None:
+                    params[cfg.page_token_param] = token
+                body = self._get("/scheduleLogs", params=params)
+                items, token = self._unpack_page(body)
+                for row in items:
+                    sid = str(row.get("scheduleId"))
+                    if sid in wanted and sid not in runs:
+                        runs[sid] = row
+                if not token or wanted <= runs.keys():
+                    break
+            for sid in sorted(wanted - runs.keys()):
+                run = self.get_last_schedule_run(sid)
+                if isinstance(run, dict):
+                    runs[sid] = run
+            return runs
+
+        return self._cached(("latest_schedule_runs", tuple(sorted(wanted))), fetch)
+
+    def get_schedule(self, schedule_id) -> dict:
+        """GET /schedules/{id} — one schedule's full definition (7.1+).
+
+        Richer than a /schedules list row: ScheduleDefinitionResponseModel adds
+        the complete interval definition — intervalType, start/end dates,
+        timeZoneId, the daylight-saving flag, and the per-interval detail
+        objects (hourly/minutely/daily/weekly/monthly/yearly, each carrying its
+        calendarId) — everything needed to reason about when the schedule
+        should run. Schedule ids are integers (the one non-UUID id in the API).
+        """
+        return self._cached(
+            ("schedule", str(schedule_id)),
+            lambda: self._get(f"/schedules/{schedule_id}"),
+        )
+
+    def get_schedule_tasks(self, schedule_id) -> list[dict]:
+        """GET /schedules/{id}/tasks — the schedule's task chain (7.0+).
+
+        A bare array of ScheduledTask (no paging): each task's integer id,
+        name, description, failFastOnError, delayAfterEnd, sessionsCount, and
+        the onSuccessTaskId/onFailureTaskId links that chain tasks together
+        from the schedule's initialTaskId. An empty/204 body coerces to [] so
+        the return is always a list.
+        """
+        return self._cached(
+            ("schedule_tasks", str(schedule_id)),
+            lambda: self._get(f"/schedules/{schedule_id}/tasks") or [],
+        )
+
+    def get_task_sessions(self, task_id) -> list[dict]:
+        """GET /schedules/tasks/{taskId}/sessions — what a task runs, and where.
+
+        A bare array of {processName, resourceName, taskSessionId} — the
+        process each scheduled session executes and the resource it targets.
+        The schedule-less path is used by design (task ids are unique, and it
+        is the 7.0 form; the schedule-scoped twin adds nothing). Note the
+        response carries names, not ids. An empty/204 body coerces to [].
+        """
+        return self._cached(
+            ("task_sessions", str(task_id)),
+            lambda: self._get(f"/schedules/tasks/{task_id}/sessions") or [],
+        )
+
+    def get_schedule_logs(
+        self,
+        schedule_id=None,
+        status: str | None = None,
+        start_date: str | None = None,
+        end_date: str | None = None,
+    ) -> list[dict]:
+        """GET /scheduleLogs (or /scheduleLogs/{id}) — schedule run history.
+
+        The *current* schedule-log family (the parallel /schedules/logs is the
+        spec's deprecated variant). With a schedule_id the read scopes to that
+        schedule's runs; without one it sweeps every schedule (each row carries
+        scheduleId and scheduleName). Filters go server-side: scheduleLogStatus
+        takes the Capitalised query enum (Pending/Running/Terminated/Completed/
+        PartExceptioned — responses spell status lowercase), and the window is
+        a deepObject range on startTime. Ordered newest-first
+        (sortBy=StartTimeDesc), token-paged like the other collections.
+        """
+        params: dict[str, str] = {"sortBy": "StartTimeDesc"}
+        if status:
+            params["scheduleLogStatus"] = status
+        if start_date:
+            params["startTime[gte]"] = start_date
+        if end_date:
+            params["startTime[lte]"] = end_date
+        path = f"/scheduleLogs/{schedule_id}" if schedule_id is not None else "/scheduleLogs"
+        return self._cached(
+            ("schedule_logs", str(schedule_id), status, start_date, end_date),
+            lambda: self._get_collection(path, base_params=params),
+        )
 
     def get_sessions(
         self, start_date: str | None = None, end_date: str | None = None

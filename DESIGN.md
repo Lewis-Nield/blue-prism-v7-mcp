@@ -124,7 +124,23 @@ library it was always implicitly built on.
 - `list_schedules` — the schedule catalogue + retirement state, each schedule's
   last run folded in (status, start/end, duration) from the schedule run logs,
   added only where a schedule has actually run. (The API still holds no next-run
-  field anywhere.)
+  field anywhere.) The fold is one newest-first sweep of the plural schedule
+  log — not a call per schedule — with a per-schedule fallback only for
+  long-dormant stragglers the swept window missed.
+- `get_schedule` — one schedule's full definition by name or id: beyond the
+  list row, the complete timing definition (interval type, start/end dates,
+  time zone, DST flag, and the per-interval details carrying calendar ids) —
+  the whole input for reasoning about when a schedule should run.
+- `list_schedule_tasks` — one schedule's task chain in execution order (walked
+  from its initial task, success path first), each task carrying its failure
+  policy, its on-success/on-failure links, and a folded `sessions` list —
+  the process each scheduled session runs and the worker it targets. If the
+  per-task session read fails, the tasks stand and
+  `meta.sessions_unavailable` is set.
+- `list_schedule_logs` — schedule run history, newest first: estate-wide in
+  one call (each row names its schedule) or scoped to one schedule, filtered
+  by outcome status and/or a start-time window. "What ran overnight and what
+  failed?" as a single read.
 - `list_processes` — published process catalogue
 - `list_queue_configurations` — the active queues' process→queue map: each
   active queue's assigned process and resource group plus its live activity
@@ -222,9 +238,12 @@ webhook plumbing.
 | `list_sessions` | `GET /sessions` | 7.0 |
 | `get_session` | `GET /sessions/{id}` (→ `SessionSummary`) | 7.0 |
 | `get_session_log` | `GET /sessions/{id}/logs` (`logslight` on 7.4+); `errors_only`→`stageType=Exception,Recover,Resume`, window→`resourceStartTime[gte]/[lte]` | 7.0 |
-| `list_schedules` last-run | `GET /scheduleLogs/{scheduleId}` (→ `ScheduleLogSummary`, latest row; not the deprecated `/schedules/{id}/logs`) | 7.1 |
+| `list_schedules` last-run | `GET /scheduleLogs` (→ `ScheduleLogSummary`, one newest-first sweep grouped by `scheduleId`; per-schedule `GET /scheduleLogs/{id}` only as the straggler fallback — not the deprecated `/schedules/{id}/logs`) | 7.1 |
 | `list_resources` | `GET /resources` | 7.0 |
 | `list_schedules` | `GET /schedules` | 7.0 |
+| `get_schedule` | `GET /schedules/{id}` (→ `ScheduleDefinitionResponseModel`, the full interval definition; ids are integers) | 7.1 |
+| `list_schedule_tasks` | `GET /schedules/{id}/tasks` (→ `ScheduledTask[]`, bare array; chain-linked by `onSuccessTaskId`/`onFailureTaskId`) + `GET /schedules/tasks/{taskId}/sessions` per task (→ `{processName, resourceName, taskSessionId}[]` — names, not ids) | 7.0 |
+| `list_schedule_logs` | `GET /scheduleLogs` / `GET /scheduleLogs/{id}` (`scheduleLogStatus` Capitalised in the query, lowercase in responses; window as `startTime[gte]/[lte]`) | 7.1 |
 | `list_processes` | `GET /processes` | 7.1 |
 | `list_queue_configurations` | `GET /workqueues/configurations` (→ `WorkQueueConfigurationSummary`, active queues only) | **7.4** |
 | `list_resource_pools` | `GET /resources/pools` (→ `ResourcePool[]`, bare array, no paging) | 7.1 |

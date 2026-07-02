@@ -19,6 +19,9 @@ item fixtures is mock-internal plumbing (which queue holds the item), not an
 API field — the single-item read drops it and attaches the WorkQueueItem `data`
 payload (a DataCollection, held per-item in _DEFAULT_ITEM_DATA), which the list
 read never carries. Attempt history (_DEFAULT_ITEM_ATTEMPTS) is NoData rows.
+Schedule task chains (_DEFAULT_SCHEDULE_TASKS, ScheduledTask rows keyed by
+schedule id) and their sessions (_DEFAULT_TASK_SESSIONS, keyed by task id)
+carry the integer ids and name-not-id session triples the live API answers.
 
 Seed it with your own data, or accept the small built-in fixtures below.
 """
@@ -149,8 +152,16 @@ _DEFAULT_SCHEDULES: list[dict] = [
         "description": "Runs Invoice Processing every weekday morning",
         "isRetired": False,
         "tasksCount": 1,
+        "initialTaskId": 11,
+        "initialTaskName": "Process Invoices",
         "intervalType": "Day",
         "calendarName": "Working Week",
+        # The single-schedule read's richer definition fields (a live list row
+        # carries them too — ScheduleSummary is the full definition plus ids).
+        "startDate": _ts(90, "06:00:00"),
+        "endDate": None,
+        "timeZoneId": "GMT Standard Time",
+        "dailyDetails": {"period": 1, "calendarId": 1},
     },
     {
         "id": 2,
@@ -158,10 +169,74 @@ _DEFAULT_SCHEDULES: list[dict] = [
         "description": "Legacy reconciliation run",
         "isRetired": True,
         "tasksCount": 2,
+        "initialTaskId": 21,
+        "initialTaskName": "Extract Ledger",
         "intervalType": "Week",
         "calendarName": "Working Week",
     },
 ]
+
+# ScheduledTask rows keyed by schedule id (task ids are integers, like schedule
+# ids). Schedule 1 is a single task; schedule 2 a two-task onSuccess chain —
+# the fixtures stay linear, tests seed branch/orphan shapes explicitly.
+_DEFAULT_SCHEDULE_TASKS: dict[str, list[dict]] = {
+    "1": [
+        {
+            "id": 11,
+            "name": "Process Invoices",
+            "description": "Work the Invoices queue",
+            "failFastOnError": True,
+            "delayAfterEnd": 0,
+            "onSuccessTaskId": None,
+            "onSuccessTaskName": None,
+            "onFailureTaskId": None,
+            "onFailureTaskName": None,
+            "sessionsCount": 1,
+        },
+    ],
+    "2": [
+        # Listed out of chain order on purpose: the tool's chain walk (from
+        # initialTaskId 21) must order these 21 → 22 regardless.
+        {
+            "id": 22,
+            "name": "Post Adjustments",
+            "description": "Post reconciliation adjustments",
+            "failFastOnError": True,
+            "delayAfterEnd": 0,
+            "onSuccessTaskId": None,
+            "onSuccessTaskName": None,
+            "onFailureTaskId": None,
+            "onFailureTaskName": None,
+            "sessionsCount": 1,
+        },
+        {
+            "id": 21,
+            "name": "Extract Ledger",
+            "description": "Pull the ledger extract",
+            "failFastOnError": True,
+            "delayAfterEnd": 5,
+            "onSuccessTaskId": 22,
+            "onSuccessTaskName": "Post Adjustments",
+            "onFailureTaskId": None,
+            "onFailureTaskName": None,
+            "sessionsCount": 1,
+        },
+    ],
+}
+
+# ScheduledSession triples keyed by task id: what each task runs, and where.
+# Names, not ids — the live response carries processName/resourceName.
+_DEFAULT_TASK_SESSIONS: dict[str, list[dict]] = {
+    "11": [
+        {"processName": "Invoice Processing", "resourceName": "BOT-01", "taskSessionId": 111},
+    ],
+    "21": [
+        {"processName": "Invoice Processing", "resourceName": "BOT-02", "taskSessionId": 211},
+    ],
+    "22": [
+        {"processName": "Customer Onboarding", "resourceName": "BOT-02", "taskSessionId": 221},
+    ],
+}
 
 _PROC_INVOICES = "7c0e4f2b-93d1-4b66-a2af-000000000201"
 _PROC_ONBOARDING = "7c0e4f2b-93d1-4b66-a2af-000000000202"
@@ -641,6 +716,8 @@ class MockBPClient:
         item_attempts: dict[str, list[dict]] | None = None,
         session_logs: dict[str, list[dict]] | None = None,
         schedule_logs: dict[str, list[dict]] | None = None,
+        schedule_tasks: dict[str, list[dict]] | None = None,
+        task_sessions: dict[str, list[dict]] | None = None,
         limits_and_usage: dict | None = None,
         license_entitlement: dict | None = None,
         deferred_by_queue: dict[str, int] | None = None,
@@ -680,6 +757,16 @@ class MockBPClient:
             schedule_logs
             if schedule_logs is not None
             else {k: [dict(r) for r in v] for k, v in _DEFAULT_SCHEDULE_LOGS.items()}
+        )
+        self._schedule_tasks = (
+            schedule_tasks
+            if schedule_tasks is not None
+            else {k: [dict(t) for t in v] for k, v in _DEFAULT_SCHEDULE_TASKS.items()}
+        )
+        self._task_sessions = (
+            task_sessions
+            if task_sessions is not None
+            else {k: [dict(s) for s in v] for k, v in _DEFAULT_TASK_SESSIONS.items()}
         )
         self._limits_and_usage = (
             limits_and_usage if limits_and_usage is not None else dict(_DEFAULT_LIMITS_AND_USAGE)
@@ -835,6 +922,66 @@ class MockBPClient:
             return None
         latest = max(runs, key=lambda r: r.get("startTime") or "")
         return dict(latest)
+
+    def get_latest_schedule_runs(self, schedule_ids: list) -> dict[str, dict]:
+        # One sweep answering the latest run per wanted schedule — mirrors the
+        # live plural /scheduleLogs sweep's semantics (string keys; a schedule
+        # that has never run is absent, never a fabricated outcome).
+        runs: dict[str, dict] = {}
+        for sid in schedule_ids:
+            if sid is None:
+                continue
+            run = self.get_last_schedule_run(sid)
+            if run is not None:
+                runs[str(sid)] = run
+        return runs
+
+    def get_schedule(self, schedule_id) -> dict:
+        # Strict like the live endpoint: id only (names resolve at the tool
+        # layer), unknown id raises like the live 404 HTTPError. Compared as
+        # strings — schedule ids are integers, but the live client
+        # interpolates them into the path as strings.
+        for schedule in self._schedules:
+            if str(schedule.get("id")) == str(schedule_id):
+                return dict(schedule)
+        raise LookupError(f"No schedule with id {schedule_id!r}")
+
+    def get_schedule_tasks(self, schedule_id) -> list[dict]:
+        # Strict on the schedule (the live path 404s for an unknown id); a
+        # known schedule with no task fixtures answers an empty chain.
+        self.get_schedule(schedule_id)
+        return [dict(t) for t in self._schedule_tasks.get(str(schedule_id), [])]
+
+    def get_task_sessions(self, task_id) -> list[dict]:
+        # Benign-empty on an unknown task, like get_item_attempts: the tool
+        # layer folds sessions per task id it just listed, so an empty list is
+        # the useful mock-visible shape for a task with no session fixtures.
+        return [dict(s) for s in self._task_sessions.get(str(task_id), [])]
+
+    def get_schedule_logs(
+        self,
+        schedule_id=None,
+        status: str | None = None,
+        start_date: str | None = None,
+        end_date: str | None = None,
+    ) -> list[dict]:
+        # Mirror the live plural read: every schedule's runs (or one schedule's
+        # with schedule_id), status matched case-insensitively (the query enum
+        # is Capitalised, response rows spell it lowercase), the window on
+        # startTime, newest first.
+        if schedule_id is not None:
+            rows = list(self._schedule_logs.get(str(schedule_id), []))
+        else:
+            rows = [r for runs in self._schedule_logs.values() for r in runs]
+        if status:
+            wanted = status.casefold()
+            rows = [r for r in rows if str(r.get("status", "")).casefold() == wanted]
+        if start_date:
+            rows = [r for r in rows if (r.get("startTime") or "") >= start_date]
+        if end_date:
+            rows = [r for r in rows if _at_or_before(r.get("startTime"), end_date)]
+        rows = sorted(rows, key=lambda r: r.get("startTime") or "", reverse=True)
+        return [dict(r) for r in rows]
 
     def get_current_limits_and_usage(self) -> dict:
         return dict(self._limits_and_usage)
@@ -1569,17 +1716,29 @@ def demo_estate() -> MockBPClient:
             "description": "Runs Invoice Processing every weekday morning",
             "isRetired": False,
             "tasksCount": 1,
+            "initialTaskId": 11,
+            "initialTaskName": "Process Invoices",
             "intervalType": "Day",
             "calendarName": "Working Week",
+            "startDate": _ts(180, "06:00:00"),
+            "endDate": None,
+            "timeZoneId": "GMT Standard Time",
+            "dailyDetails": {"period": 1, "calendarId": 1},
         },
         {
             "id": 2,
             "name": "Nightly Payment Run",
             "description": "Generates the outbound BACS file overnight",
             "isRetired": False,
-            "tasksCount": 1,
+            "tasksCount": 3,
+            "initialTaskId": 21,
+            "initialTaskName": "Build BACS File",
             "intervalType": "Day",
             "calendarName": "Working Week",
+            "startDate": _ts(180, "02:00:00"),
+            "endDate": None,
+            "timeZoneId": "GMT Standard Time",
+            "dailyDetails": {"period": 1, "calendarId": 1},
         },
         {
             "id": 3,
@@ -1587,6 +1746,8 @@ def demo_estate() -> MockBPClient:
             "description": "Legacy reconciliation run",
             "isRetired": True,
             "tasksCount": 2,
+            "initialTaskId": 31,
+            "initialTaskName": "Extract Ledger",
             "intervalType": "Week",
             "calendarName": "Working Week",
         },
@@ -1596,10 +1757,150 @@ def demo_estate() -> MockBPClient:
             "description": "Keeps the sanctions list current",
             "isRetired": False,
             "tasksCount": 1,
+            "initialTaskId": 41,
+            "initialTaskName": "Sync Sanctions List",
             "intervalType": "Hour",
             "calendarName": "All Days",
+            "startDate": _ts(180, "00:00:00"),
+            "endDate": None,
+            "timeZoneId": "GMT Standard Time",
+            "hourlyDetails": {"period": 1, "start": "07:00", "end": "19:00", "calendarId": 2},
         },
     ]
+
+    # Task chains for the demo schedules. The headline: the failed Nightly
+    # Payment Run is a real branching chain — Build BACS File runs Payment Run
+    # on BOT-F02, dispatches on success, and alerts on-call on failure — so a
+    # consumer can walk from "the schedule terminated" to which task, running
+    # what, where. The compliance task fans out across two workers (one task,
+    # two sessions).
+    schedule_tasks = {
+        "1": [
+            {
+                "id": 11,
+                "name": "Process Invoices",
+                "description": "Work the Invoices queue",
+                "failFastOnError": True,
+                "delayAfterEnd": 0,
+                "onSuccessTaskId": None,
+                "onSuccessTaskName": None,
+                "onFailureTaskId": None,
+                "onFailureTaskName": None,
+                "sessionsCount": 1,
+            },
+        ],
+        "2": [
+            {
+                "id": 21,
+                "name": "Build BACS File",
+                "description": "Assemble the outbound payment file",
+                "failFastOnError": True,
+                "delayAfterEnd": 0,
+                "onSuccessTaskId": 22,
+                "onSuccessTaskName": "Dispatch Payments",
+                "onFailureTaskId": 23,
+                "onFailureTaskName": "Alert On-Call",
+                "sessionsCount": 1,
+            },
+            {
+                "id": 22,
+                "name": "Dispatch Payments",
+                "description": "Submit the BACS file to the gateway",
+                "failFastOnError": True,
+                "delayAfterEnd": 0,
+                "onSuccessTaskId": None,
+                "onSuccessTaskName": None,
+                "onFailureTaskId": 23,
+                "onFailureTaskName": "Alert On-Call",
+                "sessionsCount": 1,
+            },
+            {
+                "id": 23,
+                "name": "Alert On-Call",
+                "description": "Raise the out-of-hours payments alert",
+                "failFastOnError": False,
+                "delayAfterEnd": 0,
+                "onSuccessTaskId": None,
+                "onSuccessTaskName": None,
+                "onFailureTaskId": None,
+                "onFailureTaskName": None,
+                "sessionsCount": 1,
+            },
+        ],
+        "3": [
+            {
+                "id": 31,
+                "name": "Extract Ledger",
+                "description": "Pull the ledger extract",
+                "failFastOnError": True,
+                "delayAfterEnd": 5,
+                "onSuccessTaskId": 32,
+                "onSuccessTaskName": "Post Adjustments",
+                "onFailureTaskId": None,
+                "onFailureTaskName": None,
+                "sessionsCount": 1,
+            },
+            {
+                "id": 32,
+                "name": "Post Adjustments",
+                "description": "Post reconciliation adjustments",
+                "failFastOnError": True,
+                "delayAfterEnd": 0,
+                "onSuccessTaskId": None,
+                "onSuccessTaskName": None,
+                "onFailureTaskId": None,
+                "onFailureTaskName": None,
+                "sessionsCount": 1,
+            },
+        ],
+        "4": [
+            {
+                "id": 41,
+                "name": "Sync Sanctions List",
+                "description": "Refresh the sanctions screening data",
+                "failFastOnError": False,
+                "delayAfterEnd": 0,
+                "onSuccessTaskId": None,
+                "onSuccessTaskName": None,
+                "onFailureTaskId": None,
+                "onFailureTaskName": None,
+                "sessionsCount": 2,
+            },
+        ],
+    }
+
+    task_sessions = {
+        "11": [
+            {"processName": "Invoice Processing", "resourceName": "BOT-F01", "taskSessionId": 111},
+        ],
+        "21": [
+            {"processName": "Payment Run", "resourceName": "BOT-F02", "taskSessionId": 211},
+        ],
+        "22": [
+            {"processName": "Payment Run", "resourceName": "BOT-F02", "taskSessionId": 221},
+        ],
+        "23": [
+            {"processName": "Payment Run", "resourceName": "BOT-F03", "taskSessionId": 231},
+        ],
+        "31": [
+            {"processName": "Invoice Processing", "resourceName": "BOT-F03", "taskSessionId": 311},
+        ],
+        "32": [
+            {"processName": "Invoice Processing", "resourceName": "BOT-F03", "taskSessionId": 321},
+        ],
+        "41": [
+            {
+                "processName": "Compliance Screening",
+                "resourceName": "BOT-O02",
+                "taskSessionId": 411,
+            },
+            {
+                "processName": "Compliance Screening",
+                "resourceName": "BOT-O01",
+                "taskSessionId": 412,
+            },
+        ],
+    }
 
     schedule_logs = {
         "1": [
@@ -1823,6 +2124,8 @@ def demo_estate() -> MockBPClient:
         session_logs=session_logs,
         schedules=schedules,
         schedule_logs=schedule_logs,
+        schedule_tasks=schedule_tasks,
+        task_sessions=task_sessions,
         deferred_by_queue=deferred_by_queue,
         limits_and_usage=limits_and_usage,
         resource_utilization=resource_utilization,
