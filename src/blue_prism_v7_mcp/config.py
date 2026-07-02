@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass(frozen=True)
@@ -30,7 +30,9 @@ class BPConfig:
     # client posts these form-encoded to <auth_url>/connect/token and uses the
     # returned JWT as a bearer token.
     client_id: str = ""
-    client_secret: str = ""
+    # repr=False: an embedding host that logs or reprs its config must never
+    # echo the credential.
+    client_secret: str = field(default="", repr=False)
     # The API's OpenAPI security requires BOTH scopes on every endpoint
     # ("bp-api bpserver"); requesting only "bp-api" yields a token the API
     # rejects. Set empty to omit the scope param entirely — matching the auth
