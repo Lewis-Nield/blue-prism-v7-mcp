@@ -7,7 +7,28 @@ additive endpoint is a minor bump.
 
 ## [Unreleased]
 
+## [0.11.0] — 2026-07-02
+
 ### Added
+- **`get_schedule`** — one schedule's full definition by name or id: the
+  complete interval definition (start/end dates, time zone, DST flag, and the
+  per-interval detail objects carrying their calendar ids) that the list row
+  does not carry — the whole input for reasoning about when a schedule should
+  run (`GET /schedules/{id}`, 7.1+).
+- **`list_schedule_tasks`** — one schedule's task chain in execution order,
+  walked from its initial task (success path first, failure branches after,
+  unreachable tasks last), each task folding in its sessions — the process it
+  runs and the worker it targets (`GET /schedules/{id}/tasks` +
+  `GET /schedules/tasks/{taskId}/sessions`, both 7.0+). A denied/failed
+  session read degrades visibly via `meta.sessions_unavailable`.
+- **`list_schedule_logs`** — schedule run history, newest first: estate-wide
+  in one call or scoped to one schedule, filtered by outcome status and a
+  start-time window (the plural `GET /scheduleLogs`, 7.1+ — the current log
+  family, not the spec-deprecated `/schedules/logs`).
+- **Task-chain fixtures in the mock and demo estates** — the demo's failed
+  Nightly Payment Run is a branching chain with an on-failure alert task, and
+  the compliance task fans out across two workers, so the chain walk and
+  session fold are exercisable offline.
 - **`SECURITY.md`** — the security model in one place (trust boundary, what
   leaves the process, the three action-surface layers, deployer
   responsibilities) plus a private vulnerability-reporting channel and the
@@ -30,6 +51,12 @@ additive endpoint is a minor bump.
   credential.
 
 ### Changed
+- **`list_schedules`' last-run fold is now one sweep, not N requests** — a
+  single newest-first read of the plural schedule log covers every recently
+  run schedule (the first row seen per schedule is its last run), with a
+  bounded per-schedule fallback only for long-dormant stragglers. The worst
+  case is the previous behaviour; the common case is one request per refresh.
+  This was the polling bottleneck at hundreds of schedules.
 - **Relicensed from proprietary to Apache-2.0** ahead of public distribution:
   canonical licence text in `LICENSE`, copyright in `NOTICE`, and PEP 639
   SPDX licence metadata in the package (`license = "Apache-2.0"`,
@@ -319,7 +346,8 @@ First runnable release — the foundation, built in eight phases (see
 - FastMCP stdio server, a first-class mock run mode, console entrypoint, and
   deployment / day-one verification docs.
 
-[Unreleased]: https://github.com/Lewis-Nield/blue-prism-v7-mcp/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/Lewis-Nield/blue-prism-v7-mcp/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/Lewis-Nield/blue-prism-v7-mcp/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/Lewis-Nield/blue-prism-v7-mcp/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/Lewis-Nield/blue-prism-v7-mcp/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/Lewis-Nield/blue-prism-v7-mcp/compare/v0.7.0...v0.8.0
