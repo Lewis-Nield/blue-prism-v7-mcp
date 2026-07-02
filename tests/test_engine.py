@@ -63,6 +63,18 @@ class TestRankedShape:
         assert isinstance(queue, dict)
         assert queue["name"] == "Invoices"
 
+    def test_schedule_depth_reads_keep_the_domain_shapes(self):
+        # The v0.11.0 reads follow the same split: single read → dict, list
+        # reads → Ranked with the full chain/history for a host to consume.
+        engine = make_engine()
+        assert isinstance(engine.get_schedule("Daily Invoice Run"), dict)
+        tasks = engine.list_schedule_tasks("Weekly Reconciliation")
+        assert isinstance(tasks, Ranked)
+        assert [t["id"] for t in tasks.records] == [21, 22]  # chain order
+        logs = engine.list_schedule_logs()
+        assert isinstance(logs, Ranked)
+        assert len(logs.records) == 3  # every fixture run, untruncated
+
 
 class TestDomainMeta:
     """Domain-level meta extras ride on Ranked.meta, merged by to_envelope."""

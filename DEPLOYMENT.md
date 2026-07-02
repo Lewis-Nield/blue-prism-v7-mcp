@@ -46,7 +46,9 @@ there is no permission model of its own to misconfigure. Two rules follow:
   read, and `list_schedules`' last-run fold-in reads the schedule logs (a
   Schedule-view clause — e.g. View Schedule — or System - Scheduler); if that
   read is denied the listing still stands and sets `meta.last_run_unavailable`
-  rather than failing.
+  rather than failing. The schedule-depth reads (`get_schedule`,
+  `list_schedule_tasks`, `list_schedule_logs`) need the same Schedule-view
+  clause and nothing new.
 - **Control tools are capability-gated at startup.** When actions are enabled,
   the server reads `GET /user/permissions` and registers only the action
   tools the account can actually execute — a tool the account cannot run does

@@ -94,7 +94,8 @@ day-one verification):
 
 - **Visibility:** `list_queues`/`get_queue`, `list_queue_items`/`get_queue_item`,
   `list_item_attempts`, `list_sessions`/`get_session`, `get_session_log`,
-  `list_resources`, `list_schedules`, `list_processes`
+  `list_resources`, `list_schedules`/`get_schedule`, `list_schedule_tasks`,
+  `list_schedule_logs`, `list_processes`
 - **Context & topology:** `list_queue_configurations`, `list_resource_pools`,
   `list_environment_variables`, `list_process_groups`
 - **Insight:** `exception_summary`, `estate_exception_summary`,

@@ -873,6 +873,234 @@ class TestScheduleRunLog:
         assert session.get.call_count == 2
 
 
+class TestScheduleDepthReads:
+    """The v0.11.0 schedule reads: single definition, task chain, run history."""
+
+    def test_get_schedule_reads_the_single_schedule_path(self):
+        client, session = make_client()
+        session.get.return_value = _resp(
+            {"id": 1, "name": "Daily Invoice Run", "intervalType": "Day"}
+        )
+        detail = client.get_schedule(1)
+        assert detail["intervalType"] == "Day"
+        assert session.get.call_args.args[0].endswith("/schedules/1")
+
+    def test_get_schedule_is_cached_per_id(self):
+        client, session = make_client()
+        session.get.return_value = _resp({"id": 1})
+        client.get_schedule(1)
+        client.get_schedule(1)
+        session.get.assert_called_once()
+        client.get_schedule(2)
+        assert session.get.call_count == 2
+
+    def test_get_schedule_tasks_answers_the_bare_array(self):
+        client, session = make_client()
+        session.get.return_value = _resp([{"id": 11, "name": "Process Invoices"}])
+        tasks = client.get_schedule_tasks(1)
+        assert tasks == [{"id": 11, "name": "Process Invoices"}]
+        assert session.get.call_args.args[0].endswith("/schedules/1/tasks")
+
+    def test_get_schedule_tasks_coerces_an_empty_body_to_a_list(self):
+        client, session = make_client()
+        session.get.return_value = _resp(None)
+        assert client.get_schedule_tasks(1) == []
+
+    def test_get_task_sessions_uses_the_schedule_less_path(self):
+        # The 7.0 form: task ids are unique, so no schedule id in the path.
+        client, session = make_client()
+        session.get.return_value = _resp(
+            [{"processName": "Invoice Processing", "resourceName": "BOT-01", "taskSessionId": 1}]
+        )
+        sessions = client.get_task_sessions(11)
+        assert sessions[0]["processName"] == "Invoice Processing"
+        assert session.get.call_args.args[0].endswith("/schedules/tasks/11/sessions")
+
+    def test_get_task_sessions_coerces_an_empty_body_to_a_list(self):
+        client, session = make_client()
+        session.get.return_value = _resp(None)
+        assert client.get_task_sessions(11) == []
+
+    def test_schedule_logs_sweep_the_plural_endpoint_with_filters(self):
+        client, session = make_client()
+        session.get.return_value = _resp({"items": [{"scheduleLogId": 1}], "pagingToken": None})
+        client.get_schedule_logs(
+            status="Terminated",
+            start_date="2026-06-01",
+            end_date="2026-06-30",
+        )
+        call = session.get.call_args
+        assert call.args[0].endswith("/scheduleLogs")  # the current family, estate-wide
+        params = call.kwargs["params"]
+        assert params["sortBy"] == "StartTimeDesc"
+        assert params["scheduleLogStatus"] == "Terminated"  # Capitalised query enum
+        assert params["startTime[gte]"] == "2026-06-01"
+        assert params["startTime[lte]"] == "2026-06-30"
+
+    def test_schedule_logs_scope_to_one_schedule_when_given(self):
+        client, session = make_client()
+        session.get.return_value = _resp({"items": [], "pagingToken": None})
+        client.get_schedule_logs(schedule_id=3)
+        assert session.get.call_args.args[0].endswith("/scheduleLogs/3")
+
+    def test_schedule_logs_are_cached_per_filter_set(self):
+        client, session = make_client()
+        session.get.return_value = _resp({"items": [], "pagingToken": None})
+        client.get_schedule_logs(status="Completed")
+        client.get_schedule_logs(status="Completed")
+        session.get.assert_called_once()
+        client.get_schedule_logs(status="Terminated")
+        assert session.get.call_count == 2
+
+    def test_schedule_tasks_and_sessions_cache_per_id(self):
+        # Distinct schedules/tasks must never share a cache entry — one
+        # schedule's chain served for another would misroute a triage.
+        client, session = make_client()
+        session.get.return_value = _resp([])
+        client.get_schedule_tasks(1)
+        client.get_schedule_tasks(2)
+        assert session.get.call_count == 2
+        client.get_task_sessions(11)
+        client.get_task_sessions(12)
+        assert session.get.call_count == 4
+
+    def test_schedule_logs_scoped_and_estate_wide_are_distinct_entries(self):
+        client, session = make_client()
+        session.get.return_value = _resp({"items": [], "pagingToken": None})
+        client.get_schedule_logs(schedule_id=1)
+        client.get_schedule_logs()  # the estate-wide sweep is not the scoped read
+        assert session.get.call_count == 2
+
+
+class TestLatestScheduleRuns:
+    """The last-run sweep: one plural read for the estate, fallback for stragglers."""
+
+    def test_one_sweep_covers_every_schedule_first_row_wins(self):
+        client, session = make_client()
+        session.get.return_value = _resp(
+            {
+                "items": [
+                    {"scheduleId": 1, "scheduleLogId": 5, "startTime": "2026-07-01T06:00:00Z"},
+                    {"scheduleId": 2, "scheduleLogId": 4, "startTime": "2026-07-01T02:00:00Z"},
+                    # An older run for schedule 1 — newest-first means the FIRST
+                    # row seen per schedule is its last run; this must not clobber.
+                    {"scheduleId": 1, "scheduleLogId": 3, "startTime": "2026-06-30T06:00:00Z"},
+                ],
+                "pagingToken": None,
+            }
+        )
+        runs = client.get_latest_schedule_runs([1, 2])
+        assert runs["1"]["scheduleLogId"] == 5
+        assert runs["2"]["scheduleLogId"] == 4
+        session.get.assert_called_once()
+        call = session.get.call_args
+        assert call.args[0].endswith("/scheduleLogs")
+        assert call.kwargs["params"]["sortBy"] == "StartTimeDesc"
+
+    def test_rows_for_unwanted_schedules_are_ignored(self):
+        client, session = make_client()
+        session.get.side_effect = [
+            # The sweep sees only another schedule's runs (not wanted)...
+            _resp({"items": [{"scheduleId": 9, "scheduleLogId": 7}], "pagingToken": None}),
+            # ...so the wanted schedule falls back per-schedule: never run.
+            _resp({"items": [], "pagingToken": None}),
+        ]
+        assert client.get_latest_schedule_runs([1]) == {}
+
+    def test_stops_early_once_every_wanted_schedule_is_seen(self):
+        # Page 1 carries both wanted schedules AND a next-page token — the
+        # sweep must stop on coverage, not walk the whole run history.
+        client, session = make_client()
+        session.get.return_value = _resp(
+            {
+                "items": [
+                    {"scheduleId": 1, "scheduleLogId": 5},
+                    {"scheduleId": 2, "scheduleLogId": 4},
+                ],
+                "pagingToken": "more",
+            }
+        )
+        runs = client.get_latest_schedule_runs([1, 2])
+        assert set(runs) == {"1", "2"}
+        session.get.assert_called_once()
+
+    def test_page_budget_exhausted_falls_back_per_schedule(self):
+        # Three busy pages never reach dormant schedule 2 — the sweep stops at
+        # its budget and only the straggler pays a per-schedule read.
+        client, session = make_client()
+        busy_page = _resp({"items": [{"scheduleId": 1, "scheduleLogId": 5}], "pagingToken": "t"})
+        session.get.side_effect = [
+            busy_page,
+            busy_page,
+            busy_page,
+            _resp({"items": [{"scheduleId": 2, "scheduleLogId": 9}], "pagingToken": None}),
+        ]
+        runs = client.get_latest_schedule_runs([1, 2])
+        assert runs["1"]["scheduleLogId"] == 5
+        assert runs["2"]["scheduleLogId"] == 9
+        assert session.get.call_count == 4
+        assert session.get.call_args_list[3].args[0].endswith("/scheduleLogs/2")
+
+    def test_never_run_schedule_is_absent_not_fabricated(self):
+        client, session = make_client()
+        session.get.side_effect = [
+            _resp({"items": [{"scheduleId": 1, "scheduleLogId": 5}], "pagingToken": None}),
+            # The straggler fallback for schedule 2 answers an empty page.
+            _resp({"items": [], "pagingToken": None}),
+        ]
+        runs = client.get_latest_schedule_runs([1, 2])
+        assert "2" not in runs and "1" in runs
+
+    def test_empty_id_list_short_circuits_to_no_request(self):
+        client, session = make_client()
+        assert client.get_latest_schedule_runs([]) == {}
+        assert client.get_latest_schedule_runs([None]) == {}
+        session.get.assert_not_called()
+
+    def test_cached_per_id_set_regardless_of_order(self):
+        client, session = make_client()
+        session.get.return_value = _resp(
+            {"items": [{"scheduleId": 1}, {"scheduleId": 2}], "pagingToken": None}
+        )
+        client.get_latest_schedule_runs([1, 2])
+        client.get_latest_schedule_runs([2, 1])
+        session.get.assert_called_once()
+
+    def test_distinct_id_sets_do_not_share_a_cache_entry(self):
+        client, session = make_client()
+        session.get.return_value = _resp(
+            {"items": [{"scheduleId": 1}, {"scheduleId": 2}], "pagingToken": None}
+        )
+        client.get_latest_schedule_runs([1])
+        client.get_latest_schedule_runs([1, 2])
+        assert session.get.call_count == 2
+
+    def test_paging_token_absent_on_page_one_and_forwarded_on_page_two(self):
+        # The client reuses one params dict across the sweep, so snapshot the
+        # params at call time: page 1 must carry NO pagingToken (a spurious
+        # empty token is not the spec's first-page request), and page 2 must
+        # forward exactly the token page 1 answered.
+        client, session = make_client()
+        prime_token(client)
+        seen: list[dict] = []
+        pages = iter(
+            [
+                _resp({"items": [{"scheduleId": 1, "scheduleLogId": 5}], "pagingToken": "t2"}),
+                _resp({"items": [{"scheduleId": 2, "scheduleLogId": 4}], "pagingToken": None}),
+            ]
+        )
+
+        def record(url, headers=None, params=None, **kwargs):
+            seen.append(dict(params or {}))
+            return next(pages)
+
+        session.get.side_effect = record
+        runs = client.get_latest_schedule_runs([1, 2])
+        assert set(runs) == {"1", "2"}
+        assert "pagingToken" not in seen[0]
+        assert seen[1]["pagingToken"] == "t2"
+
+
 # --- Phase 2: Tier 3 writes (mocked HTTP) -------------------------------------
 
 
@@ -1148,6 +1376,53 @@ class TestMockExtended:
         client = MockBPClient(schedule_logs={})
         assert client.get_last_schedule_run(1) is None
 
+    def test_get_latest_schedule_runs_keys_by_string_and_omits_never_run(self):
+        runs = MockBPClient().get_latest_schedule_runs([1, 2, 9, None])
+        assert set(runs) == {"1", "2"}  # 9 never ran; None is skipped
+        assert runs["1"]["status"] == "completed"
+
+    def test_get_schedule_returns_the_definition_and_is_strict_on_unknown(self):
+        client = MockBPClient()
+        detail = client.get_schedule(1)
+        assert detail["name"] == "Daily Invoice Run"
+        assert detail["dailyDetails"] == {"period": 1, "calendarId": 1}
+        with pytest.raises(LookupError):
+            client.get_schedule(99)
+
+    def test_get_schedule_tasks_serves_copies_and_is_strict_on_unknown(self):
+        client = MockBPClient()
+        tasks = client.get_schedule_tasks(1)
+        assert tasks and tasks[0]["name"] == "Process Invoices"
+        tasks[0]["name"] = "INJECTED"
+        assert client.get_schedule_tasks(1)[0]["name"] == "Process Invoices"
+        with pytest.raises(LookupError):
+            client.get_schedule_tasks(99)
+
+    def test_get_task_sessions_answers_names_and_empty_on_unknown(self):
+        client = MockBPClient()
+        sessions = client.get_task_sessions(11)
+        assert sessions == [
+            {"processName": "Invoice Processing", "resourceName": "BOT-01", "taskSessionId": 111}
+        ]
+        assert client.get_task_sessions(999) == []
+
+    def test_get_schedule_logs_sweeps_every_schedule_newest_first(self):
+        rows = MockBPClient().get_schedule_logs()
+        assert {r["scheduleId"] for r in rows} == {1, 2}
+        starts = [r["startTime"] for r in rows]
+        assert starts == sorted(starts, reverse=True)
+
+    def test_get_schedule_logs_scopes_and_filters(self):
+        client = MockBPClient()
+        scoped = client.get_schedule_logs(schedule_id=2)
+        assert scoped and all(r["scheduleId"] == 2 for r in scoped)
+        # The query enum is Capitalised; response rows are lowercase — the
+        # match is case-insensitive like the live server's own enum handling.
+        failed = client.get_schedule_logs(status="Terminated")
+        assert failed and all(r["status"] == "terminated" for r in failed)
+        windowed = client.get_schedule_logs(start_date=_ts(2), end_date=_date(0))
+        assert windowed and all(r["startTime"] >= _ts(2) for r in windowed)
+
     def test_get_queue_item_carries_data_and_drops_internal_queue_key(self):
         # The single-item read returns WorkQueueItem (WITH `data`); the
         # mock-internal `queue` plumbing key never surfaces.
@@ -1393,6 +1668,44 @@ class TestDemoEstate:
         }
         assert "terminated" in outcomes.values()
         assert "completed" in outcomes.values()
+
+    def test_every_schedule_has_a_walkable_task_chain(self):
+        # Each schedule's initialTaskId must open a real task fixture, every
+        # chain link must land on a task in the same schedule, and every task
+        # must say what it runs and where — so a consumer can walk from a
+        # failed schedule to the task/process/worker without dead ends.
+        client = demo_estate()
+        for schedule in client.get_schedules():
+            tasks = {t["id"]: t for t in client.get_schedule_tasks(schedule["id"])}
+            assert schedule["initialTaskId"] in tasks, schedule["name"]
+            assert len(tasks) == schedule["tasksCount"], schedule["name"]
+            for task in tasks.values():
+                for link in ("onSuccessTaskId", "onFailureTaskId"):
+                    assert task[link] is None or task[link] in tasks, schedule["name"]
+                sessions = client.get_task_sessions(task["id"])
+                assert len(sessions) == task["sessionsCount"], task["name"]
+                assert all(s["processName"] and s["resourceName"] for s in sessions)
+
+    def test_the_failed_schedule_chain_carries_a_failure_branch(self):
+        # The headline Nightly Payment Run is a branching chain: at least one
+        # task routes somewhere different on failure, so the triage story
+        # ("which task, what does it run, what happens when it fails") is real.
+        client = demo_estate()
+        failed = next(s for s in client.get_schedules() if s["name"] == "Nightly Payment Run")
+        tasks = client.get_schedule_tasks(failed["id"])
+        assert any(t["onFailureTaskId"] is not None for t in tasks)
+
+    def test_task_session_names_reference_this_estate_only(self):
+        # Like the drill-in items: task sessions must name this estate's own
+        # processes and workers, or the slide-over cross-references dead ends.
+        client = demo_estate()
+        processes = {p["processName"] for p in client.get_processes()}
+        workers = {r["name"] for r in client.get_resources()}
+        for schedule in client.get_schedules():
+            for task in client.get_schedule_tasks(schedule["id"]):
+                for s in client.get_task_sessions(task["id"]):
+                    assert s["processName"] in processes
+                    assert s["resourceName"] in workers
 
     def test_no_session_reads_as_starting_in_the_future(self):
         # Today's sessions anchor to wall-clock now (_recent), not a fixed time

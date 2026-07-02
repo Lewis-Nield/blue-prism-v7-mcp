@@ -778,13 +778,170 @@ class TestListSchedules:
     def test_last_run_read_failure_degrades_visibly(self):
         client = MockBPClient()
 
-        def boom(_schedule_id):
+        def boom(_schedule_ids):
             raise requests.ConnectionError("schedule logs denied")
 
-        client.get_last_schedule_run = boom
+        client.get_latest_schedule_runs = boom
         result = tier1(client)["list_schedules"]()
         assert result["meta"]["last_run_unavailable"] is True
         assert all("last_run" not in s for s in result["items"])
+
+    def test_last_run_fold_uses_the_sweep_not_per_schedule_reads(self):
+        # The fold must go through the one-sweep client read (the N-calls
+        # bottleneck fix); a listing that quietly regressed to per-schedule
+        # reads would pass every fold assertion above, so pin the call shape.
+        client = MockBPClient()
+        seen: list = []
+        original = client.get_latest_schedule_runs
+
+        def spy(schedule_ids):
+            seen.append(list(schedule_ids))
+            return original(schedule_ids)
+
+        client.get_latest_schedule_runs = spy
+        tier1(client)["list_schedules"]()
+        assert len(seen) == 1 and set(seen[0]) == {1, 2}
+
+
+class TestGetSchedule:
+    def test_returns_the_full_definition_by_name_case_insensitive(self):
+        detail = tier1()["get_schedule"]("daily invoice run")
+        assert detail["name"] == "Daily Invoice Run"
+        # The single read's value over the list row: the timing definition.
+        assert detail["intervalType"] == "Day"
+        assert detail["dailyDetails"] == {"period": 1, "calendarId": 1}
+        assert detail["timeZoneId"] == "GMT Standard Time"
+
+    def test_resolves_by_id_too(self):
+        assert tier1()["get_schedule"]("2")["name"] == "Weekly Reconciliation"
+
+    def test_unknown_schedule_fails_loudly_with_candidates(self):
+        with pytest.raises(ValueError, match="No schedule named"):
+            tier1()["get_schedule"]("No Such Schedule")
+
+
+class TestListScheduleTasks:
+    def test_tasks_come_back_in_chain_order_with_sessions_folded(self):
+        # Fixture schedule 2 lists its tasks out of chain order (22 before 21);
+        # the walk from initialTaskId 21 must reorder them 21 → 22, and each
+        # task carries its sessions (what it runs, where).
+        result = tier1()["list_schedule_tasks"]("Weekly Reconciliation")
+        assert [t["id"] for t in result["items"]] == [21, 22]
+        assert result["items"][0]["sessions"] == [
+            {"processName": "Invoice Processing", "resourceName": "BOT-02", "taskSessionId": 211}
+        ]
+        assert "chain order" in result["meta"]["sorted_by"]
+        assert "sessions_unavailable" not in result["meta"]
+
+    def test_failure_branch_ranks_after_the_success_path(self):
+        # Every id here is chosen to CONTRADICT plain id order (initial task 9,
+        # orphan 1), so only the real walk — success path first, failure branch
+        # after, unreachable last — produces this sequence; an id-sorted
+        # fallback would give [1, 2, 4, 9].
+        client = MockBPClient(
+            schedules=[{"id": 5, "name": "Branching", "isRetired": False, "initialTaskId": 9}],
+            schedule_tasks={
+                "5": [
+                    {"id": 1, "name": "Orphan", "onSuccessTaskId": None, "onFailureTaskId": None},
+                    {"id": 2, "name": "Next", "onSuccessTaskId": None, "onFailureTaskId": None},
+                    {"id": 4, "name": "Alert", "onSuccessTaskId": None, "onFailureTaskId": None},
+                    {"id": 9, "name": "Main", "onSuccessTaskId": 2, "onFailureTaskId": 4},
+                ]
+            },
+            task_sessions={},
+        )
+        result = tier1(client)["list_schedule_tasks"]("Branching")
+        assert [t["id"] for t in result["items"]] == [9, 2, 4, 1]
+
+    def test_unreachable_tasks_sort_last_not_crash(self):
+        # A task no link reaches (orphaned by a broken chain) still shows,
+        # after the walkable chain — the orphan's id (0) sorts FIRST under a
+        # plain id sort, so only "chain first, orphans after" passes.
+        client = MockBPClient(
+            schedules=[{"id": 5, "name": "Broken", "isRetired": False, "initialTaskId": 1}],
+            schedule_tasks={
+                "5": [
+                    # Orphans listed in reverse of their id tie-break, so a
+                    # stable no-op sort cannot pass by accident.
+                    {"id": 3, "name": "Orphan B", "onSuccessTaskId": None, "onFailureTaskId": None},
+                    {"id": 1, "name": "Main", "onSuccessTaskId": 99, "onFailureTaskId": None},
+                    {"id": 0, "name": "Orphan A", "onSuccessTaskId": None, "onFailureTaskId": None},
+                ]
+            },
+            task_sessions={},
+        )
+        result = tier1(client)["list_schedule_tasks"]("Broken")
+        assert [t["id"] for t in result["items"]] == [1, 0, 3]
+
+    def test_missing_initial_task_id_still_lists_every_task(self):
+        # A schedule row without initialTaskId (or one no fixture matches)
+        # can't anchor a walk — everything is "unreachable", nothing is lost.
+        client = MockBPClient(
+            schedules=[{"id": 5, "name": "Anchorless", "isRetired": False}],
+            schedule_tasks={"5": [{"id": 2, "name": "B"}, {"id": 1, "name": "A"}]},
+            task_sessions={},
+        )
+        result = tier1(client)["list_schedule_tasks"]("Anchorless")
+        assert len(result["items"]) == 2
+
+    def test_sessions_read_failure_degrades_visibly(self):
+        client = MockBPClient()
+
+        def boom(_task_id):
+            raise requests.ConnectionError("task sessions denied")
+
+        client.get_task_sessions = boom
+        result = tier1(client)["list_schedule_tasks"]("Weekly Reconciliation")
+        assert result["meta"]["sessions_unavailable"] is True
+        assert result["items"] and all("sessions" not in t for t in result["items"])
+
+    def test_unknown_schedule_fails_loudly(self):
+        with pytest.raises(ValueError, match="No schedule named"):
+            tier1()["list_schedule_tasks"]("No Such Schedule")
+
+
+class TestListScheduleLogs:
+    def test_estate_wide_sweep_newest_first(self):
+        result = tier1()["list_schedule_logs"]()
+        assert {r["scheduleId"] for r in result["items"]} == {1, 2}
+        starts = [r["startTime"] for r in result["items"]]
+        assert starts == sorted(starts, reverse=True)
+        assert result["meta"]["sorted_by"] == "startTime desc"
+
+    def test_scopes_to_one_schedule_by_name(self):
+        result = tier1()["list_schedule_logs"](schedule="weekly reconciliation")
+        assert result["items"] and all(r["scheduleId"] == 2 for r in result["items"])
+
+    def test_status_filter_is_canonicalised(self):
+        # "terminated" → the Capitalised query enum; rows match either way.
+        result = tier1()["list_schedule_logs"](status="terminated")
+        assert result["items"] and all(r["status"] == "terminated" for r in result["items"])
+
+    def test_unknown_status_fails_loudly_listing_choices(self):
+        with pytest.raises(ValueError, match="PartExceptioned"):
+            tier1()["list_schedule_logs"](status="failed")
+
+    def test_window_bounds_are_validated(self):
+        with pytest.raises(ValueError, match="ISO"):
+            tier1()["list_schedule_logs"](start_date="last tuesday")
+        with pytest.raises(ValueError, match="swap the bounds"):
+            tier1()["list_schedule_logs"](start_date=_date(0), end_date=_date(5))
+
+    def test_window_narrows_the_runs(self):
+        result = tier1()["list_schedule_logs"](start_date=_date(2), end_date=_date(0))
+        assert result["items"]
+        assert all(r["startTime"][:10] >= _date(2) for r in result["items"])
+
+    def test_end_bound_excludes_newer_runs(self):
+        # Both bounds must reach the client: an end date two days back excludes
+        # the day-1 run the unbounded read returns.
+        result = tier1()["list_schedule_logs"](start_date=_date(30), end_date=_date(2))
+        assert result["items"]
+        assert all(r["startTime"][:10] <= _date(2) for r in result["items"])
+
+    def test_unknown_schedule_fails_loudly(self):
+        with pytest.raises(ValueError, match="No schedule named"):
+            tier1()["list_schedule_logs"](schedule="No Such Schedule")
 
 
 class TestListProcesses:
@@ -1478,6 +1635,9 @@ class TestRegisterTools:
             "get_session_log",
             "list_resources",
             "list_schedules",
+            "get_schedule",
+            "list_schedule_tasks",
+            "list_schedule_logs",
             "list_processes",
             "list_queue_configurations",
             "list_resource_pools",
