@@ -156,9 +156,7 @@ class TestMockClient:
 
     def test_get_resource_utilization_seed_overrides_default(self):
         client = MockBPClient(resource_utilization=[{"utilizationDate": "2020-01-01"}])
-        assert client.get_resource_utilization("2020-01-01") == [
-            {"utilizationDate": "2020-01-01"}
-        ]
+        assert client.get_resource_utilization("2020-01-01") == [{"utilizationDate": "2020-01-01"}]
 
 
 # --- Live client: auth (mocked HTTP) -------------------------------------------
@@ -449,7 +447,9 @@ class TestPageNumberPagination:
         def _answer(url, headers, params, json, verify, timeout):
             seen_page_numbers.append(params["pageNumber"])
             seen_page_sizes.append(params["pageSize"])
-            return _resp({"items": [{"id": 1}, {"id": 2}]} if len(seen_page_numbers) == 1 else {"items": []})
+            return _resp(
+                {"items": [{"id": 1}, {"id": 2}]} if len(seen_page_numbers) == 1 else {"items": []}
+            )
 
         session.get.side_effect = _answer
         client._get_paged_by_number("/dashboards/resourceUtilization", page_size=2)

@@ -8,12 +8,18 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      # Every version a consumer can install on (requires-python >=3.11), so
+      # "supported" means tested, not hoped. fail-fast stays on: one broken
+      # version almost always means all three are.
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python-version }}
 
       - name: Install (with dev + pii extras)
         run: |
@@ -26,6 +32,14 @@ jobs:
 
       - name: Lint
         run: ruff check .
+
+      # Formatting drifted twice before this gate existed (v0.8.0 caught one
+      # sweep, this workflow's PR caught another) — check, don't trust.
+      - name: Format
+        run: ruff format --check .
+
+      - name: Type-check
+        run: mypy
 
       - name: Test
         # The coverage gate (Phase 7): 100% on every measured module. The

@@ -35,7 +35,13 @@ pii = [
 dev = [
     "pytest==8.3.5",
     "pytest-cov==6.1.1",
-    "ruff",
+    # Pinned exact now that ruff format --check gates CI: a new ruff's
+    # formatter-style changes must not break every open branch overnight.
+    "ruff==0.15.20",
+    # Same reasoning: a stricter mypy or fresher requests stubs must land as a
+    # deliberate bump, not a surprise CI failure.
+    "mypy==2.1.0",
+    "types-requests==2.33.0.20260518",
     # Mutation testing — a periodic "are my tests real?" audit, not a per-commit
     # gate. See CONTRIBUTING.md. Pinned because the config schema is version-tied.
     "mutmut==3.6.0",
@@ -49,6 +55,11 @@ blue-prism-v7-mcp = "blue_prism_v7_mcp.server:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+# PEP 561 marker: the package ships inline type hints, so embedders' type
+# checkers (Custera's included) see our signatures instead of Any.
+blue_prism_v7_mcp = ["py.typed"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
@@ -61,6 +72,14 @@ source = ["blue_prism_v7_mcp"]
 # (Coverage's own defaults already exclude pragma lines, `...` stub bodies, and
 # `if TYPE_CHECKING:` blocks — left untouched here so they keep applying.)
 omit = ["*/__main__.py"]
+
+[tool.mypy]
+# The gate covers the shipped package; tests stay outside it (they are pinned
+# by execution — 100% coverage — not by static types).
+files = ["src"]
+# Flag ignores that stop suppressing anything, so upstream fixes (e.g. the
+# presidio RecognizerResult split) get cleaned up rather than fossilising.
+warn_unused_ignores = true
 
 [tool.ruff]
 line-length = 100

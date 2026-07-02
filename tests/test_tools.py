@@ -1367,9 +1367,7 @@ class TestResourceUtilization:
         assert [w["worker"] for w in result["workers"]] == ["BOT-OK"]
 
     def test_aggregates_daily_and_windowed_per_worker(self):
-        result = tier2()["resource_utilization"](
-            start_date=_date(2), end_date=_date(0)
-        )
+        result = tier2()["resource_utilization"](start_date=_date(2), end_date=_date(0))
         workers = {w["worker"]: w for w in result["workers"]}
         assert set(workers) == {"BOT-01", "BOT-02"}
 
@@ -1419,9 +1417,7 @@ class TestResourceUtilization:
             tier2()["resource_utilization"](start_date=None, end_date=_date(0))
 
     def test_workers_list_is_capped_by_limit(self):
-        result = tier2()["resource_utilization"](
-            start_date=_date(2), end_date=_date(0), limit=1
-        )
+        result = tier2()["resource_utilization"](start_date=_date(2), end_date=_date(0), limit=1)
         assert len(result["workers"]) == 1
         assert result["workers_meta"]["truncated"] is True
         assert result["workers_meta"]["total"] == 2
