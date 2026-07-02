@@ -574,6 +574,7 @@ _DEFAULT_ENVIRONMENT_VARIABLES: list[dict] = [
     },
 ]
 
+
 def _shift_usages(active_hours: range, minutes_per_hour: int = 55) -> list[int]:
     """A 24-int usages row: `minutes_per_hour` worked in each of `active_hours`, 0 elsewhere."""
     return [minutes_per_hour if h in active_hours else 0 for h in range(24)]
@@ -597,12 +598,8 @@ _DEFAULT_RESOURCE_UTILIZATION: list[dict] = [
     _heat_row("5d2c8e0a-71b4-4a8e-9f30-000000000001", "BOT-01", 2, _shift_usages(range(8, 17))),
     _heat_row("5d2c8e0a-71b4-4a8e-9f30-000000000001", "BOT-01", 1, _shift_usages(range(8, 17))),
     _heat_row("5d2c8e0a-71b4-4a8e-9f30-000000000001", "BOT-01", 0, _shift_usages(range(8, 12))),
-    _heat_row(
-        "5d2c8e0a-71b4-4a8e-9f30-000000000002", "BOT-02", 2, _shift_usages(range(9, 18), 40)
-    ),
-    _heat_row(
-        "5d2c8e0a-71b4-4a8e-9f30-000000000002", "BOT-02", 1, _shift_usages(range(9, 18), 40)
-    ),
+    _heat_row("5d2c8e0a-71b4-4a8e-9f30-000000000002", "BOT-02", 2, _shift_usages(range(9, 18), 40)),
+    _heat_row("5d2c8e0a-71b4-4a8e-9f30-000000000002", "BOT-02", 1, _shift_usages(range(9, 18), 40)),
 ]
 
 # ProcessGroupItem rows — the flat descendant list of the process tree: a

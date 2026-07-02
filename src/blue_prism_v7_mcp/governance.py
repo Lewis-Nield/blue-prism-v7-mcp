@@ -102,9 +102,7 @@ def validate_actor(value: str | None) -> str | None:
 
 
 @contextmanager
-def bind_actor(
-    actor: str | None, scrub_text: Callable[[str | None], str | None]
-) -> Iterator[None]:
+def bind_actor(actor: str | None, scrub_text: Callable[[str | None], str | None]) -> Iterator[None]:
     """Bind *actor* onto every audit line `AuditLog.record` writes inside this
     context, validated and scrubbed like any other name reaching the log.
 

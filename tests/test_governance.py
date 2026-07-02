@@ -528,9 +528,7 @@ class TestBindActor:
             ("run_in_executor", False),
         ],
     )
-    def test_contextvar_propagation_across_asyncio_dispatch(
-        self, tmp_path, dispatch, propagates
-    ):
+    def test_contextvar_propagation_across_asyncio_dispatch(self, tmp_path, dispatch, propagates):
         # An embedding host dispatches per-request work across asyncio's
         # concurrency primitives; the bound actor must follow wherever
         # contextvars actually propagate, and must NOT silently reappear
