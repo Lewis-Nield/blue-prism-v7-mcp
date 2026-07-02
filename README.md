@@ -128,4 +128,4 @@ is just one adapter over the same engine (`tools.common.to_envelope`).
 
 ## Licence
 
-Proprietary — internal distribution.
+[Apache-2.0](LICENSE).
