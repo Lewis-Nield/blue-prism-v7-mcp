@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from collections import Counter
 from datetime import datetime
-from typing import Callable
+from typing import Any, Callable
 
 from .common import (
     DEFAULT_LIMIT,
@@ -117,6 +117,9 @@ class _Tier2InsightMixin:
     ``estate_health`` returns a composite dict whose ``workers_requiring_attention``
     is a ``Ranked`` (the one field the MCP adapter caps).
     """
+
+    client: Any
+    scrub_text: Callable[[str | None], str | None]
 
     def exception_summary(self, queue: str, start_date: str, end_date: str) -> Ranked:
         """Group one queue's exceptions by (scrubbed) reason, ranked by count."""
@@ -438,9 +441,7 @@ def build_tier2_tools(engine) -> list[Callable]:
         """
         return engine.license_entitlement()
 
-    def resource_utilization(
-        start_date: str, end_date: str, limit: int = DEFAULT_LIMIT
-    ) -> dict:
+    def resource_utilization(start_date: str, end_date: str, limit: int = DEFAULT_LIMIT) -> dict:
         """Per-worker utilisation over a window: minutes worked vs wall-clock time.
 
         `start_date`/`end_date` (ISO dates, REQUIRED) bound the window. Each

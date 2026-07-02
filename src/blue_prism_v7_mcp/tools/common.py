@@ -173,6 +173,9 @@ def require_window(start_date: str | None, end_date: str | None) -> None:
     """
     validate_iso(start_date, "start_date", required=True)
     validate_iso(end_date, "end_date", required=True)
+    # validate_iso(required=True) has already raised on None; this only narrows
+    # the Optional for the type-checker.
+    assert start_date is not None and end_date is not None
     # tzinfo is stripped for the ordering check only: comparing an aware bound
     # with a naive one raises TypeError, and a loud-but-wrong crash on a valid
     # window is worse than ignoring offsets in this sanity check. The values

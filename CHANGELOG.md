@@ -7,6 +7,19 @@ additive endpoint is a minor bump.
 
 ## [Unreleased]
 
+### Added
+- **PEP 561 `py.typed` marker** — the package ships its inline type hints, so
+  embedders' type checkers see real signatures instead of `Any`.
+- **mypy type-check gate in CI** (`mypy` on `src/`, pinned version in the dev
+  extras); the codebase is mypy-clean. Mixin attributes provided by the
+  composing `Engine` (`client`, `scrub_text`) are now declared structurally on
+  the tier mixins rather than by docstring convention.
+- **CI matrix: Python 3.11, 3.12, and 3.13** — every version `requires-python`
+  admits is now tested, not just 3.11.
+- **`ruff format --check` in CI** — formatting drift was previously invisible
+  to CI (it runs `ruff check` only) and had to be caught by hand; swept the
+  outstanding drift (verified formatting-only via AST diff) in the same change.
+
 ### Changed
 - **Renamed the project `blue-prism-mcp` → `blue-prism-v7-mcp`** (distribution,
   console script, and import package `blue_prism_mcp` → `blue_prism_v7_mcp`),

@@ -209,7 +209,7 @@ def build_tier3_tools(
         )
         resource_id = resolve_id(resource, client.get_resources(), entity="resource")
         params = validate_session_parameters(parameters)
-        args = {
+        args: dict[str, Any] = {
             "process": process,
             "process_id": process_id,
             "resource": resource,
@@ -335,7 +335,7 @@ def build_tier3_tools(
             lambda: client.stop_schedule(schedule_id),
         )
 
-    tools = [
+    tools: list[Callable] = [
         retry_queue_item,
         defer_queue_item,
         start_process,

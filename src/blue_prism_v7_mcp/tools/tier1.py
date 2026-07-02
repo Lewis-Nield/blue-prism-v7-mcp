@@ -17,7 +17,7 @@ recursed).
 
 from __future__ import annotations
 
-from typing import Callable
+from typing import Any, Callable
 
 import requests
 
@@ -121,6 +121,9 @@ class _Tier1ReadsMixin:
     None-safe text scrub) from the composing class. List methods return the full
     ``Ranked`` records; single reads return the record dict.
     """
+
+    client: Any
+    scrub_text: Callable[[str | None], str | None]
 
     def _scrubbed_item(self, item: dict) -> dict:
         return {**item, "exceptionReason": self.scrub_text(item.get("exceptionReason"))}

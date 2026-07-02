@@ -280,8 +280,13 @@ class PresidioScrubber:
             )
             for et in entity_types
         }
+        # presidio-analyzer and presidio-anonymizer each declare their own
+        # RecognizerResult; passing one to the other is the documented usage,
+        # but the type-checker sees two distinct classes.
         anonymized = self._anonymizer.anonymize(
-            text=text, analyzer_results=results, operators=operators
+            text=text,
+            analyzer_results=results,  # type: ignore[arg-type]
+            operators=operators,
         )
         # Audit trail: entity types and length only — never raw content.
         _log.info(
