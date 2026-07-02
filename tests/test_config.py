@@ -130,6 +130,14 @@ def test_audit_log_path_whitespace_is_stripped():
     )
 
 
+def test_client_secret_is_excluded_from_repr():
+    # A host that logs or debug-prints its config must never echo the
+    # credential; the field is still readable, just absent from repr().
+    cfg = BPConfig(client_id="svc-mcp", client_secret="s3cret")
+    assert "s3cret" not in repr(cfg)
+    assert cfg.client_secret == "s3cret"
+
+
 def test_config_is_frozen():
     cfg = BPConfig.from_env(env={})
     try:

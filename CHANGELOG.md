@@ -8,6 +8,10 @@ additive endpoint is a minor bump.
 ## [Unreleased]
 
 ### Added
+- **`SECURITY.md`** — the security model in one place (trust boundary, what
+  leaves the process, the three action-surface layers, deployer
+  responsibilities) plus a private vulnerability-reporting channel and the
+  pre-1.0 support statement. Operational detail stays in DEPLOYMENT.md.
 - **PEP 561 `py.typed` marker** — the package ships its inline type hints, so
   embedders' type checkers see real signatures instead of `Any`.
 - **mypy type-check gate in CI** (`mypy` on `src/`, pinned version in the dev
@@ -19,6 +23,11 @@ additive endpoint is a minor bump.
 - **`ruff format --check` in CI** — formatting drift was previously invisible
   to CI (it runs `ruff check` only) and had to be caught by hand; swept the
   outstanding drift (verified formatting-only via AST diff) in the same change.
+
+### Fixed
+- **`BPConfig.client_secret` no longer appears in the config's `repr`** — a
+  host that logged or debug-printed its config object would have echoed the
+  credential.
 
 ### Changed
 - **Renamed the project `blue-prism-mcp` → `blue-prism-v7-mcp`** (distribution,
