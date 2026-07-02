@@ -1,5 +1,6 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+# >=77 for PEP 639 licence metadata (SPDX `license` expression + license-files).
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,7 +9,8 @@ version = "0.10.0"
 description = "Distributable Model Context Protocol server for Blue Prism v7 Enterprise — governed LLM access to the estate over the supported REST API."
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "Proprietary" }
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
 authors = [{ name = "Lewis Nield" }]
 keywords = ["blue-prism", "mcp", "model-context-protocol", "rpa", "v7"]
 

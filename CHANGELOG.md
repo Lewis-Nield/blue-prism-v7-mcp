@@ -30,6 +30,12 @@ additive endpoint is a minor bump.
   credential.
 
 ### Changed
+- **Relicensed from proprietary to Apache-2.0** ahead of public distribution:
+  canonical licence text in `LICENSE`, copyright in `NOTICE`, and PEP 639
+  SPDX licence metadata in the package (`license = "Apache-2.0"`,
+  `license-files`; build backend floored at setuptools 77 accordingly).
+  Permissive with an explicit patent grant — the right posture for an
+  enterprise-facing distributable.
 - **Renamed the project `blue-prism-mcp` → `blue-prism-v7-mcp`** (distribution,
   console script, and import package `blue_prism_mcp` → `blue_prism_v7_mcp`),
   matching the repository and stating the actual scope: this server targets the
