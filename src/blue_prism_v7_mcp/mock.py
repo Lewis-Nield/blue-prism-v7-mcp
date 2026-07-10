@@ -49,6 +49,9 @@ from datetime import datetime, time, timedelta, timezone
 # as time passes instead of pinning literals.
 _NOW = datetime.now(timezone.utc)
 _TODAY = _NOW.date()
+# ISO string form of _NOW, comparable lexicographically against the ISO
+# `slaDatetime` timestamps items carry (the `within_sla` computed filter).
+_NOW_ISO = _NOW.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _ts(days_ago: int, hhmmss: str = "09:00:00") -> str:
@@ -938,6 +941,9 @@ class MockBPClient:
         status: str | None = None,
         start_date: str | None = None,
         end_date: str | None = None,
+        within_sla: bool | None = None,
+        sla_before: str | None = None,
+        sort_by: str | None = None,
     ) -> list[dict]:
         items = [i for i in self._queue_items if i.get("queue") == queue_id]
         if state:
@@ -948,6 +954,12 @@ class MockBPClient:
             items = [i for i in items if (i.get("lastUpdated") or "") >= start_date]
         if end_date:
             items = [i for i in items if _at_or_before(i.get("lastUpdated"), end_date)]
+        if within_sla is not None:
+            items = [i for i in items if _item_within_sla(i) == within_sla]
+        if sla_before:
+            items = [i for i in items if (i.get("slaDatetime") or "") <= sla_before]
+        if sort_by == "LoadedDateAsc":
+            items = sorted(items, key=lambda i: i.get("loadedDate") or "")
         return [dict(i) for i in items]
 
     def get_queue_item(self, item_id: str) -> dict:
@@ -1233,6 +1245,18 @@ class MockBPClient:
             if str(schedule.get("id")) == str(schedule_id) or schedule.get("name") == schedule_id:
                 return schedule
         return None
+
+
+def _item_within_sla(item: dict) -> bool:
+    """True when an item's SLA deadline has not yet passed — the live API's
+    computed ``withinSla`` field, mirrored here off ``slaDatetime`` vs the
+    mock's captured "now". An item with no ``slaDatetime`` has nothing to
+    breach, so it reads as within SLA.
+    """
+    deadline = item.get("slaDatetime")
+    if not deadline:
+        return True
+    return deadline >= _NOW_ISO
 
 
 def _at_or_before(timestamp: str | None, bound: str) -> bool:

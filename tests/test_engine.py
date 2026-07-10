@@ -158,3 +158,50 @@ class TestValidationStaysInTheDomain:
     def test_unknown_state_is_rejected(self):
         with pytest.raises(ValueError):
             make_engine().list_queue_items(queue="Invoices", state="Nope", **WINDOW)
+
+
+class TestQueueItemFilterWidening:
+    """v0.12.0: within_sla/sla_before narrowing and loadedDate-asc sort."""
+
+    def test_window_not_required_when_within_sla_given(self):
+        engine = make_engine()
+        # No start_date/end_date at all — within_sla is scope enough.
+        ranked = engine.list_queue_items(queue="Invoices", state="Exceptioned", within_sla=False)
+        assert ranked.records
+
+    def test_window_not_required_when_sla_before_given(self):
+        engine = make_engine()
+        ranked = engine.list_queue_items(
+            queue="Invoices", state="Exceptioned", sla_before=_date(-3650)
+        )
+        assert ranked.records
+
+    def test_window_still_required_without_sla_scoping(self):
+        with pytest.raises(ValueError):
+            make_engine().list_queue_items(queue="Invoices", state="Exceptioned")
+
+    def test_malformed_sla_before_is_rejected(self):
+        with pytest.raises(ValueError):
+            make_engine().list_queue_items(
+                queue="Invoices", state="Exceptioned", within_sla=False, sla_before="not-a-date"
+            )
+
+    def test_unknown_sort_by_is_rejected(self):
+        with pytest.raises(ValueError):
+            make_engine().list_queue_items(
+                queue="Invoices", state="Exceptioned", sort_by="Bogus", **WINDOW
+            )
+
+    def test_sort_by_loaded_date_asc_changes_ranking(self):
+        engine = make_engine()
+        ranked = engine.list_queue_items(
+            queue="Invoices", state="Exceptioned", sort_by="loadedDate asc", **WINDOW
+        )
+        assert ranked.sorted_by == "loadedDate asc"
+        loaded = [i["loadedDate"] for i in ranked.records]
+        assert loaded == sorted(loaded)
+
+    def test_default_sort_is_unchanged(self):
+        engine = make_engine()
+        ranked = engine.list_queue_items(queue="Invoices", state="Exceptioned", **WINDOW)
+        assert ranked.sorted_by == "lastUpdated desc"

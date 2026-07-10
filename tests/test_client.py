@@ -519,6 +519,47 @@ class TestExtendedReads:
         client.get_queue_items("Q", state="Exceptioned")
         assert session.get.call_count == 2  # distinct cache keys, not shared
 
+    def test_get_queue_items_within_sla_sends_equals_filter(self):
+        client, session = make_client()
+        session.get.return_value = _resp([])
+        client.get_queue_items("q-uuid-1", within_sla=False)
+        assert session.get.call_args.kwargs["params"]["withinSla[eq]"] == "false"
+
+        session.get.return_value = _resp([])
+        client.get_queue_items("q-uuid-1", within_sla=True)
+        assert session.get.call_args.kwargs["params"]["withinSla[eq]"] == "true"
+
+    def test_get_queue_items_sla_before_sends_range_upper_bound(self):
+        client, session = make_client()
+        session.get.return_value = _resp([])
+        client.get_queue_items("q-uuid-1", sla_before="2026-03-07T09:30:00Z")
+        params = session.get.call_args.kwargs["params"]
+        assert params["slaDateTime[lte]"] == "2026-03-07T09:30:00Z"
+
+    def test_get_queue_items_sort_by_passes_through_raw(self):
+        client, session = make_client()
+        session.get.return_value = _resp([])
+        client.get_queue_items("q-uuid-1", sort_by="LoadedDateAsc")
+        assert session.get.call_args.kwargs["params"]["sortBy"] == "LoadedDateAsc"
+
+    def test_get_queue_items_without_sla_params_sends_no_sla_params(self):
+        client, session = make_client()
+        session.get.return_value = _resp([{"id": "i1"}])
+        client.get_queue_items("q-uuid-1")
+        params = session.get.call_args.kwargs["params"]
+        assert "withinSla[eq]" not in params
+        assert "slaDateTime[lte]" not in params
+        assert "sortBy" not in params
+
+    def test_get_queue_items_caches_per_sla_filter(self):
+        client, session = make_client()
+        session.get.return_value = _resp([{"id": "i1"}])
+        client.get_queue_items("Q", within_sla=False)
+        client.get_queue_items("Q", within_sla=True)
+        client.get_queue_items("Q", sla_before="2026-03-07")
+        client.get_queue_items("Q", sort_by="LoadedDateAsc")
+        assert session.get.call_count == 4  # each is a distinct cache key
+
     def test_get_queue_hits_single_queue_path(self):
         client, session = make_client()
         session.get.return_value = _resp({"id": "q-uuid-1", "name": "Invoices"})
@@ -1313,6 +1354,51 @@ class TestMockExtended:
 
     def test_get_queue_items_unknown_queue_is_empty(self):
         assert MockBPClient().get_queue_items("Nope") == []
+
+    def test_get_queue_items_within_sla_false_narrows_to_breached(self):
+        # Every Invoices item's slaDatetime is in the past (both the
+        # completed and the exceptioned one) — both read as breached.
+        # The Onboarding item's slaDatetime is a day ahead — still within SLA.
+        client = MockBPClient()
+        breached = client.get_queue_items(_queue_id(client), within_sla=False)
+        assert {i["keyValue"] for i in breached} == {"INV-1001", "INV-1002"}
+
+        onboarding_qid = _queue_id(client, "Onboarding")
+        ahead = client.get_queue_items(onboarding_qid, within_sla=True)
+        assert ahead and all(i["keyValue"] == "CUST-0042" for i in ahead)
+        assert client.get_queue_items(onboarding_qid, within_sla=False) == []
+
+    def test_get_queue_items_within_sla_needs_no_date_window(self):
+        client = MockBPClient()
+        # No start_date/end_date at all — withinSla is scope enough.
+        breached = client.get_queue_items(_queue_id(client), within_sla=False)
+        assert breached
+
+    def test_get_queue_items_sla_before_narrows_to_approaching_deadline(self):
+        client = MockBPClient()
+        qid = _queue_id(client)
+        # The exceptioned item's slaDatetime sits 7 days back; a far-future
+        # upper bound includes it, a far-past one excludes it.
+        assert client.get_queue_items(qid, sla_before=_date(-3650))
+        assert client.get_queue_items(qid, sla_before=_date(3650)) == []
+
+    def test_get_queue_items_sort_by_loaded_date_asc(self):
+        client = MockBPClient()
+        items = client.get_queue_items(_queue_id(client), sort_by="LoadedDateAsc")
+        loaded = [i["loadedDate"] for i in items]
+        assert loaded == sorted(loaded)
+
+    def test_get_queue_items_unknown_sort_by_is_a_no_op(self):
+        client = MockBPClient()
+        qid = _queue_id(client)
+        assert client.get_queue_items(qid) == client.get_queue_items(qid, sort_by="Bogus")
+
+    def test_get_queue_items_within_sla_true_includes_items_with_no_sla(self):
+        # An item with no slaDatetime at all has nothing to breach — it reads
+        # as within SLA (true), and is excluded from a breach (false) query.
+        client = MockBPClient(queue_items=[{"queue": "Q", "id": "i1", "state": "Pending"}])
+        assert [i["id"] for i in client.get_queue_items("Q", within_sla=True)] == ["i1"]
+        assert client.get_queue_items("Q", within_sla=False) == []
 
     def test_get_session_log(self):
         client = MockBPClient()

@@ -7,6 +7,32 @@ additive endpoint is a minor bump.
 
 ## [Unreleased]
 
+## [0.12.0] — 2026-07-10
+
+### Added
+- **`list_queue_items` gains SLA-aware narrowing and an exact-oldest sort.**
+  Three new optional filters/sorts on top of the existing state + date-window
+  read:
+  - `within_sla` (bool) sends the API's computed `withinSla[eq]` filter —
+    `within_sla=false` answers "every currently-breached item in this
+    queue" without also requiring a date window, since the SLA filter is
+    itself sufficient scope. `within_sla=true` narrows to items still ahead
+    of their deadline.
+  - `sla_before` (ISO) sends `slaDateTime[lte]`, an approaching-SLA upper
+    bound — also scope enough on its own, so the date window relaxes here
+    too.
+  - `sort_by="loadedDate asc"` asks the API to sort server-side
+    (`sortBy=LoadedDateAsc`) and re-ranks the result by `loadedDate`
+    ascending instead of the default `lastUpdated desc` — the exact oldest
+    pending item, not a `lastUpdated`-desc truncated approximation.
+  - The mandatory date window on `list_queue_items` now relaxes to optional
+    (still validated if given) whenever `within_sla` and/or `sla_before` are
+    passed; `state` stays a required filter either way.
+  - `mock.py`'s `get_queue_items` implements the same narrowing/sort
+    deterministically against the existing SLA-shaped fixture rows (no new
+    fixtures needed — several default/demo-estate items were already
+    breached or ahead of their SLA).
+
 ## [0.11.1] — 2026-07-09
 
 ### Fixed
@@ -379,7 +405,8 @@ First runnable release — the foundation, built in eight phases (see
 - FastMCP stdio server, a first-class mock run mode, console entrypoint, and
   deployment / day-one verification docs.
 
-[Unreleased]: https://github.com/Lewis-Nield/blue-prism-v7-mcp/compare/v0.11.1...HEAD
+[Unreleased]: https://github.com/Lewis-Nield/blue-prism-v7-mcp/compare/v0.12.0...HEAD
+[0.12.0]: https://github.com/Lewis-Nield/blue-prism-v7-mcp/compare/v0.11.1...v0.12.0
 [0.11.1]: https://github.com/Lewis-Nield/blue-prism-v7-mcp/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/Lewis-Nield/blue-prism-v7-mcp/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/Lewis-Nield/blue-prism-v7-mcp/compare/v0.9.0...v0.10.0

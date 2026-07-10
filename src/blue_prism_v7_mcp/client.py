@@ -545,14 +545,18 @@ class BPClient:
         status: str | None = None,
         start_date: str | None = None,
         end_date: str | None = None,
+        within_sla: bool | None = None,
+        sla_before: str | None = None,
+        sort_by: str | None = None,
     ) -> list[dict]:
         """GET /workqueues/{id}/items — items in one queue, optionally filtered.
 
         A single queue can hold millions of items, so the tool layer (Phase 4)
-        requires a state and a date window before calling this. The client stays
-        thin and speaks the spec's filter vocabulary: `state` is the lifecycle
-        enum (Pending/Locked/Deferred/Completed/Exceptioned), `status` is the
-        free user-supplied text (FullStringFilter → status[eq]), and the date
+        requires a state and a date window UNLESS the query is already scoped
+        by `within_sla`/`sla_before` (see below). The client stays thin and
+        speaks the spec's filter vocabulary: `state` is the lifecycle enum
+        (Pending/Locked/Deferred/Completed/Exceptioned), `status` is the free
+        user-supplied text (FullStringFilter → status[eq]), and the date
         window goes on lastUpdated[gte]/[lte] — the one timestamp every item
         carries regardless of state (completedDate is null for pending items).
 
@@ -563,6 +567,16 @@ class BPClient:
         item-level exception-type field; that classification lives on the
         session, via `get_session(row["sessionId"])`) — plus `sla`/
         `slaDatetime`, `loadedDate`, `processName`, and `tags`.
+
+        Three narrowing/ordering params beyond the base filters (v0.12.0):
+        `within_sla` sends the computed EqualsFilter `withinSla[eq]` (`true`/
+        `false`) — a breach query (`within_sla=False`) is itself scope enough
+        that the tool layer does not also require a date window. `sla_before`
+        sends the RangeOrEqualFilter upper bound `slaDateTime[lte]` (an
+        approaching-SLA window). `sort_by` passes straight through to the
+        API's `sortBy` enum (e.g. `LoadedDateAsc`) so a max-pages-capped fetch
+        still returns the true oldest/most-relevant items first, rather than
+        relying on a local re-sort of a possibly-truncated page set.
         """
         params: dict[str, str] = {}
         if state:
@@ -573,8 +587,24 @@ class BPClient:
             params["lastUpdated[gte]"] = start_date
         if end_date:
             params["lastUpdated[lte]"] = end_date
+        if within_sla is not None:
+            params["withinSla[eq]"] = "true" if within_sla else "false"
+        if sla_before:
+            params["slaDateTime[lte]"] = sla_before
+        if sort_by:
+            params["sortBy"] = sort_by
         return self._cached(
-            ("queue_items", queue_id, state, status, start_date, end_date),
+            (
+                "queue_items",
+                queue_id,
+                state,
+                status,
+                start_date,
+                end_date,
+                within_sla,
+                sla_before,
+                sort_by,
+            ),
             lambda: self._get_collection(
                 f"/workqueues/{queue_id}/items", base_params=params or None
             ),

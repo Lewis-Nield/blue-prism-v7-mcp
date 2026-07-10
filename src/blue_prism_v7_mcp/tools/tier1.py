@@ -30,6 +30,7 @@ from .common import (
     resource_urgency,
     to_envelope,
     validate_choice,
+    validate_iso,
     validate_optional_window,
     validate_uuid,
 )
@@ -42,6 +43,13 @@ _ITEM_ID_HINT = "Use list_queue_items to find the item's id (not its key value).
 # filter on None is meaningless). The API's `state` is what an operator calls
 # an item's status; the API's `status` field is free user-supplied text.
 ITEM_STATES = frozenset({"Pending", "Locked", "Deferred", "Completed", "Exceptioned"})
+
+# The one non-default sort a caller may request (v0.12.0): the exact oldest
+# item by loadedDate, ascending. Anything else keeps the default lastUpdated
+# desc (client-side rank, no sortBy sent). Mapped to the API's own enum
+# spelling — the tool layer speaks a friendlier "field direction" string.
+ITEM_SORTS = frozenset({"loadedDate asc"})
+_ITEM_SORT_API_VALUES = {"loadedDate asc": "LoadedDateAsc"}
 
 # SessionStatus, verified against the 7.5.1 spec.
 SESSION_STATUSES = frozenset(
@@ -283,19 +291,50 @@ class _Tier1ReadsMixin:
         self,
         queue: str,
         state: str,
-        start_date: str,
-        end_date: str,
+        start_date: str | None = None,
+        end_date: str | None = None,
         status: str | None = None,
+        within_sla: bool | None = None,
+        sla_before: str | None = None,
+        sort_by: str | None = None,
     ) -> Ranked:
-        """Rank one queue's items by recency, filtered by state and date window."""
+        """Rank one queue's items, filtered by state and (usually) a date window.
+
+        The date window is normally required — queues run to millions of
+        items — but an SLA-narrowing query (`within_sla` and/or `sla_before`)
+        is already scoped by that filter, so the window becomes optional
+        (still validated if given). `sort_by="loadedDate asc"` switches the
+        ranking from the default `lastUpdated desc` to the exact oldest item
+        first, and asks the API to sort server-side too — so the true oldest
+        item surfaces even from a max-pages-capped fetch over an unbounded
+        history.
+        """
         state = validate_choice(state, "state", ITEM_STATES)
-        require_window(start_date, end_date)
+        scoped_by_sla = within_sla is not None or sla_before is not None
+        if scoped_by_sla:
+            validate_optional_window(start_date, end_date)
+        else:
+            require_window(start_date, end_date)
+        validate_iso(sla_before, "sla_before", required=False)
+        sort_choice = validate_choice(sort_by, "sort_by", ITEM_SORTS) if sort_by else None
         queue_id = resolve_id(queue, self.client.get_queues(), entity="queue")
         items = self.client.get_queue_items(
-            queue_id, state=state, status=status, start_date=start_date, end_date=end_date
+            queue_id,
+            state=state,
+            status=status,
+            start_date=start_date,
+            end_date=end_date,
+            within_sla=within_sla,
+            sla_before=sla_before,
+            sort_by=_ITEM_SORT_API_VALUES[sort_choice] if sort_choice else None,
         )
+        scrubbed = [self._scrubbed_item(i) for i in items]
+        if sort_choice == "loadedDate asc":
+            return rank(
+                scrubbed, sort_key=lambda i: i.get("loadedDate") or "", sorted_by="loadedDate asc"
+            )
         return rank(
-            [self._scrubbed_item(i) for i in items],
+            scrubbed,
             sort_key=lambda i: i.get("lastUpdated") or "",
             sorted_by="lastUpdated desc",
             reverse=True,
@@ -588,31 +627,47 @@ def build_tier1_tools(engine) -> list[Callable]:
     def list_queue_items(
         queue: str,
         state: str,
-        start_date: str,
-        end_date: str,
+        start_date: str | None = None,
+        end_date: str | None = None,
         status: str | None = None,
+        within_sla: bool | None = None,
+        sla_before: str | None = None,
+        sort_by: str | None = None,
         limit: int = DEFAULT_LIMIT,
     ) -> dict:
-        """List items in one work queue, filtered by state and a date window.
+        """List items in one work queue, filtered by state and (usually) a date window.
 
-        All three filters are REQUIRED — queues run to millions of items, so
-        there is no unscoped listing. `queue` is a queue name (case-insensitive)
-        or id; `state` is the item lifecycle state (Pending, Locked, Deferred,
-        Completed, or Exceptioned); `start_date`/`end_date` (ISO) bound the
-        items' last-updated time. Optional `status` matches the free-text tag
-        processes attach to items.
+        `queue` is a queue name (case-insensitive) or id; `state` is the item
+        lifecycle state (Pending, Locked, Deferred, Completed, or Exceptioned)
+        and is always required. `start_date`/`end_date` (ISO) bound the items'
+        last-updated time and are normally REQUIRED too — queues run to
+        millions of items, so there is no unscoped listing — UNLESS you pass
+        `within_sla` and/or `sla_before`, which are scope enough on their own.
+        Optional `status` matches the free-text tag processes attach to items.
+
+        `within_sla` (bool) narrows to items currently within (`true`) or past
+        (`false`) their SLA deadline — `within_sla=false` with no date window
+        answers "every currently-breached item in this queue". `sla_before`
+        (ISO) is an upper bound on the SLA deadline — an approaching-SLA
+        window ("items due within the next 30 minutes": pass 30 minutes from
+        now). `sort_by="loadedDate asc"` returns the exact oldest item first
+        instead of the default most-recently-updated-first — use it for
+        "what's the oldest pending item in this queue".
 
         Each item carries its key value, priority, attempt number, timing
         fields, and — for exceptioned items — the exception reason, with
         personal data already removed. Item payload data is never included
         (the v7 list endpoint excludes it by design).
 
-        Results come back as {"items": [...], "meta": {...}}, most recently
-        updated first, capped at `limit` (default 50); meta.truncated tells
-        you whether you saw everything in the window.
+        Results come back as {"items": [...], "meta": {...}}, sorted per
+        `sort_by` (default most-recently-updated first), capped at `limit`
+        (default 50); meta.truncated tells you whether you saw everything.
         """
         return to_envelope(
-            engine.list_queue_items(queue, state, start_date, end_date, status), limit
+            engine.list_queue_items(
+                queue, state, start_date, end_date, status, within_sla, sla_before, sort_by
+            ),
+            limit,
         )
 
     def get_queue_item(item_id: str) -> dict:

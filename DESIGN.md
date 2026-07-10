@@ -104,8 +104,12 @@ library it was always implicitly built on.
 
 ### Tier 1 — Visibility (read, maps to v7 entities, envelope-shaped)
 - `list_queues` / `get_queue` — work-queue health
-- `list_queue_items` — **requires a queue + status + date window** (queues run to
-  millions of items; no estate-wide item listing). Envelope-capped.
+- `list_queue_items` — **requires a queue + state + date window** (queues run to
+  millions of items; no estate-wide item listing), UNLESS the query is already
+  scoped by `within_sla` (breached/not-yet-breached) and/or `sla_before` (an
+  approaching-SLA upper bound), in which case the window is optional. Also
+  takes `sort_by="loadedDate asc"` for the exact oldest item first (server-side
+  sorted, so a max-pages-capped fetch still returns the true oldest). Envelope-capped.
 - `get_queue_item` — one item in full **including its payload `data`** (the only
   read that returns it). The `data` DataCollection is scrubbed type-aware: free
   text through the scrubber, passwords redacted, binary/image dropped, scalars
