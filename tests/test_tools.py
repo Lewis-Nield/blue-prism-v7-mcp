@@ -442,6 +442,25 @@ class TestListQueueItems:
         )
         assert [i["id"] for i in result["items"]] == ["i1"]
 
+    def test_within_sla_narrows_without_a_date_window(self):
+        # No start_date/end_date passed at all — within_sla is scope enough.
+        result = tier1()["list_queue_items"]("Invoices", "Exceptioned", within_sla=False)
+        assert [i["keyValue"] for i in result["items"]] == ["INV-1002"]
+
+    def test_sla_before_narrows_without_a_date_window(self):
+        result = tier1()["list_queue_items"]("Invoices", "Exceptioned", sla_before=_date(-3650))
+        assert [i["keyValue"] for i in result["items"]] == ["INV-1002"]
+
+    def test_sort_by_loaded_date_asc(self):
+        result = tier1()["list_queue_items"](
+            "Invoices",
+            "Completed",
+            start_date=_date(3650),
+            end_date=_date(0),
+            sort_by="loadedDate asc",
+        )
+        assert result["meta"]["sorted_by"] == "loadedDate asc"
+
 
 def _exception_item_id(client: MockBPClient) -> str:
     qid = next(q["id"] for q in client.get_queues() if q["name"] == "Invoices")
