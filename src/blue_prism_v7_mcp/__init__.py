@@ -30,7 +30,7 @@ from .mock import MockBPClient, demo_estate
 from .pii import Scrubber, build_scrubber
 from .tools.common import Ranked
 
-__version__ = "0.11.0"
+__version__ = "0.11.1"
 
 __all__ = [
     "BPClient",

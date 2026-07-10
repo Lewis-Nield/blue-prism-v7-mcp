@@ -7,6 +7,39 @@ additive endpoint is a minor bump.
 
 ## [Unreleased]
 
+## [0.11.1] — 2026-07-09
+
+### Fixed
+- **Queue-item response models were field-incomplete in the mock fixtures,
+  docstrings, and DESIGN.md.** A spec audit against the real 7.5.1 (and
+  7.2.0) `WorkQueueItemNoData`/`WorkQueueItem` schemas found the mock only
+  ever fixtured about half their fields — most notably **`sessionId`** (the
+  item→session/resource correlation, present since at least 7.2.0), plus
+  `sla`/`slaDatetime`, `loadedDate`, `deferredDate`, `lockedDate`, `ident`,
+  `tags`, `processName`, `isSuggested`, and `attemptWorkTimeInSeconds`. The
+  client/tool pipeline already passed every field through raw — a real
+  estate was never missing anything — but the mock is the de facto contract
+  for anyone developing against this package without a live estate, so an
+  unfixtured field was effectively an invisible one.
+  - `mock.py`'s three item-fixture sites (the default queue items, the
+    default item-attempt history, and the demo estate's queue items) now
+    carry the full field set, with `sessionId` correlated to a same-resource
+    session fixture in the same estate (`None` on never-worked items).
+  - `get_queue_item` now renames the list/attempt shape's `slaDatetime`
+    (the API's own typo) to `slaDateTime` when it composes the single-item
+    read, matching the real `WorkQueueItem` schema exactly.
+  - `client.py`'s `get_queue_items`/`get_queue_item`/`get_item_attempts`
+    docstrings now document `sessionId` and the rest of the field group, and
+    DESIGN.md's item-shape bullet names them and the `slaDatetime`/
+    `slaDateTime` spelling split.
+  - **New CI guard** (`tests/test_fixture_parity.py`): every fixture row's
+    keys must be a subset of the verified `WorkQueueItemNoData`/
+    `WorkQueueItem` field lists (plus the known mock-internal `queue` key),
+    and every schema field must appear in at least one row — so a future
+    field this file forgets to fixture fails CI instead of waiting for
+    another manual spec audit. Scoped to these two models only; other
+    response shapes don't have a verified field list banked yet.
+
 ## [0.11.0] — 2026-07-02
 
 ### Added
@@ -346,7 +379,8 @@ First runnable release — the foundation, built in eight phases (see
 - FastMCP stdio server, a first-class mock run mode, console entrypoint, and
   deployment / day-one verification docs.
 
-[Unreleased]: https://github.com/Lewis-Nield/blue-prism-v7-mcp/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/Lewis-Nield/blue-prism-v7-mcp/compare/v0.11.1...HEAD
+[0.11.1]: https://github.com/Lewis-Nield/blue-prism-v7-mcp/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/Lewis-Nield/blue-prism-v7-mcp/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/Lewis-Nield/blue-prism-v7-mcp/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/Lewis-Nield/blue-prism-v7-mcp/compare/v0.8.0...v0.9.0

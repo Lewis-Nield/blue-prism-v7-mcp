@@ -558,7 +558,11 @@ class BPClient:
 
         List responses are WorkQueueItemNoData: the API excludes item payload
         data from lists by design; exceptionReason is still present (scrubbed
-        at the tool boundary).
+        at the tool boundary). Rows also carry `sessionId` — the session that
+        worked the item, the item→session/resource correlation (there is no
+        item-level exception-type field; that classification lives on the
+        session, via `get_session(row["sessionId"])`) — plus `sla`/
+        `slaDatetime`, `loadedDate`, `processName`, and `tags`.
         """
         params: dict[str, str] = {}
         if state:
@@ -589,6 +593,11 @@ class BPClient:
         encryption keys — only unencrypted or database-key-encrypted queues
         answer here; an app-server-encrypted queue's item returns a 4xx (raised
         as an HTTPError), which the tool surfaces rather than masks.
+
+        Carries the same `sessionId` correlation field as the list read, plus
+        `sla`/`slaDateTime` (this single-item shape spells it with a capital
+        T; the list/attempt NoData rows spell it `slaDatetime`), `loadedDate`,
+        `processName`, and `tags`.
         """
         return self._cached(
             ("queue_item", item_id), lambda: self._get(f"/workqueues/items/{item_id}")
@@ -601,9 +610,12 @@ class BPClient:
         Queue-scoped (the attempts path needs both ids, unlike the queue-less
         single-item read). Answers an array of WorkQueueItemNoData — one row per
         attempt, newest carrying the live state — with no payload `data` but
-        with exceptionReason present (scrubbed at the tool boundary). Attempt
-        counts are small (bounded by the queue's maxAttempts), so this is a
-        single unpaged request.
+        with exceptionReason present (scrubbed at the tool boundary). Each row
+        carries the `sessionId` of the session that worked THAT attempt (None
+        for an attempt no session has picked up yet) alongside `resource` —
+        the item→session→resource correlation per attempt, not just per item.
+        Attempt counts are small (bounded by the queue's maxAttempts), so this
+        is a single unpaged request.
         """
         return self._cached(
             ("item_attempts", queue_id, item_id),
