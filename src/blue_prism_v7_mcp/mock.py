@@ -11,17 +11,28 @@ call retry/defer/trigger and then observe the effect on a subsequent read.
 Fixture records mirror the verified v7 response schemas (see DESIGN.md's ground
 truth): queues are WorkQueueSummary (per-state item counts on the queue row),
 sessions are SessionSummary (startTime/endTime, the status enum,
-exceptionMessage/terminationReason), items are WorkQueueItemNoData (no payload
-`data`, exceptionReason present), processes are Process (processId/processName
-— the one entity not keyed id/name), log entries are SessionLogSummary, and
-schedule ids are integers (the one non-UUID id in the API). The `queue` key on
-item fixtures is mock-internal plumbing (which queue holds the item), not an
-API field — the single-item read drops it and attaches the WorkQueueItem `data`
-payload (a DataCollection, held per-item in _DEFAULT_ITEM_DATA), which the list
-read never carries. Attempt history (_DEFAULT_ITEM_ATTEMPTS) is NoData rows.
-Schedule task chains (_DEFAULT_SCHEDULE_TASKS, ScheduledTask rows keyed by
-schedule id) and their sessions (_DEFAULT_TASK_SESSIONS, keyed by task id)
-carry the integer ids and name-not-id session triples the live API answers.
+exceptionMessage/terminationReason), items are full-field WorkQueueItemNoData
+(no payload `data`, but every other field the schema carries — including
+`sessionId`, the item→session/resource correlation, and the sla/loadedDate/
+processName/tags group), processes are Process (processId/processName — the
+one entity not keyed id/name), log entries are SessionLogSummary, and schedule
+ids are integers (the one non-UUID id in the API). The `queue` key on item
+fixtures is mock-internal plumbing (which queue holds the item), not an API
+field — the single-item read drops it, renames the NoData `slaDatetime` typo
+to the single-item schema's `slaDateTime`, and attaches the WorkQueueItem
+`data` payload (a DataCollection, held per-item in _DEFAULT_ITEM_DATA), which
+the list read never carries. Attempt history (_DEFAULT_ITEM_ATTEMPTS) is
+NoData rows too, each carrying the sessionId of the session that worked that
+attempt. Schedule task chains (_DEFAULT_SCHEDULE_TASKS, ScheduledTask rows
+keyed by schedule id) and their sessions (_DEFAULT_TASK_SESSIONS, keyed by
+task id) carry the integer ids and name-not-id session triples the live API
+answers.
+
+`tests/test_fixture_parity.py` guards this completeness for the two item
+models: every fixture row's keys must be a subset of the banked schema field
+list (plus the known mock-internal `queue` key), and every schema field must
+appear in at least one row — so a future field this file forgets to fixture
+fails CI instead of waiting for another manual spec audit.
 
 Seed it with your own data, or accept the small built-in fixtures below.
 """
@@ -328,42 +339,77 @@ _DEFAULT_QUEUE_ITEMS: list[dict] = [
         "queue": _QUEUE_INVOICES,  # mock-internal: which queue holds the item
         "id": "f3b2a190-8c47-4e2d-9b55-000000000401",
         "priority": 1,
+        "ident": 1001,
         "state": "Completed",
         "keyValue": "INV-1001",
         "status": "",
+        "tags": [],
         "attemptNumber": 1,
+        "loadedDate": _ts(8, "08:55:00"),
+        "deferredDate": None,
+        "lockedDate": _ts(8, "09:00:00"),
         "lastUpdated": _ts(8, "09:05:00"),
         "completedDate": _ts(8, "09:05:00"),
         "workTimeInSeconds": 84,
+        "attemptWorkTimeInSeconds": 84,
         "exceptionReason": None,
         "resource": "BOT-01",
+        # Item → session correlation (BOT-01's completed day-8 Invoice run).
+        "sessionId": "e8a9d7c2-5f10-4b3e-bd64-000000000301",
+        "sla": 60,
+        "slaDatetime": _ts(8, "10:00:00"),
+        "processName": "Invoice Processing",
+        "isSuggested": False,
     },
     {
         "queue": _QUEUE_INVOICES,
         "id": "f3b2a190-8c47-4e2d-9b55-000000000402",
         "priority": 1,
+        "ident": 1002,
         "state": "Exceptioned",
         "keyValue": "INV-1002",
         "status": "",
+        "tags": ["supplier-query"],
         "attemptNumber": 1,
+        "loadedDate": _ts(7, "11:00:00"),
+        "deferredDate": None,
+        "lockedDate": _ts(7, "11:05:00"),
         "lastUpdated": _ts(7, "11:20:00"),
         "exceptionedDate": _ts(7, "11:20:00"),
         "workTimeInSeconds": 40,
+        "attemptWorkTimeInSeconds": 40,
         "exceptionReason": "Invoice total did not match purchase order",
         "resource": "BOT-01",
+        "sessionId": "e8a9d7c2-5f10-4b3e-bd64-000000000301",
+        "sla": 30,
+        "slaDatetime": _ts(7, "11:30:00"),  # breached shortly after the exception
+        "processName": "Invoice Processing",
+        "isSuggested": False,
     },
     {
         "queue": _QUEUE_ONBOARDING,
         "id": "f3b2a190-8c47-4e2d-9b55-000000000403",
         "priority": 2,
+        "ident": 42,
         "state": "Pending",
         "keyValue": "CUST-0042",
         "status": "",
+        "tags": [],
         "attemptNumber": 1,
+        "loadedDate": _ts(6, "07:55:00"),
+        "deferredDate": None,
+        "lockedDate": None,
         "lastUpdated": _ts(6, "08:00:00"),
         "workTimeInSeconds": 0,
+        "attemptWorkTimeInSeconds": 0,
         "exceptionReason": None,
+        # Never worked — no session has touched this item yet.
         "resource": None,
+        "sessionId": None,
+        "sla": 120,
+        "slaDatetime": _ts(-1, "08:00:00"),  # still ahead — not yet breached
+        "processName": "Customer Onboarding",
+        "isSuggested": False,
     },
 ]
 
@@ -415,29 +461,61 @@ _DEFAULT_ITEM_DATA: dict[str, dict] = {
 }
 
 # Attempt history for the single-item attempts read (WorkQueueItemNoData rows,
-# newest carrying the live state). exceptionReason is the scrub target.
+# newest carrying the live state). exceptionReason is the scrub target; each
+# row carries the sessionId of the session that worked THAT attempt (None for
+# an attempt no session has picked up yet).
 _DEFAULT_ITEM_ATTEMPTS: dict[str, list[dict]] = {
     _ITEM_INVOICE_EXCEPTION: [
         {
             "id": _ITEM_INVOICE_EXCEPTION,
+            "priority": 1,
+            "ident": 1002,
             "state": "Exceptioned",
             "keyValue": "INV-1002",
+            "status": "",
+            "tags": ["supplier-query"],
             "attemptNumber": 1,
+            "loadedDate": _ts(7, "11:00:00"),
+            "deferredDate": None,
+            "lockedDate": _ts(7, "11:05:00"),
+            "completedDate": None,
             "lastUpdated": _ts(7, "11:20:00"),
             "exceptionedDate": _ts(7, "11:20:00"),
             "workTimeInSeconds": 40,
+            "attemptWorkTimeInSeconds": 40,
             "exceptionReason": "Invoice total did not match PO; query raised by 07700 900123",
             "resource": "BOT-01",
+            "sessionId": "e8a9d7c2-5f10-4b3e-bd64-000000000301",
+            "sla": 30,
+            "slaDatetime": _ts(7, "11:30:00"),
+            "processName": "Invoice Processing",
+            "isSuggested": False,
         },
         {
             "id": _ITEM_INVOICE_EXCEPTION,
+            "priority": 1,
+            "ident": 1002,
             "state": "Pending",
             "keyValue": "INV-1002",
+            "status": "",
+            "tags": ["supplier-query"],
             "attemptNumber": 2,
+            "loadedDate": _ts(7, "11:00:00"),
+            "deferredDate": None,
+            "lockedDate": None,
+            "completedDate": None,
             "lastUpdated": _ts(7, "12:00:00"),
+            "exceptionedDate": None,
             "workTimeInSeconds": 0,
+            "attemptWorkTimeInSeconds": 0,
             "exceptionReason": None,
+            # Not yet picked up by any session.
             "resource": None,
+            "sessionId": None,
+            "sla": 30,
+            "slaDatetime": _ts(7, "11:30:00"),
+            "processName": "Invoice Processing",
+            "isSuggested": False,
         },
     ],
 }
@@ -878,9 +956,15 @@ class MockBPClient:
         # queue-less live path. The mock-internal `queue` key is dropped (it is
         # not an API field), and `data` always present like the live schema —
         # an empty collection when no payload fixture exists for the item.
+        # WorkQueueItem also spells the SLA deadline field with a capital T
+        # (`slaDateTime`) where the NoData list/attempt rows spell it
+        # `slaDatetime` (the API's own typo) — rename on the way out so the
+        # single-item shape matches the live schema exactly.
         for item in self._queue_items:
             if item.get("id") == item_id:
                 row = {k: v for k, v in item.items() if k != "queue"}
+                if "slaDatetime" in row:
+                    row["slaDateTime"] = row.pop("slaDatetime")
                 row["data"] = dict(self._item_data.get(item_id, {"rows": []}))
                 return row
         raise LookupError(f"No work queue item with id {item_id!r}")
@@ -1952,83 +2036,149 @@ def demo_estate() -> MockBPClient:
             "queue": _QUEUE_INVOICES,
             "id": "f3b2a190-8c47-4e2d-9b55-0000000d0401",
             "priority": 1,
+            "ident": 2001,
             "state": "Completed",
             "keyValue": "INV-2001",
             "status": "",
+            "tags": [],
             "attemptNumber": 1,
+            "loadedDate": _recent(345),
+            "deferredDate": None,
+            "lockedDate": _recent(342),
             "lastUpdated": _recent(340),
             "completedDate": _recent(340),
             "workTimeInSeconds": 92,
+            "attemptWorkTimeInSeconds": 92,
             "exceptionReason": None,
             "resource": "BOT-F01",
+            "sessionId": "e8a9d7c2-5f10-4b3e-bd64-0000000d0301",
+            "sla": 60,
+            "slaDatetime": _recent(300),
+            "processName": "Invoice Processing",
+            "isSuggested": False,
         },
         {
             "queue": _QUEUE_INVOICES,
             "id": "f3b2a190-8c47-4e2d-9b55-0000000d0402",
             "priority": 1,
+            "ident": 2002,
             "state": "Exceptioned",
             "keyValue": "INV-2002",
             "status": "",
+            "tags": ["supplier-query"],
             "attemptNumber": 2,
+            "loadedDate": _recent(185),
+            "deferredDate": None,
+            "lockedDate": _recent(182),
             "lastUpdated": _recent(180),
             "exceptionedDate": _recent(180),
             "workTimeInSeconds": 45,
+            "attemptWorkTimeInSeconds": 45,
             "exceptionReason": "Invoice total did not match purchase order",
             "resource": "BOT-F01",
+            "sessionId": "e8a9d7c2-5f10-4b3e-bd64-0000000d0302",
+            "sla": 45,
+            "slaDatetime": _recent(150),  # breached
+            "processName": "Invoice Processing",
+            "isSuggested": False,
         },
         {
             "queue": _QUEUE_INVOICES,
             "id": "f3b2a190-8c47-4e2d-9b55-0000000d0403",
             "priority": 1,
+            "ident": 2003,
             "state": "Exceptioned",
             "keyValue": "INV-2003",
             "status": "",
+            "tags": [],
             "attemptNumber": 1,
+            "loadedDate": _recent(125),
+            "deferredDate": None,
+            "lockedDate": _recent(122),
             "lastUpdated": _recent(120),
             "exceptionedDate": _recent(120),
             "workTimeInSeconds": 38,
+            "attemptWorkTimeInSeconds": 38,
             "exceptionReason": "Supplier not found in ledger",
             "resource": "BOT-F03",
+            "sessionId": "e8a9d7c2-5f10-4b3e-bd64-0000000d0307",
+            "sla": 30,
+            "slaDatetime": _recent(90),  # breached
+            "processName": "Invoice Processing",
+            "isSuggested": False,
         },
         {
             "queue": _QUEUE_INVOICES,
             "id": "f3b2a190-8c47-4e2d-9b55-0000000d0404",
             "priority": 2,
+            "ident": 2004,
             "state": "Pending",
             "keyValue": "INV-2004",
             "status": "",
+            "tags": [],
             "attemptNumber": 1,
+            "loadedDate": _recent(65),
+            "deferredDate": None,
+            "lockedDate": None,
             "lastUpdated": _recent(60),
             "workTimeInSeconds": 0,
+            "attemptWorkTimeInSeconds": 0,
             "exceptionReason": None,
             "resource": None,
+            "sessionId": None,
+            "sla": 90,
+            "slaDatetime": _recent(-120),  # still ahead
+            "processName": "Invoice Processing",
+            "isSuggested": False,
         },
         {
             "queue": _D_QUEUE_PAYMENTS,
             "id": "f3b2a190-8c47-4e2d-9b55-0000000d0405",
             "priority": 1,
+            "ident": 5001,
             "state": "Exceptioned",
             "keyValue": "PAY-5001",
             "status": "",
+            "tags": [],
             "attemptNumber": 1,
+            "loadedDate": _recent(215),
+            "deferredDate": None,
+            "lockedDate": _recent(212),
             "lastUpdated": _recent(210),
             "exceptionedDate": _recent(210),
             "workTimeInSeconds": 30,
+            "attemptWorkTimeInSeconds": 30,
             "exceptionReason": "BACS gateway timed out",
             "resource": "BOT-F02",
+            "sessionId": "e8a9d7c2-5f10-4b3e-bd64-0000000d0309",
+            "sla": 20,
+            "slaDatetime": _recent(180),  # breached
+            "processName": "Payment Run",
+            "isSuggested": False,
         },
         {
             "queue": _D_QUEUE_PAYMENTS,
             "id": "f3b2a190-8c47-4e2d-9b55-0000000d0406",
             "priority": 1,
+            "ident": 5002,
             "state": "Pending",
             "keyValue": "PAY-5002",
             "status": "",
+            "tags": [],
             "attemptNumber": 1,
+            "loadedDate": _recent(50),
+            "deferredDate": None,
+            "lockedDate": None,
             "lastUpdated": _recent(45),
             "workTimeInSeconds": 0,
+            "attemptWorkTimeInSeconds": 0,
             "exceptionReason": None,
             "resource": None,
+            "sessionId": None,
+            "sla": 60,
+            "slaDatetime": _recent(-15),  # still ahead
+            "processName": "Payment Run",
+            "isSuggested": False,
         },
     ]
 

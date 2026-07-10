@@ -273,6 +273,18 @@ Wire-level contract (identical across versions):
 - **The items list returns `WorkQueueItemNoData`** — the API itself excludes
   item payload `data` from list responses; only the single-item GET carries it.
   `exceptionReason` *is* present in lists and remains a scrub target.
+  `WorkQueueItemNoData` (list rows AND attempt-history rows) also carries
+  **`sessionId`** — the session that worked the item/attempt, the
+  item→session→resource correlation (`resource` is the worker's name;
+  `sessionId` is the session that produced it). There is no item-level
+  exception-type field anywhere in the API — system-vs-business
+  classification is derived by following `sessionId` to
+  `get_session`/`SessionSummary.exceptionType`. Rows also carry the
+  `sla`/`slaDatetime` pair (SLA-breach signal), `loadedDate` (true item
+  age), `processName`, and `tags`. The single-item `WorkQueueItem` carries
+  the identical field set plus `data`, but spells the SLA field
+  `slaDateTime` (capital T) where the NoData shape spells it `slaDatetime`
+  — a real API inconsistency, not a typo in this doc.
 - **`SessionSummary` carries `exceptionMessage`** (plus `exceptionType` and a
   `terminationReason` enum: None/ProcessError/InternalError), so session
   *lists* are an exception-message scrub boundary exactly like item lists'

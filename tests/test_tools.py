@@ -410,6 +410,13 @@ class TestListQueueItems:
         assert items("Invoices", "Exceptioned", _date(6), _date(0))["items"] == []
         assert items("Invoices", "Completed", _date(8), _date(8))["meta"]["total"] == 1
 
+    def test_session_id_survives_the_scrub_spread_untouched(self):
+        # sessionId is the item→session/resource correlation an agent needs
+        # to derive exception classification — it must reach the model
+        # unmodified through the {**item, exceptionReason: scrub} spread.
+        result = tier1()["list_queue_items"]("Invoices", "Exceptioned", **WINDOW)
+        assert result["items"][0]["sessionId"] == "e8a9d7c2-5f10-4b3e-bd64-000000000301"
+
     def test_status_text_filter_is_forwarded_to_the_client(self):
         client = MockBPClient(
             queues=[{"id": "q", "name": "Q"}],
@@ -532,6 +539,19 @@ class TestGetQueueItem:
         completed = client.get_queue_items(qid, state="Completed")[0]["id"]
         assert tier1(client)["get_queue_item"](completed)["data"] == {"rows": []}
 
+    def test_session_id_survives_the_scrub_spread_untouched(self):
+        client = MockBPClient()
+        item = tier1(client)["get_queue_item"](_exception_item_id(client))
+        assert item["sessionId"] == "e8a9d7c2-5f10-4b3e-bd64-000000000301"
+
+    def test_sla_date_time_is_the_single_item_capital_t_spelling(self):
+        # The single-item WorkQueueItem shape spells the SLA deadline
+        # `slaDateTime`; the list/attempt NoData shape spells it `slaDatetime`.
+        client = MockBPClient()
+        item = tier1(client)["get_queue_item"](_exception_item_id(client))
+        assert "slaDateTime" in item
+        assert "slaDatetime" not in item
+
     def test_non_collection_data_passes_through_untouched(self):
         # Defensive: a null/odd-shaped `data` (e.g. an item the server returns
         # with no collection) must survive rather than raise mid-scrub.
@@ -570,6 +590,16 @@ class TestListItemAttempts:
     def test_unknown_queue_name_fails_with_suggestions(self):
         with pytest.raises(ValueError, match="Did you mean: Invoices"):
             tier1()["list_item_attempts"]("Invocies", _exception_item_id(MockBPClient()))
+
+    def test_session_id_is_per_attempt_not_just_per_item(self):
+        # Each attempt row carries the sessionId of the session that worked
+        # THAT attempt — the exceptioned attempt was worked (a session id),
+        # the not-yet-retried attempt has none.
+        client = MockBPClient()
+        result = tier1(client)["list_item_attempts"]("Invoices", _exception_item_id(client))
+        by_attempt = {a["attemptNumber"]: a["sessionId"] for a in result["items"]}
+        assert by_attempt[1] == "e8a9d7c2-5f10-4b3e-bd64-000000000301"
+        assert by_attempt[2] is None
 
 
 class TestGetSession:
