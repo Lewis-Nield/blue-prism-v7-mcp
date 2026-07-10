@@ -326,7 +326,7 @@ class _Tier1ReadsMixin:
             end_date=end_date,
             within_sla=within_sla,
             sla_before=sla_before,
-            sort_by=_ITEM_SORT_API_VALUES.get(sort_choice),
+            sort_by=_ITEM_SORT_API_VALUES[sort_choice] if sort_choice else None,
         )
         scrubbed = [self._scrubbed_item(i) for i in items]
         if sort_choice == "loadedDate asc":
