@@ -497,13 +497,4 @@ def _validate_item_data(index: int, data: Any) -> None:
     """Validate a queue item's DataCollection payload."""
     if not isinstance(data, dict):
         raise ValueError(f"items[{index}].data must be an object (DataCollection).")
-    rows = data.get("rows")
-    if rows is None:
-        return
-    if not isinstance(rows, list):
-        raise ValueError(f"items[{index}].data.rows must be a list.")
-    for r, row in enumerate(rows):
-        if not isinstance(row, dict):
-            raise ValueError(f"items[{index}].data.rows[{r}] must be an object.")
-        for field_name, field_spec in row.items():
-            validate_data_value(f"items[{index}].data.rows[{r}].{field_name}", field_spec)
+    _validate_collection_rows(f"items[{index}].data", data)

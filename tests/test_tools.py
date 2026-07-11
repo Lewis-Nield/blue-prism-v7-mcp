@@ -1854,7 +1854,7 @@ class TestValidateQueueItems:
         assert result[0]["data"] == {"schema": "v1"}
 
     def test_data_rows_must_be_a_list(self):
-        with pytest.raises(ValueError, match="rows must be a list"):
+        with pytest.raises(ValueError, match="'rows' must be a list"):
             validate_queue_items([{"data": {"rows": "not-a-list"}}])
 
     def test_data_row_must_be_an_object(self):
