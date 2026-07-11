@@ -1212,6 +1212,44 @@ class MockBPClient:
         schedule["lastOutcome"] = "Triggered"
         return {"schedule": schedule_id, "status": "Triggered"}
 
+    def create_queue_items(self, queue_id: str, items: list[dict]) -> dict:
+        queue = next((q for q in self._queues if q["id"] == queue_id), None)
+        if queue is None:
+            raise ValueError(f"Queue {queue_id!r} not found.")
+        ids = []
+        for item in items:
+            item_id = f"f3b2a190-8c47-4e2d-9b55-{len(self._queue_items):012d}"
+            self._queue_items.append(
+                {
+                    "queue": queue_id,
+                    "id": item_id,
+                    "priority": item.get("priority", 1),
+                    "ident": len(self._queue_items) + 9000,
+                    "state": "Pending",
+                    "keyValue": None,
+                    "status": item.get("status", ""),
+                    "tags": item.get("tags", []),
+                    "attemptNumber": 1,
+                    "loadedDate": _NOW_ISO,
+                    "deferredDate": item.get("deferredDate"),
+                    "lockedDate": None,
+                    "lastUpdated": _NOW_ISO,
+                    "workTimeInSeconds": 0,
+                    "attemptWorkTimeInSeconds": 0,
+                    "exceptionReason": None,
+                    "resource": None,
+                    "sessionId": None,
+                    "sla": item.get("sla"),
+                    "slaDatetime": None,
+                    "processName": item.get("processName"),
+                    "isSuggested": item.get("isSuggested", False),
+                }
+            )
+            ids.append(item_id)
+        queue["pendingItemCount"] = queue.get("pendingItemCount", 0) + len(items)
+        queue["totalItemCount"] = queue.get("totalItemCount", 0) + len(items)
+        return {"ids": ids}
+
     def stop_schedule(self, schedule_id: str) -> None:
         # Cancels active runs; the live endpoint answers 202 with no body, so
         # the mock returns None too. Records the outcome on the fixture so a

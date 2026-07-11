@@ -179,7 +179,7 @@ reads, scoped by the same required-window rules.
 Gated behind `enable_actions=False`. Governance, capability-gating, audit, and
 dry-run scaffolding is present; the action tools are registered only when
 actions are enabled.
-- `retry_queue_item` / `defer_queue_item`
+- `retry_queue_item` / `defer_queue_item` / `create_queue_items`
 - `start_process` / `stop_session`
 - `set_schedule_enabled` / `trigger_schedule` / `stop_schedule`
 

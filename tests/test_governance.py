@@ -36,6 +36,7 @@ from blue_prism_v7_mcp.tools.common import validate_uuid
 ALL_ACTION_TOOLS = {
     "retry_queue_item",
     "defer_queue_item",
+    "create_queue_items",
     "start_process",
     "stop_session",
     "set_schedule_enabled",
@@ -84,8 +85,12 @@ class TestResolveCapabilities:
     def test_full_permissions_allow_every_action_tool(self):
         assert resolve_capabilities(_DEFAULT_PERMISSIONS) == ALL_ACTION_TOOLS
 
-    def test_queue_permission_alone_allows_only_the_item_tools(self):
-        assert resolve_capabilities(QUEUE_ONLY) == {"retry_queue_item", "defer_queue_item"}
+    def test_queue_permission_alone_allows_only_the_queue_tools(self):
+        assert resolve_capabilities(QUEUE_ONLY) == {
+            "retry_queue_item",
+            "defer_queue_item",
+            "create_queue_items",
+        }
 
     def test_no_permissions_allow_nothing(self):
         assert resolve_capabilities([]) == set()
@@ -112,6 +117,7 @@ class TestResolveCapabilities:
         assert resolve_capabilities(["  full access to QUEUE management  "]) == {
             "retry_queue_item",
             "defer_queue_item",
+            "create_queue_items",
         }
 
     def test_unknown_permissions_are_ignored(self):
@@ -212,6 +218,7 @@ class TestBuildTier3Tools:
         assert list(tools) == [
             "retry_queue_item",
             "defer_queue_item",
+            "create_queue_items",
             "start_process",
             "stop_session",
             "set_schedule_enabled",
@@ -221,7 +228,7 @@ class TestBuildTier3Tools:
 
     def test_narrow_permissions_build_only_allowed_tools(self, tmp_path):
         tools, _, _ = tier3(tmp_path, permissions=QUEUE_ONLY)
-        assert set(tools) == {"retry_queue_item", "defer_queue_item"}
+        assert set(tools) == {"retry_queue_item", "defer_queue_item", "create_queue_items"}
 
     def test_every_action_tool_warns_about_dry_run_in_its_description(self, tmp_path):
         tools, _, _ = tier3(tmp_path)
@@ -251,7 +258,11 @@ class TestBuildTier3Tools:
         tools, withheld = build_tier3_tools(
             MockBPClient(), audit=make_audit(tmp_path), permissions=QUEUE_ONLY
         )
-        assert {t.__name__ for t in tools} == {"retry_queue_item", "defer_queue_item"}
+        assert {t.__name__ for t in tools} == {
+            "retry_queue_item",
+            "defer_queue_item",
+            "create_queue_items",
+        }
         assert withheld == {
             "set_schedule_enabled": ["Edit Schedule", "Retire Schedule"],
             "start_process": [
@@ -292,6 +303,13 @@ class TestDryRunContract:
                 "defer_queue_item",
                 lambda: tools["defer_queue_item"]("Invoices", item["id"], 1, "2026-04-01T09:00:00"),
             ),
+            (
+                "create_queue_items",
+                lambda: tools["create_queue_items"](
+                    "Invoices",
+                    [{"data": {"rows": [{"Ref": {"valueType": "Text", "value": "X-1"}}]}}],
+                ),
+            ),
             ("start_process", lambda: tools["start_process"]("Invoice Processing", "BOT-01")),
             ("stop_session", lambda: tools["stop_session"](session_id)),
             (
@@ -320,6 +338,12 @@ class TestDryRunContract:
                 "item_id": item["id"],
                 "attempt_number": 1,
                 "defer_until": "2026-04-01T09:00:00",
+            },
+            {
+                "queue": "Invoices",
+                "queue_id": queue_id,
+                "item_count": 1,
+                "items": [{"fields": ["Ref"], "data_types": {"Ref": "Text"}}],
             },
             {
                 "process": "Invoice Processing",
@@ -991,6 +1015,7 @@ class TestRegisterToolsGate:
         assert names == READ_TOOLS + [
             "retry_queue_item",
             "defer_queue_item",
+            "create_queue_items",
             "start_process",
             "stop_session",
             "set_schedule_enabled",
@@ -1035,7 +1060,11 @@ class TestRegisterToolsGate:
         config = BPConfig(enable_actions=True, audit_log_path=str(path))
         client = MockBPClient(permissions=QUEUE_ONLY)
         names = register_tools(FakeApp(), client, NullScrubber(), config=config)
-        assert set(names) & ALL_ACTION_TOOLS == {"retry_queue_item", "defer_queue_item"}
+        assert set(names) & ALL_ACTION_TOOLS == {
+            "retry_queue_item",
+            "defer_queue_item",
+            "create_queue_items",
+        }
         startup = json.loads(path.read_text().splitlines()[0])
         assert startup["args"]["withheld"]["trigger_schedule"] == ["Edit Schedule"]
         assert startup["args"]["withheld"]["start_process"] == [
@@ -1063,6 +1092,107 @@ class TestRegisterToolsGate:
         register_tools(app, MockBPClient(), NullScrubber(), config=config)
         for fn in app.registered:
             assert fn.__doc__ and len(fn.__doc__.strip()) > 80, fn.__name__
+
+
+# --- create_queue_items tool ---------------------------------------------------
+
+
+class TestCreateQueueItems:
+    def test_dry_run_is_the_default_and_changes_nothing(self, tmp_path):
+        tools, audit, client = tier3(tmp_path)
+        before = len(client.get_queue_items(_queue_id(client)))
+        result = tools["create_queue_items"]("Invoices", [{"priority": 2, "tags": ["test"]}])
+        assert result["dry_run"] is True
+        assert result["would"]["queue_id"] == _queue_id(client)
+        assert result["would"]["item_count"] == 1
+        assert len(client.get_queue_items(_queue_id(client))) == before
+        assert [e["status"] for e in read_audit(audit)] == ["dry_run"]
+
+    def test_live_run_creates_items_in_the_mock_queue(self, tmp_path):
+        tools, audit, client = tier3(tmp_path)
+        queue_id = _queue_id(client)
+        before = len(client.get_queue_items(queue_id))
+        result = tools["create_queue_items"](
+            "Invoices",
+            [{"priority": 1, "status": "New"}, {"tags": ["batch"]}],
+            dry_run=False,
+        )
+        assert result["dry_run"] is False
+        assert len(result["result"]["ids"]) == 2
+        after = client.get_queue_items(queue_id)
+        assert len(after) == before + 2
+        new_items = after[before:]
+        assert new_items[0]["state"] == "Pending"
+        assert new_items[0]["priority"] == 1
+        assert new_items[1]["tags"] == ["batch"]
+        assert [e["status"] for e in read_audit(audit)] == ["attempt", "success"]
+
+    def test_dry_run_echoes_data_field_names_and_types_never_values(self, tmp_path):
+        tools, audit, _ = tier3(tmp_path)
+        result = tools["create_queue_items"](
+            "Invoices",
+            [
+                {
+                    "data": {
+                        "rows": [
+                            {
+                                "Secret": {"valueType": "Password", "value": "s3cr3t-pw"},
+                                "Amount": {"valueType": "Number", "value": 9999},
+                            }
+                        ]
+                    }
+                }
+            ],
+        )
+        item_shape = result["would"]["items"][0]
+        assert set(item_shape["fields"]) == {"Secret", "Amount"}
+        assert item_shape["data_types"] == {"Secret": "Password", "Amount": "Number"}
+        assert "s3cr3t-pw" not in json.dumps(result)
+        assert "s3cr3t-pw" not in audit.path.read_text()
+        assert "9999" not in json.dumps(result["would"]["items"])
+
+    def test_unknown_queue_fails_with_suggestions(self, tmp_path):
+        tools, _, _ = tier3(tmp_path)
+        with pytest.raises(ValueError, match="Invoices"):
+            tools["create_queue_items"]("Invoces", [{}])
+
+    def test_invalid_items_fail_before_the_audit(self, tmp_path):
+        tools, audit, _ = tier3(tmp_path)
+        with pytest.raises(ValueError, match="non-empty list"):
+            tools["create_queue_items"]("Invoices", [])
+        assert read_audit(audit) == []
+
+    def test_unknown_item_key_fails_naming_it(self, tmp_path):
+        tools, audit, _ = tier3(tmp_path)
+        with pytest.raises(ValueError, match="badKey"):
+            tools["create_queue_items"]("Invoices", [{"badKey": "x"}])
+        assert read_audit(audit) == []
+
+    def test_mock_queue_pending_count_increases(self, tmp_path):
+        tools, _, client = tier3(tmp_path)
+        before_pending = next(q for q in client.get_queues() if q["name"] == "Invoices")[
+            "pendingItemCount"
+        ]
+        tools["create_queue_items"]("Invoices", [{"priority": 1}], dry_run=False)
+        after_pending = next(q for q in client.get_queues() if q["name"] == "Invoices")[
+            "pendingItemCount"
+        ]
+        assert after_pending == before_pending + 1
+
+    def test_a_failing_write_is_audited_as_attempt_then_error(self, tmp_path):
+        class FailingClient(MockBPClient):
+            def create_queue_items(self, queue_id, items):
+                raise RuntimeError("queue locked")
+
+        client = FailingClient()
+        tools, audit, _ = tier3(tmp_path, client=client)
+        with pytest.raises(RuntimeError, match="queue locked"):
+            tools["create_queue_items"]("Invoices", [{}], dry_run=False)
+        attempt, error = read_audit(audit)
+        assert attempt["status"] == "attempt"
+        assert error["status"] == "error"
+        assert error["detail"] == "RuntimeError"
+        assert "queue locked" not in audit.path.read_text()
 
 
 # --- validate_uuid ------------------------------------------------------------------

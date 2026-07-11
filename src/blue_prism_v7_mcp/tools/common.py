@@ -275,6 +275,51 @@ DATA_VALUE_TYPES = frozenset(
 )
 
 
+def validate_data_value(name: str, spec: Any) -> dict:
+    """Validate and normalise a single Blue Prism DataValue spec.
+
+    Shared by both session start-up parameters and queue-item data rows: both
+    carry ``{"valueType": <type>, "value": <value>}`` with an optional
+    ``additionalParameters``. A malformed shape or unknown valueType fails
+    loudly naming *name* (the parameter/field context). Returns the normalised
+    entry with canonical type casing. Collection values are validated
+    recursively.
+    """
+    if not isinstance(spec, dict) or "valueType" not in spec or "value" not in spec:
+        raise ValueError(
+            f"parameter {name!r} must be an object with 'valueType' and "
+            '\'value\' (e.g. {"valueType": "Text", "value": "hello"}).'
+        )
+    value_type = validate_choice(
+        spec["valueType"], f"parameter {name!r} valueType", DATA_VALUE_TYPES
+    )
+    entry: dict[str, Any] = {"valueType": value_type, "value": spec["value"]}
+    extra = spec.get("additionalParameters")
+    if extra is not None:
+        if not isinstance(extra, list) or not all(isinstance(x, str) for x in extra):
+            raise ValueError(
+                f"parameter {name!r} additionalParameters must be an array of strings (or omitted)."
+            )
+        entry["additionalParameters"] = extra
+    if value_type == "Collection" and isinstance(spec["value"], dict):
+        _validate_collection_rows(name, spec["value"])
+    return entry
+
+
+def _validate_collection_rows(context: str, data: dict) -> None:
+    """Recursively validate a DataCollection's rows structure."""
+    rows = data.get("rows")
+    if rows is None:
+        return
+    if not isinstance(rows, list):
+        raise ValueError(f"{context} Collection 'rows' must be a list.")
+    for i, row in enumerate(rows):
+        if not isinstance(row, dict):
+            raise ValueError(f"{context} Collection rows[{i}] must be an object.")
+        for field_name, field_spec in row.items():
+            validate_data_value(f"{context}.rows[{i}].{field_name}", field_spec)
+
+
 def validate_session_parameters(parameters: Any) -> dict[str, dict] | None:
     """Validate and normalise process start-up parameters for the PUT body.
 
@@ -296,24 +341,7 @@ def validate_session_parameters(parameters: Any) -> dict[str, dict] | None:
         )
     normalised: dict[str, dict] = {}
     for name, spec in parameters.items():
-        if not isinstance(spec, dict) or "valueType" not in spec or "value" not in spec:
-            raise ValueError(
-                f"parameter {name!r} must be an object with 'valueType' and "
-                '\'value\' (e.g. {"valueType": "Text", "value": "hello"}).'
-            )
-        value_type = validate_choice(
-            spec["valueType"], f"parameter {name!r} valueType", DATA_VALUE_TYPES
-        )
-        entry: dict[str, Any] = {"valueType": value_type, "value": spec["value"]}
-        extra = spec.get("additionalParameters")
-        if extra is not None:
-            if not isinstance(extra, list) or not all(isinstance(x, str) for x in extra):
-                raise ValueError(
-                    f"parameter {name!r} additionalParameters must be an array "
-                    "of strings (or omitted)."
-                )
-            entry["additionalParameters"] = extra
-        normalised[name] = entry
+        normalised[name] = validate_data_value(name, spec)
     return normalised
 
 
@@ -390,3 +418,83 @@ def make_cached_scrub(
         return _scrub(text)
 
     return scrub_text
+
+
+# --- Queue-item validation (Tier 3, work injection) -------------------------
+
+_QUEUE_ITEM_KEYS = frozenset(
+    {"data", "deferredDate", "priority", "tags", "status", "sla", "processName", "isSuggested"}
+)
+
+
+def validate_queue_items(items: Any) -> list[dict]:
+    """Validate and normalise a batch of queue items for the POST body.
+
+    Each item is a dict of known keys only — an unknown key fails loudly
+    naming it (a typo'd key silently dropped by the server is exactly the
+    malformed-payload failure mode). Returns the normalised list ready for
+    the API body.
+    """
+    if not isinstance(items, list) or not items:
+        raise ValueError("items must be a non-empty list of objects.")
+    normalised: list[dict] = []
+    for i, item in enumerate(items):
+        if not isinstance(item, dict):
+            raise ValueError(f"items[{i}] must be an object.")
+        unknown = set(item.keys()) - _QUEUE_ITEM_KEYS
+        if unknown:
+            raise ValueError(
+                f"items[{i}] contains unknown key(s): {', '.join(sorted(unknown))}. "
+                f"Allowed: {', '.join(sorted(_QUEUE_ITEM_KEYS))}."
+            )
+        entry: dict[str, Any] = {}
+        if "data" in item:
+            _validate_item_data(i, item["data"])
+            entry["data"] = item["data"]
+        if "deferredDate" in item:
+            validate_iso(item["deferredDate"], f"items[{i}].deferredDate")
+            entry["deferredDate"] = item["deferredDate"]
+        if "priority" in item:
+            if isinstance(item["priority"], bool) or not isinstance(item["priority"], int):
+                raise ValueError(
+                    f"items[{i}].priority must be an integer; got {item['priority']!r}."
+                )
+            entry["priority"] = item["priority"]
+        if "sla" in item:
+            if item["sla"] is not None:
+                if isinstance(item["sla"], bool) or not isinstance(item["sla"], int):
+                    raise ValueError(
+                        f"items[{i}].sla must be an integer or null; got {item['sla']!r}."
+                    )
+            entry["sla"] = item["sla"]
+        if "tags" in item:
+            if not isinstance(item["tags"], list) or not all(
+                isinstance(t, str) for t in item["tags"]
+            ):
+                raise ValueError(f"items[{i}].tags must be an array of strings.")
+            entry["tags"] = item["tags"]
+        if "isSuggested" in item:
+            if not isinstance(item["isSuggested"], bool):
+                raise ValueError(
+                    f"items[{i}].isSuggested must be a boolean; got {item['isSuggested']!r}."
+                )
+            entry["isSuggested"] = item["isSuggested"]
+        if "status" in item:
+            if not isinstance(item["status"], str):
+                raise ValueError(f"items[{i}].status must be a string; got {item['status']!r}.")
+            entry["status"] = item["status"]
+        if "processName" in item:
+            if not isinstance(item["processName"], str):
+                raise ValueError(
+                    f"items[{i}].processName must be a string; got {item['processName']!r}."
+                )
+            entry["processName"] = item["processName"]
+        normalised.append(entry)
+    return normalised
+
+
+def _validate_item_data(index: int, data: Any) -> None:
+    """Validate a queue item's DataCollection payload."""
+    if not isinstance(data, dict):
+        raise ValueError(f"items[{index}].data must be an object (DataCollection).")
+    _validate_collection_rows(f"items[{index}].data", data)

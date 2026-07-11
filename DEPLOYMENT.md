@@ -56,7 +56,7 @@ there is no permission model of its own to misconfigure. Two rules follow:
 
   | Action tool | Required permissions |
   |-------------|----------------------|
-  | `retry_queue_item` / `defer_queue_item` | Full Access to Queue Management |
+  | `retry_queue_item` / `defer_queue_item` / `create_queue_items` | Full Access to Queue Management |
   | `start_process` | one of Create Process / Edit Process / Execute Process, **and** Control Resource |
   | `stop_session` | same as `start_process` (one process permission **and** Control Resource) |
   | `set_schedule_enabled` (retire) | Edit Schedule **and** Retire Schedule |
