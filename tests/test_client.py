@@ -1230,6 +1230,27 @@ class TestTierThreeWrites:
         client.trigger_schedule("sched-1", start_time="2026-06-10T09:00:00Z")
         assert session.post.call_args.kwargs["json"] == {"startTime": "2026-06-10T09:00:00Z"}
 
+    def test_create_queue_items_posts_the_array_body(self):
+        client, session = make_client()
+        prime_token(client)
+        session.post.return_value = _resp({"ids": ["id-1", "id-2"]}, 201)
+        items = [{"data": {"rows": []}}, {"priority": 1}]
+        result = client.create_queue_items("q-1", items)
+        assert result == {"ids": ["id-1", "id-2"]}
+        call = session.post.call_args
+        assert call.args[0].endswith("/workqueues/q-1/items")
+        assert call.kwargs["json"] == items
+
+    def test_create_queue_items_clears_the_cache(self):
+        client, session = make_client()
+        prime_token(client)
+        session.post.return_value = _resp({"ids": ["id-1"]}, 201)
+        client._cache.set("resources", [{"id": "r1"}])
+        client.create_queue_items("q-1", [{}])
+        from blue_prism_v7_mcp.cache import MISS
+
+        assert client._cache.get("resources") is MISS
+
     def test_stop_schedule_deletes_the_active_runs(self):
         # trigger_schedule's incident sibling: DELETE /schedules/{id}/runs/active,
         # answering 202 with no body (→ None).

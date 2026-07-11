@@ -59,6 +59,7 @@ READ_TOOLS = {
 ACTION_TOOLS = {
     "retry_queue_item",
     "defer_queue_item",
+    "create_queue_items",
     "start_process",
     "stop_session",
     "set_schedule_enabled",

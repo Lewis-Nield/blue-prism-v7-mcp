@@ -25,7 +25,13 @@ from blue_prism_v7_mcp.tools import (
     register_tools,
     resolve_id,
 )
-from blue_prism_v7_mcp.tools.common import require_window, validate_choice, validate_iso
+from blue_prism_v7_mcp.tools.common import (
+    require_window,
+    validate_choice,
+    validate_data_value,
+    validate_iso,
+    validate_queue_items,
+)
 
 
 class MarkerScrubber:
@@ -1710,3 +1716,161 @@ class TestRegisterTools:
 
     def test_default_limit_is_fifty(self):
         assert DEFAULT_LIMIT == 50
+
+
+# --- validate_data_value (refactored out of validate_session_parameters) --------
+
+
+class TestValidateDataValue:
+    def test_canonicalises_value_type_case(self):
+        result = validate_data_value("X", {"valueType": "text", "value": "hello"})
+        assert result == {"valueType": "Text", "value": "hello"}
+
+    def test_rejects_missing_value_type(self):
+        with pytest.raises(ValueError, match="valueType"):
+            validate_data_value("X", {"value": "hello"})
+
+    def test_rejects_missing_value(self):
+        with pytest.raises(ValueError, match="valueType"):
+            validate_data_value("X", {"valueType": "Text"})
+
+    def test_rejects_non_dict(self):
+        with pytest.raises(ValueError, match="X"):
+            validate_data_value("X", "just-a-string")
+
+    def test_validates_additional_parameters(self):
+        result = validate_data_value(
+            "Doc", {"valueType": "Collection", "value": [], "additionalParameters": ["A"]}
+        )
+        assert result["additionalParameters"] == ["A"]
+
+    def test_rejects_non_string_additional_parameters(self):
+        with pytest.raises(ValueError, match="additionalParameters"):
+            validate_data_value(
+                "Doc", {"valueType": "Text", "value": "", "additionalParameters": [1]}
+            )
+
+    def test_collection_value_validates_nested_rows(self):
+        nested = {"rows": [{"Amount": {"valueType": "Number", "value": 42}}]}
+        result = validate_data_value("Data", {"valueType": "Collection", "value": nested})
+        assert result["valueType"] == "Collection"
+
+    def test_collection_rejects_invalid_nested_value_type(self):
+        nested = {"rows": [{"X": {"valueType": "Spreadsheet", "value": "y"}}]}
+        with pytest.raises(ValueError, match="Spreadsheet"):
+            validate_data_value("Data", {"valueType": "Collection", "value": nested})
+
+    def test_collection_with_no_rows_key_passes(self):
+        result = validate_data_value("Data", {"valueType": "Collection", "value": {"schema": "v1"}})
+        assert result["valueType"] == "Collection"
+
+    def test_collection_rows_must_be_a_list(self):
+        with pytest.raises(ValueError, match="rows.*must be a list"):
+            validate_data_value("D", {"valueType": "Collection", "value": {"rows": "bad"}})
+
+    def test_collection_row_must_be_an_object(self):
+        with pytest.raises(ValueError, match="rows\\[0\\].*must be an object"):
+            validate_data_value("D", {"valueType": "Collection", "value": {"rows": [42]}})
+
+
+# --- validate_queue_items -------------------------------------------------------
+
+
+class TestValidateQueueItems:
+    def test_accepts_a_minimal_item(self):
+        result = validate_queue_items([{}])
+        assert result == [{}]
+
+    def test_rejects_empty_list(self):
+        with pytest.raises(ValueError, match="non-empty list"):
+            validate_queue_items([])
+
+    def test_rejects_non_list(self):
+        with pytest.raises(ValueError, match="non-empty list"):
+            validate_queue_items("not a list")
+
+    def test_rejects_non_dict_item(self):
+        with pytest.raises(ValueError, match="items\\[0\\] must be an object"):
+            validate_queue_items(["string"])
+
+    def test_rejects_unknown_key_naming_it(self):
+        with pytest.raises(ValueError, match="defferedDate"):
+            validate_queue_items([{"defferedDate": "2026-01-01"}])
+
+    def test_unknown_key_error_names_index(self):
+        with pytest.raises(ValueError, match="items\\[1\\]"):
+            validate_queue_items([{}, {"badKey": 1}])
+
+    def test_validates_deferred_date_as_iso(self):
+        with pytest.raises(ValueError, match="deferredDate"):
+            validate_queue_items([{"deferredDate": "next tuesday"}])
+
+    def test_accepts_valid_deferred_date(self):
+        result = validate_queue_items([{"deferredDate": "2026-04-01T09:00:00"}])
+        assert result[0]["deferredDate"] == "2026-04-01T09:00:00"
+
+    def test_priority_must_be_int(self):
+        with pytest.raises(ValueError, match="priority"):
+            validate_queue_items([{"priority": "high"}])
+
+    def test_priority_rejects_bool(self):
+        with pytest.raises(ValueError, match="priority"):
+            validate_queue_items([{"priority": True}])
+
+    def test_sla_accepts_none(self):
+        result = validate_queue_items([{"sla": None}])
+        assert result[0]["sla"] is None
+
+    def test_sla_must_be_int_or_none(self):
+        with pytest.raises(ValueError, match="sla"):
+            validate_queue_items([{"sla": "60"}])
+
+    def test_tags_must_be_string_array(self):
+        with pytest.raises(ValueError, match="tags"):
+            validate_queue_items([{"tags": [1, 2]}])
+
+    def test_is_suggested_must_be_bool(self):
+        with pytest.raises(ValueError, match="isSuggested"):
+            validate_queue_items([{"isSuggested": "yes"}])
+
+    def test_status_must_be_string(self):
+        with pytest.raises(ValueError, match="status"):
+            validate_queue_items([{"status": 123}])
+
+    def test_process_name_must_be_string(self):
+        with pytest.raises(ValueError, match="processName"):
+            validate_queue_items([{"processName": 42}])
+
+    def test_data_collection_validates_rows(self):
+        with pytest.raises(ValueError, match="valueType"):
+            validate_queue_items([{"data": {"rows": [{"X": {"valueType": "Bad", "value": ""}}]}}])
+
+    def test_data_must_be_object(self):
+        with pytest.raises(ValueError, match="data must be an object"):
+            validate_queue_items([{"data": "not-an-object"}])
+
+    def test_data_with_no_rows_key_is_accepted(self):
+        result = validate_queue_items([{"data": {"schema": "v1"}}])
+        assert result[0]["data"] == {"schema": "v1"}
+
+    def test_data_rows_must_be_a_list(self):
+        with pytest.raises(ValueError, match="rows must be a list"):
+            validate_queue_items([{"data": {"rows": "not-a-list"}}])
+
+    def test_data_row_must_be_an_object(self):
+        with pytest.raises(ValueError, match="rows\\[0\\] must be an object"):
+            validate_queue_items([{"data": {"rows": ["string"]}}])
+
+    def test_full_item_round_trips(self):
+        item = {
+            "data": {"rows": [{"Ref": {"valueType": "Text", "value": "INV-1"}}]},
+            "deferredDate": "2026-06-01T10:00:00",
+            "priority": 2,
+            "tags": ["urgent"],
+            "status": "New",
+            "sla": 30,
+            "processName": "Invoice Processing",
+            "isSuggested": False,
+        }
+        result = validate_queue_items([item])
+        assert result[0] == item

@@ -7,6 +7,28 @@ additive endpoint is a minor bump.
 
 ## [Unreleased]
 
+## [0.13.0] — 2026-07-11
+
+### Added
+- **`create_queue_items` — batch work injection (Tier 3).** A new governed
+  action tool that injects items into a work queue for digital workers to
+  process. Batch-first (the API body is always an array; a single create is a
+  batch of one). Carries the same governance contract as every Tier 3 tool:
+  dry-run by default, capability-gated on `Full Access to Queue Management`,
+  and audit-logged with field names/types only (never data values — a field
+  can be a Password). Validates the full item shape locally before reaching
+  the API: unknown keys fail loudly naming the typo, data rows are validated
+  recursively (same rules as session parameters), and each typed field is
+  checked with an indexed error message.
+
+### Changed
+- **`validate_session_parameters` refactored.** The per-value validation loop
+  is extracted into a shared `validate_data_value` helper that both session
+  parameters and queue-item data rows call — zero behaviour change on the
+  session-parameter path (existing tests pass untouched), but the
+  canonicalisation and validation now apply identically to queue-item
+  DataCollection payloads including nested Collection recursion.
+
 ## [0.12.0] — 2026-07-10
 
 ### Added

@@ -1008,3 +1008,12 @@ class BPClient:
         with no body (→ None).
         """
         return self._write("DELETE", f"/schedules/{schedule_id}/runs/active")
+
+    def create_queue_items(self, queue_id: str, items: list[dict]) -> dict:
+        """POST /workqueues/{id}/items — inject work items into a queue.
+
+        Batch-first: the API body is always an array (a single create is a
+        batch of one). Answers 201 with {"ids": [...]}, one UUID per item
+        created, in the same order as the request array.
+        """
+        return self._write("POST", f"/workqueues/{queue_id}/items", body=items)

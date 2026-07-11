@@ -10,8 +10,9 @@ Tiers (see DESIGN.md):
     Tier 2 Insight   — exception_summary, estate_exception_summary,
         throughput_summary, estate_health, license_entitlement,
         resource_utilization
-    Tier 3 Control   — retry/defer queue items, start_process, stop_session,
-        schedule control (set_schedule_enabled, trigger_schedule, stop_schedule).
+    Tier 3 Control   — retry/defer/create queue items, start_process,
+        stop_session, schedule control (set_schedule_enabled,
+        trigger_schedule, stop_schedule).
         Registered ONLY when config.enable_actions is True (Phase 5).
 
 Shared contract (common.py): the envelope

@@ -66,6 +66,7 @@ _SCHEDULE_RUN_CONTROL = (("Edit Schedule",),)
 TOOL_PERMISSIONS: dict[str, tuple[tuple[str, ...], ...]] = {
     "retry_queue_item": ((_QUEUE_FULL_ACCESS,),),
     "defer_queue_item": ((_QUEUE_FULL_ACCESS,),),
+    "create_queue_items": ((_QUEUE_FULL_ACCESS,),),
     "start_process": _SESSION_CONTROL,
     "stop_session": _SESSION_CONTROL,
     # PUT /schedules/{id}: retiring needs Edit + Retire; UNretiring needs

@@ -42,6 +42,7 @@ from .common import (
     resolve_id,
     validate_iso,
     validate_positive_int,
+    validate_queue_items,
     validate_session_parameters,
     validate_uuid,
 )
@@ -49,6 +50,29 @@ from .common import (
 _log = logging.getLogger("blue_prism_v7_mcp.tier3")
 
 _ITEM_ID_HINT = "Use list_queue_items to find the item's id (not its key value)."
+
+
+def _item_audit_shape(item: dict) -> dict:
+    """The audit-safe shape of one queue item: field names and types, never values."""
+    shape: dict[str, Any] = {}
+    if "data" in item and isinstance(item["data"], dict):
+        rows = item["data"].get("rows")
+        if isinstance(rows, list):
+            fields = []
+            data_types: dict[str, str] = {}
+            for row in rows:
+                if isinstance(row, dict):
+                    for name, spec in row.items():
+                        if name not in data_types:
+                            fields.append(name)
+                        if isinstance(spec, dict) and "valueType" in spec:
+                            data_types[name] = spec["valueType"]
+            shape["fields"] = fields
+            shape["data_types"] = data_types
+    for key in ("deferredDate", "priority", "tags", "status", "sla", "processName", "isSuggested"):
+        if key in item:
+            shape[key] = item[key]
+    return shape
 
 
 def build_tier3_tools(
@@ -170,6 +194,51 @@ def build_tier3_tools(
             args,
             dry_run,
             lambda: client.defer_queue_item(queue_id, item_id, attempt_number, defer_until),
+        )
+
+    def create_queue_items(queue: str, items: list, dry_run: bool = True) -> dict:
+        """Inject work items into a queue for digital workers to process.
+
+        `queue` is the queue name (case-insensitive, as shown in list_queues)
+        or its UUID. `items` is a list of item objects (batch-first — a single
+        item is a list of one). Each item may contain:
+
+        - data: a DataCollection {"rows": [{fieldName: {"valueType": ...,
+          "value": ...}, ...}, ...]} — the item's typed payload, e.g.
+          {"rows": [{"InvoiceNo": {"valueType": "Text", "value": "INV-001"}}]}
+        - deferredDate: ISO datetime — hold the item until this time
+        - priority: integer (lower = higher priority)
+        - tags: array of strings
+        - status: string (free-text user status)
+        - sla: integer (minutes) or null
+        - processName: string (process that should work this item)
+        - isSuggested: boolean
+
+        By default this is a DRY RUN: it validates and returns the exact call
+        it would make without changing anything. Pass dry_run=false to
+        actually create the items; the result then carries the new item ids.
+        Every invocation is audit-logged — data field names and types only,
+        never their values.
+
+        CAUTION: this write has not been verified against a live estate;
+        live-test before relying on it in production — malformed payloads
+        enter real work queues. The batch endpoint does not support
+        app-server-based encryption keys; behaviour against an encrypted
+        queue is a day-one verification item.
+        """
+        queue_id = resolve_id(queue, client.get_queues(), entity="queue")
+        validated = validate_queue_items(items)
+        args: dict[str, Any] = {
+            "queue": queue,
+            "queue_id": queue_id,
+            "item_count": len(validated),
+            "items": [_item_audit_shape(item) for item in validated],
+        }
+        return _run(
+            "create_queue_items",
+            args,
+            dry_run,
+            lambda: client.create_queue_items(queue_id, validated),
         )
 
     def start_process(
@@ -338,6 +407,7 @@ def build_tier3_tools(
     tools: list[Callable] = [
         retry_queue_item,
         defer_queue_item,
+        create_queue_items,
         start_process,
         stop_session,
         set_schedule_enabled,
