@@ -1316,6 +1316,10 @@ class TestMockExtended:
         with pytest.raises(LookupError):
             MockBPClient().get_queue("no-such-queue")
 
+    def test_create_queue_items_unknown_queue_raises(self):
+        with pytest.raises(ValueError, match="not found"):
+            MockBPClient().create_queue_items("no-such-queue", [{}])
+
     def test_get_current_limits_and_usage(self):
         usage = MockBPClient().get_current_limits_and_usage()
         assert "concurrentSessionsUsed" in usage
