@@ -7,6 +7,13 @@ additive endpoint is a minor bump.
 
 ## [Unreleased]
 
+### Fixed
+- **`_validate_collection_rows` now canonicalises queue-item data rows in
+  place**, not just session parameters — a lowercase `valueType` inside a
+  queue item's `data` (including nested Collections) is normalised before it
+  reaches the POST body and the audit shape, matching the 0.13.0 changelog's
+  claim that canonicalisation applies identically to both paths.
+
 ## [0.13.0] — 2026-07-11
 
 ### Added

@@ -51,6 +51,12 @@ no backports; fixes ship as a new release on top of the current line.
   names, ids, names, dates, statuses, and PII entity *types* — never payloads
   or exception text (exception messages can echo response content, which is
   itself a scrub target).
+- **Where the "never values" line sits for queue items.** For `create_queue_items`,
+  a queue item's `data` field VALUES are never written to the audit log or the
+  dry-run echo — only field names and valueTypes (a field can be a Password).
+  Item METADATA — `status`, `tags`, `processName`, `deferredDate`, `priority`,
+  `sla`, `isSuggested` — is logged verbatim. Treat those metadata fields as
+  audit-visible free text and keep sensitive data in `data` fields, not there.
 - **stdout is JSON-RPC only.** The stdio transport owns stdout; all logging
   goes to stderr, and the audit trail goes to its own file.
 

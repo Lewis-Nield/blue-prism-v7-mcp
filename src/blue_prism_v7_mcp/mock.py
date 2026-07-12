@@ -39,6 +39,7 @@ Seed it with your own data, or accept the small built-in fixtures below.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import datetime, time, timedelta, timezone
 
 # Fixtures are anchored to a "now" captured once at import, so the mock estate
@@ -808,14 +809,20 @@ class MockBPClient:
         environment_variables: list[dict] | None = None,
         process_groups: list[dict] | None = None,
         resource_utilization: list[dict] | None = None,
+        now_fn: Callable[[], datetime] | None = None,
+        settle_after: timedelta = timedelta(minutes=5),
     ) -> None:
-        self._resources = resources if resources is not None else list(_DEFAULT_RESOURCES)
+        self._resources = (
+            resources if resources is not None else [dict(r) for r in _DEFAULT_RESOURCES]
+        )
         self._queues = queues if queues is not None else [dict(q) for q in _DEFAULT_QUEUES]
         self._schedules = (
             schedules if schedules is not None else [dict(s) for s in _DEFAULT_SCHEDULES]
         )
         self._sessions = sessions if sessions is not None else [dict(s) for s in _DEFAULT_SESSIONS]
-        self._processes = processes if processes is not None else list(_DEFAULT_PROCESSES)
+        self._processes = (
+            processes if processes is not None else [dict(p) for p in _DEFAULT_PROCESSES]
+        )
         self._queue_items = (
             queue_items if queue_items is not None else [dict(i) for i in _DEFAULT_QUEUE_ITEMS]
         )
@@ -890,16 +897,118 @@ class MockBPClient:
         # Start-up parameters applied per session id (kept out of the session
         # rows so they don't leak into list_sessions output).
         self._session_parameters: dict[str, dict] = {}
+        self._now: Callable[[], datetime] = now_fn or (lambda: datetime.now(timezone.utc))
+        self._settle_after = settle_after
+        self._live_run_ids: set[str] = set()
+        self._live_schedule_log_ids: set[int] = set()
 
     def clear_cache(self) -> None:
         """No-op — the mock has no cache, but keeps the interface identical."""
 
+    def _fmt(self, dt: datetime) -> str:
+        return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def _duration(self, start: datetime, end: datetime) -> str:
+        delta = end - start
+        hours, rem = divmod(int(max(delta.total_seconds(), 0)), 3600)
+        mins, secs = divmod(rem, 60)
+        return f"{hours:02d}:{mins:02d}:{secs:02d}"
+
+    def _release_worker(self, resource_id: str, resource_name: str) -> None:
+        row = next(
+            (r for r in self._resources if r["id"] == resource_id or r["name"] == resource_name),
+            None,
+        )
+        if row is None:
+            return
+        row["activeSessionCount"] = max(0, row.get("activeSessionCount", 1) - 1)
+        if row["activeSessionCount"] == 0 and row.get("displayStatus") == "Working":
+            row["displayStatus"] = "Idle"
+
+    def _occupy_worker(self, resource_id: str, resource_name: str) -> None:
+        row = next(
+            (r for r in self._resources if r["id"] == resource_id or r["name"] == resource_name),
+            None,
+        )
+        if row is None:
+            return
+        row["activeSessionCount"] = row.get("activeSessionCount", 0) + 1
+        row["displayStatus"] = "Working"
+
+    def _recount_queue(self, queue_row: dict) -> None:
+        queue_row["totalItemCount"] = (
+            queue_row.get("pendingItemCount", 0)
+            + queue_row.get("completedItemCount", 0)
+            + queue_row.get("lockedItemCount", 0)
+            + queue_row.get("exceptionedItemCount", 0)
+        )
+
+    def _settle(self) -> None:
+        now = self._now()
+        settled_runs: set[str] = set()
+        for sid in list(self._live_run_ids):
+            session = self._find_session(sid)
+            if session is None:
+                self._live_run_ids.discard(sid)
+                continue
+            start = datetime.strptime(session["startTime"], "%Y-%m-%dT%H:%M:%SZ").replace(
+                tzinfo=timezone.utc
+            )
+            if now - start < self._settle_after:
+                continue
+            session["status"] = "Completed"
+            session["endTime"] = self._fmt(now)
+            self._release_worker(session.get("resourceId", ""), session.get("resourceName", ""))
+            self._limits_and_usage["concurrentSessionsUsed"] = max(
+                0, self._limits_and_usage.get("concurrentSessionsUsed", 1) - 1
+            )
+            log = self._session_logs.get(sid)
+            if log is not None:
+                max_log = max((e["logNumber"] for e in log), default=0)
+                log.append(
+                    {
+                        "logNumber": max_log + 1,
+                        "stageName": "End",
+                        "stageType": "End",
+                        "result": "",
+                        "resourceStartTime": self._fmt(now),
+                    }
+                )
+            settled_runs.add(sid)
+        self._live_run_ids -= settled_runs
+
+        settled_logs: set[int] = set()
+        for log_id in list(self._live_schedule_log_ids):
+            log_row = None
+            for rows in self._schedule_logs.values():
+                for r in rows:
+                    if r.get("scheduleLogId") == log_id:
+                        log_row = r
+                        break
+                if log_row is not None:
+                    break
+            if log_row is None:
+                self._live_schedule_log_ids.discard(log_id)
+                continue
+            start = datetime.strptime(log_row["startTime"], "%Y-%m-%dT%H:%M:%SZ").replace(
+                tzinfo=timezone.utc
+            )
+            if now - start < self._settle_after:
+                continue
+            log_row["status"] = "completed"
+            log_row["endTime"] = self._fmt(now)
+            log_row["duration"] = self._duration(start, now)
+            settled_logs.add(log_id)
+        self._live_schedule_log_ids -= settled_logs
+
     # --- Tier 1 reads -------------------------------------------------------
 
     def get_resources(self) -> list[dict]:
+        self._settle()
         return [dict(r) for r in self._resources]
 
     def get_queues(self) -> list[dict]:
+        self._settle()
         return [dict(q) for q in self._queues]
 
     def get_queue(self, queue_id: str) -> dict:
@@ -917,6 +1026,7 @@ class MockBPClient:
     def get_sessions(
         self, start_date: str | None = None, end_date: str | None = None
     ) -> list[dict]:
+        self._settle()
         sessions = self._sessions
         if start_date:
             sessions = [s for s in sessions if (s.get("startTime") or "") >= start_date]
@@ -925,7 +1035,7 @@ class MockBPClient:
         return [dict(s) for s in sessions]
 
     def get_session(self, session_id: str) -> dict:
-        # Single-session detail; strict like the live 404 → unknown id raises.
+        self._settle()
         session = self._find_session(session_id)
         if session is None:
             raise LookupError(f"No session with id {session_id!r}")
@@ -999,6 +1109,7 @@ class MockBPClient:
         # Mirror the live server-side filters: errors_only narrows to the
         # exception-handling stage types, the window bounds resourceStartTime,
         # and the pages come back newest-stage-first (sortBy=LogNumberDesc).
+        self._settle()
         entries = self._session_logs.get(session_id, [])
         if errors_only:
             entries = [e for e in entries if e.get("stageType") in _ERROR_STAGE_TYPES]
@@ -1013,6 +1124,7 @@ class MockBPClient:
         # The most recent run (by startTime) for the schedule, or None when it
         # has never run — mirrors /scheduleLogs/{id}?sortBy=StartTimeDesc capped
         # to one row. Keyed by id as a string (schedule ids are integers).
+        self._settle()
         runs = self._schedule_logs.get(str(schedule_id), [])
         if not runs:
             return None
@@ -1065,6 +1177,7 @@ class MockBPClient:
         # with schedule_id), status matched case-insensitively (the query enum
         # is Capitalised, response rows spell it lowercase), the window on
         # startTime, newest first.
+        self._settle()
         if schedule_id is not None:
             rows = list(self._schedule_logs.get(str(schedule_id), []))
         else:
@@ -1080,6 +1193,7 @@ class MockBPClient:
         return [dict(r) for r in rows]
 
     def get_current_limits_and_usage(self) -> dict:
+        self._settle()
         return dict(self._limits_and_usage)
 
     def get_license_entitlement(self) -> dict:
@@ -1140,8 +1254,46 @@ class MockBPClient:
         item = self._find_item(queue_id, item_id)
         if item is None:
             return None
+        prev_state = item.get("state")
         item["state"] = "Pending"
         item["attemptNumber"] = int(item.get("attemptNumber", 1)) + 1
+        item["lastUpdated"] = self._fmt(self._now())
+        item["exceptionReason"] = None
+        item["resource"] = None
+        item.pop("exceptionedDate", None)
+        queue = next((q for q in self._queues if q["id"] == queue_id), None)
+        if queue is not None and prev_state == "Exceptioned":
+            queue["exceptionedItemCount"] = max(0, queue.get("exceptionedItemCount", 1) - 1)
+            queue["pendingItemCount"] = queue.get("pendingItemCount", 0) + 1
+            self._recount_queue(queue)
+        attempts = self._item_attempts.setdefault(item_id, [])
+        attempts.append(
+            {
+                "id": item_id,
+                "priority": item.get("priority", 1),
+                "ident": item.get("ident"),
+                "state": "Pending",
+                "keyValue": item.get("keyValue"),
+                "status": item.get("status", ""),
+                "tags": list(item.get("tags", [])),
+                "attemptNumber": item["attemptNumber"],
+                "loadedDate": item.get("loadedDate"),
+                "deferredDate": None,
+                "lockedDate": None,
+                "completedDate": None,
+                "lastUpdated": item["lastUpdated"],
+                "exceptionedDate": None,
+                "workTimeInSeconds": 0,
+                "attemptWorkTimeInSeconds": 0,
+                "exceptionReason": None,
+                "resource": None,
+                "sessionId": None,
+                "sla": item.get("sla"),
+                "slaDatetime": item.get("slaDatetime"),
+                "processName": item.get("processName"),
+                "isSuggested": item.get("isSuggested", False),
+            }
+        )
         return {"attemptId": item["attemptNumber"]}
 
     def defer_queue_item(
@@ -1160,43 +1312,91 @@ class MockBPClient:
         except (TypeError, ValueError):
             return None
         if attempt_id == current:
+            prev_state = item.get("state")
             item["state"] = "Deferred"
             item["deferredDate"] = defer_until
+            item["lastUpdated"] = self._fmt(self._now())
+            queue = next((q for q in self._queues if q["id"] == queue_id), None)
+            if queue is not None and prev_state == "Pending":
+                queue["pendingItemCount"] = max(0, queue.get("pendingItemCount", 1) - 1)
+                self._recount_queue(queue)
+            self._deferred_by_queue[queue_id] = self._deferred_by_queue.get(queue_id, 0) + 1
         return None
 
     def start_process(
         self, process_id: str, resource_id: str, parameters: dict | None = None
     ) -> dict:
         self._session_counter += 1
-        # Live v7 always answers a bare session UUID, and stop_session validates
-        # its argument as one — so the mock mints UUID-shaped ids too (in a range
-        # clear of the seeded fixtures), keeping the start_process → stop_session
-        # workflow exercisable under mock run mode.
         session_id = f"e8a9d7c2-5f10-4b3e-bd64-{self._session_counter:012d}"
         if parameters:
             self._session_parameters[session_id] = parameters
+        now = self._now()
+        start_time = self._fmt(now)
+        process_name = next(
+            (p["processName"] for p in self._processes if p["processId"] == process_id),
+            process_id,
+        )
+        resource_name = next(
+            (r["name"] for r in self._resources if r["id"] == resource_id),
+            resource_id,
+        )
+        max_number = max((s.get("sessionNumber", 0) for s in self._sessions), default=0)
         self._sessions.append(
             {
                 "sessionId": session_id,
-                "sessionNumber": len(self._sessions) + 1,
+                "sessionNumber": max_number + 1,
                 "processId": process_id,
-                "processName": process_id,
+                "processName": process_name,
                 "resourceId": resource_id,
-                "resourceName": resource_id,
+                "resourceName": resource_name,
                 "status": "Running",
-                "startTime": "",
+                "startTime": start_time,
                 "endTime": None,
                 "terminationReason": "None",
                 "exceptionType": None,
                 "exceptionMessage": None,
             }
         )
+        self._occupy_worker(resource_id, resource_name)
+        self._limits_and_usage["concurrentSessionsUsed"] = (
+            self._limits_and_usage.get("concurrentSessionsUsed", 0) + 1
+        )
+        self._session_logs[session_id] = [
+            {
+                "logNumber": 1,
+                "stageName": "Start",
+                "stageType": "Start",
+                "result": "",
+                "resourceStartTime": start_time,
+            }
+        ]
+        self._live_run_ids.add(session_id)
         return {"sessionId": session_id, "status": "Running"}
 
     def stop_session(self, session_id: str) -> dict:
         session = self._find_session(session_id)
         if session is not None:
+            was_live = session.get("status") in ("Running", "Stopping", "Warning")
             session["status"] = "Stopped"
+            session["endTime"] = self._fmt(self._now())
+            if was_live:
+                self._release_worker(session.get("resourceId", ""), session.get("resourceName", ""))
+                self._limits_and_usage["concurrentSessionsUsed"] = max(
+                    0, self._limits_and_usage.get("concurrentSessionsUsed", 1) - 1
+                )
+            self._live_run_ids.discard(session_id)
+            log = self._session_logs.get(session_id)
+            if log is not None:
+                max_log = max((e["logNumber"] for e in log), default=0)
+                log.append(
+                    {
+                        "logNumber": max_log + 1,
+                        "stageName": "End",
+                        "stageType": "End",
+                        "result": "",
+                        "resourceStartTime": self._fmt(self._now()),
+                    }
+                )
         return {"sessionId": session_id, "status": "Stopped"}
 
     def set_schedule_enabled(self, schedule_id: str, enabled: bool) -> None:
@@ -1209,7 +1409,29 @@ class MockBPClient:
         schedule = self._find_schedule(schedule_id)
         if schedule is None:
             return None
-        schedule["lastOutcome"] = "Triggered"
+        sid = str(schedule["id"])
+        now = self._now()
+        if start_time:
+            parsed = datetime.fromisoformat(start_time.replace("Z", "+00:00"))
+            if parsed.tzinfo is not None:
+                parsed = parsed.astimezone(timezone.utc)
+            st = self._fmt(parsed)
+        else:
+            st = self._fmt(now)
+        all_ids = [r["scheduleLogId"] for rows in self._schedule_logs.values() for r in rows]
+        next_id = max(all_ids, default=0) + 1
+        log_row = {
+            "scheduleLogId": next_id,
+            "scheduleId": schedule["id"],
+            "scheduleName": schedule["name"],
+            "startTime": st,
+            "endTime": None,
+            "duration": None,
+            "status": "running",
+            "serverName": "BP-APP-01",
+        }
+        self._schedule_logs.setdefault(sid, []).append(log_row)
+        self._live_schedule_log_ids.add(next_id)
         return {"schedule": schedule_id, "status": "Triggered"}
 
     def create_queue_items(self, queue_id: str, items: list[dict]) -> dict:
@@ -1251,12 +1473,20 @@ class MockBPClient:
         return {"ids": ids}
 
     def stop_schedule(self, schedule_id: str) -> None:
-        # Cancels active runs; the live endpoint answers 202 with no body, so
-        # the mock returns None too. Records the outcome on the fixture so a
-        # test can observe the effect after the write.
         schedule = self._find_schedule(schedule_id)
-        if schedule is not None:
-            schedule["lastOutcome"] = "Stopped"
+        if schedule is None:
+            return None
+        sid = str(schedule["id"])
+        now = self._now()
+        for row in self._schedule_logs.get(sid, []):
+            if row.get("status") == "running":
+                row["status"] = "terminated"
+                row["endTime"] = self._fmt(now)
+                start = datetime.strptime(row["startTime"], "%Y-%m-%dT%H:%M:%SZ").replace(
+                    tzinfo=timezone.utc
+                )
+                row["duration"] = self._duration(start, now)
+                self._live_schedule_log_ids.discard(row["scheduleLogId"])
         return None
 
     # --- Lookup helpers -----------------------------------------------------

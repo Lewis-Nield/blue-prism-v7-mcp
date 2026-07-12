@@ -1675,17 +1675,29 @@ class TestMockExtended:
         sched = [s for s in client.get_schedules() if s["id"] == 1][0]
         assert sched["isRetired"] is True
 
-    def test_trigger_schedule_records_outcome(self):
+    def test_trigger_schedule_appends_running_log_row(self):
         client = MockBPClient()
         client.trigger_schedule("Daily Invoice Run")
-        sched = [s for s in client.get_schedules() if s["name"] == "Daily Invoice Run"][0]
-        assert sched["lastOutcome"] == "Triggered"
+        logs = client.get_schedule_logs(schedule_id="1")
+        running = [r for r in logs if r["status"] == "running"]
+        assert len(running) == 1
+        row = running[0]
+        assert row["scheduleName"] == "Daily Invoice Run"
+        assert row["scheduleId"] == 1
+        assert row["endTime"] is None
+        assert row["duration"] is None
+        assert row["serverName"] == "BP-APP-01"
 
-    def test_stop_schedule_records_outcome_and_returns_none(self):
+    def test_stop_schedule_terminates_running_log_and_returns_none(self):
         client = MockBPClient()
+        client.trigger_schedule("Daily Invoice Run")
         assert client.stop_schedule("Daily Invoice Run") is None
-        sched = [s for s in client.get_schedules() if s["name"] == "Daily Invoice Run"][0]
-        assert sched["lastOutcome"] == "Stopped"
+        logs = client.get_schedule_logs(schedule_id="1")
+        terminated = [r for r in logs if r["status"] == "terminated"]
+        assert len(terminated) >= 1
+        row = terminated[-1]
+        assert row["endTime"] is not None
+        assert row["duration"] is not None
 
     def test_write_on_unknown_target_is_safe(self):
         client = MockBPClient()
@@ -1845,6 +1857,244 @@ class TestDemoEstate:
         assert any(
             e["stageType"] == "Exception" for sid in logged for e in client.get_session_log(sid)
         )
+
+
+class TestWriteFidelityJourneys:
+    """End-to-end journeys exercising the full write→settle→observe loop."""
+
+    @staticmethod
+    def _clock(start_iso=None):
+        from datetime import datetime, timedelta, timezone
+
+        if start_iso is None:
+            start_iso = (datetime.now(timezone.utc) + timedelta(hours=1)).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"
+            )
+        current = [datetime.strptime(start_iso, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)]
+
+        def now():
+            return current[0]
+
+        def advance(minutes=0, seconds=0):
+            current[0] += timedelta(minutes=minutes, seconds=seconds)
+
+        return now, advance
+
+    def test_start_then_settle_completes_run(self):
+        now, advance = self._clock()
+        start_ts = now().strftime("%Y-%m-%dT%H:%M:%SZ")
+        client = MockBPClient(now_fn=now, settle_after=__import__("datetime").timedelta(minutes=5))
+        usage_before = client.get_current_limits_and_usage()["concurrentSessionsUsed"]
+        result = client.start_process(
+            "7c0e4f2b-93d1-4b66-a2af-000000000201", "5d2c8e0a-71b4-4a8e-9f30-000000000001"
+        )
+        sid = result["sessionId"]
+
+        sessions = client.get_sessions()
+        new = next(s for s in sessions if s["sessionId"] == sid)
+        assert new["status"] == "Running"
+        assert new["processName"] == "Invoice Processing"
+        assert new["resourceName"] == "BOT-01"
+        assert new["startTime"] == start_ts
+
+        bot = next(r for r in client.get_resources() if r["name"] == "BOT-01")
+        assert bot["displayStatus"] == "Working"
+        assert bot["activeSessionCount"] >= 1
+        assert client.get_current_limits_and_usage()["concurrentSessionsUsed"] == usage_before + 1
+
+        log = client.get_session_log(sid)
+        assert log[-1]["stageType"] == "Start"
+
+        advance(minutes=6)
+        sessions = client.get_sessions()
+        settled = next(s for s in sessions if s["sessionId"] == sid)
+        assert settled["status"] == "Completed"
+        assert settled["endTime"] is not None
+
+        bot = next(r for r in client.get_resources() if r["name"] == "BOT-01")
+        assert bot["displayStatus"] == "Idle"
+        assert bot["activeSessionCount"] == 0
+        assert client.get_current_limits_and_usage()["concurrentSessionsUsed"] == usage_before
+
+        log = client.get_session_log(sid)
+        assert log[0]["stageType"] == "End"
+
+    def test_seeded_fixtures_untouched_by_settle(self):
+        now, advance = self._clock()
+        client = MockBPClient(now_fn=now, settle_after=__import__("datetime").timedelta(minutes=5))
+        seeded_running = [s for s in client.get_sessions() if s["status"] == "Running"]
+        assert seeded_running
+
+        advance(minutes=60)
+        still_running = [s for s in client.get_sessions() if s["status"] == "Running"]
+        seeded_ids = {s["sessionId"] for s in seeded_running}
+        assert seeded_ids <= {s["sessionId"] for s in still_running}
+
+    def test_stop_before_settle_releases_immediately(self):
+        now, advance = self._clock()
+        client = MockBPClient(now_fn=now, settle_after=__import__("datetime").timedelta(minutes=5))
+        usage_before = client.get_current_limits_and_usage()["concurrentSessionsUsed"]
+        result = client.start_process(
+            "7c0e4f2b-93d1-4b66-a2af-000000000201", "5d2c8e0a-71b4-4a8e-9f30-000000000001"
+        )
+        sid = result["sessionId"]
+
+        advance(minutes=2)
+        client.stop_session(sid)
+
+        session = next(s for s in client.get_sessions() if s["sessionId"] == sid)
+        assert session["status"] == "Stopped"
+        assert session["endTime"] is not None
+
+        bot = next(r for r in client.get_resources() if r["name"] == "BOT-01")
+        assert bot["displayStatus"] == "Idle"
+        assert client.get_current_limits_and_usage()["concurrentSessionsUsed"] == usage_before
+
+        log = client.get_session_log(sid)
+        assert log[0]["stageType"] == "End"
+
+        advance(minutes=10)
+        session = next(s for s in client.get_sessions() if s["sessionId"] == sid)
+        assert session["status"] == "Stopped"
+
+    def test_retry_flips_to_pending_and_adjusts_counts(self):
+        now, _ = self._clock()
+        client = MockBPClient(now_fn=now)
+        qid = _queue_id(client)
+        queue_before = next(q for q in client.get_queues() if q["id"] == qid)
+        pending_before = queue_before["pendingItemCount"]
+        exc_before = queue_before["exceptionedItemCount"]
+
+        item = client.get_queue_items(qid, state="Exceptioned")[0]
+        client.retry_queue_item(qid, item["id"])
+
+        queue_after = next(q for q in client.get_queues() if q["id"] == qid)
+        assert queue_after["pendingItemCount"] == pending_before + 1
+        assert queue_after["exceptionedItemCount"] == exc_before - 1
+        assert queue_after["totalItemCount"] == queue_before["totalItemCount"]
+
+        retried = next(i for i in client.get_queue_items(qid) if i["id"] == item["id"])
+        assert retried["state"] == "Pending"
+        assert retried["exceptionReason"] is None
+
+        attempts = client.get_item_attempts(qid, item["id"])
+        assert len(attempts) >= 2
+
+    def test_defer_decrements_pending_count(self):
+        now, _ = self._clock()
+        client = MockBPClient(now_fn=now)
+        qid = _queue_id(client)
+
+        exc_item = client.get_queue_items(qid, state="Exceptioned")[0]
+        result = client.retry_queue_item(qid, exc_item["id"])
+        new_attempt = result["attemptId"]
+
+        queue_before = next(q for q in client.get_queues() if q["id"] == qid)
+        pending_before = queue_before["pendingItemCount"]
+        assert pending_before >= 1
+
+        client.defer_queue_item(qid, exc_item["id"], new_attempt, "2026-08-01T00:00:00Z")
+
+        queue_after = next(q for q in client.get_queues() if q["id"] == qid)
+        assert queue_after["pendingItemCount"] == pending_before - 1
+
+        deferred = client.get_queue_items(qid, state="Deferred")
+        assert any(i["id"] == exc_item["id"] for i in deferred)
+
+    def test_trigger_schedule_then_settle_completes(self):
+        now, advance = self._clock()
+        start_ts = now().strftime("%Y-%m-%dT%H:%M:%SZ")
+        client = MockBPClient(now_fn=now, settle_after=__import__("datetime").timedelta(minutes=5))
+        client.trigger_schedule("Daily Invoice Run")
+
+        last = client.get_last_schedule_run(1)
+        assert last is not None
+        assert last["status"] == "running"
+        assert last["startTime"] == start_ts
+
+        advance(minutes=6)
+        last = client.get_last_schedule_run(1)
+        assert last["status"] == "completed"
+        assert last["endTime"] is not None
+        assert last["duration"] is not None
+
+    def test_stop_schedule_mid_run_terminates(self):
+        now, advance = self._clock()
+        client = MockBPClient(now_fn=now, settle_after=__import__("datetime").timedelta(minutes=5))
+        client.trigger_schedule("Daily Invoice Run")
+
+        advance(minutes=2)
+        client.stop_schedule("Daily Invoice Run")
+
+        last = client.get_last_schedule_run(1)
+        assert last["status"] == "terminated"
+        assert last["endTime"] is not None
+        assert last["duration"] is not None
+
+        advance(minutes=10)
+        last = client.get_last_schedule_run(1)
+        assert last["status"] == "terminated"
+
+    def test_trigger_schedule_normalises_offset_start_time(self):
+        now, advance = self._clock()
+        client = MockBPClient(now_fn=now, settle_after=__import__("datetime").timedelta(minutes=5))
+        client.trigger_schedule("Daily Invoice Run", start_time="2026-07-12T10:00:00+00:00")
+
+        last = client.get_last_schedule_run(1)
+        assert last["startTime"] == "2026-07-12T10:00:00Z"
+
+        # Subsequent settling reads must not raise on the canonicalised row.
+        client.get_sessions()
+        advance(minutes=6)
+        last = client.get_last_schedule_run(1)
+        assert last["status"] == "completed"
+
+    def test_trigger_schedule_normalises_date_only_start_time(self):
+        now, _ = self._clock()
+        client = MockBPClient(now_fn=now, settle_after=__import__("datetime").timedelta(minutes=5))
+        client.trigger_schedule("Daily Invoice Run", start_time="2026-08-01")
+
+        # Must not raise on a date-only start_time.
+        last = client.get_last_schedule_run(1)
+        assert last["startTime"] == "2026-08-01T00:00:00Z"
+        client.get_sessions()
+        client.get_schedule_logs()
+
+    def test_stop_schedule_future_start_time_duration_never_negative(self):
+        now, _ = self._clock()
+        client = MockBPClient(now_fn=now, settle_after=__import__("datetime").timedelta(minutes=5))
+        future = (now() + __import__("datetime").timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        client.trigger_schedule("Daily Invoice Run", start_time=future)
+
+        client.stop_schedule("Daily Invoice Run")
+
+        last = client.get_last_schedule_run(1)
+        assert last["status"] == "terminated"
+        assert last["duration"] == "00:00:00"
+
+    def test_settle_discards_orphaned_run_id(self):
+        now, advance = self._clock()
+        client = MockBPClient(now_fn=now, settle_after=__import__("datetime").timedelta(minutes=5))
+        client._live_run_ids.add("ghost-session-id")
+        advance(minutes=6)
+        client.get_sessions()
+        assert "ghost-session-id" not in client._live_run_ids
+
+    def test_settle_discards_orphaned_schedule_log_id(self):
+        now, advance = self._clock()
+        client = MockBPClient(now_fn=now, settle_after=__import__("datetime").timedelta(minutes=5))
+        client._live_schedule_log_ids.add(99999)
+        advance(minutes=6)
+        client.get_schedule_logs()
+        assert 99999 not in client._live_schedule_log_ids
+
+    def test_release_worker_tolerates_unknown_resource(self):
+        client = MockBPClient()
+        client._release_worker("no-such-id", "no-such-name")
+
+    def test_occupy_worker_tolerates_unknown_resource(self):
+        client = MockBPClient()
+        client._occupy_worker("no-such-id", "no-such-name")
 
 
 @pytest.fixture(autouse=True)
