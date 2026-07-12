@@ -812,13 +812,17 @@ class MockBPClient:
         now_fn: Callable[[], datetime] | None = None,
         settle_after: timedelta = timedelta(minutes=5),
     ) -> None:
-        self._resources = resources if resources is not None else [dict(r) for r in _DEFAULT_RESOURCES]
+        self._resources = (
+            resources if resources is not None else [dict(r) for r in _DEFAULT_RESOURCES]
+        )
         self._queues = queues if queues is not None else [dict(q) for q in _DEFAULT_QUEUES]
         self._schedules = (
             schedules if schedules is not None else [dict(s) for s in _DEFAULT_SCHEDULES]
         )
         self._sessions = sessions if sessions is not None else [dict(s) for s in _DEFAULT_SESSIONS]
-        self._processes = processes if processes is not None else [dict(p) for p in _DEFAULT_PROCESSES]
+        self._processes = (
+            processes if processes is not None else [dict(p) for p in _DEFAULT_PROCESSES]
+        )
         self._queue_items = (
             queue_items if queue_items is not None else [dict(i) for i in _DEFAULT_QUEUE_ITEMS]
         )
@@ -1373,9 +1377,7 @@ class MockBPClient:
             session["status"] = "Stopped"
             session["endTime"] = self._fmt(self._now())
             if was_live:
-                self._release_worker(
-                    session.get("resourceId", ""), session.get("resourceName", "")
-                )
+                self._release_worker(session.get("resourceId", ""), session.get("resourceName", ""))
                 self._limits_and_usage["concurrentSessionsUsed"] = max(
                     0, self._limits_and_usage.get("concurrentSessionsUsed", 1) - 1
                 )
@@ -1407,11 +1409,7 @@ class MockBPClient:
         sid = str(schedule["id"])
         now = self._now()
         st = start_time if start_time else self._fmt(now)
-        all_ids = [
-            r["scheduleLogId"]
-            for rows in self._schedule_logs.values()
-            for r in rows
-        ]
+        all_ids = [r["scheduleLogId"] for rows in self._schedule_logs.values() for r in rows]
         next_id = max(all_ids, default=0) + 1
         log_row = {
             "scheduleLogId": next_id,

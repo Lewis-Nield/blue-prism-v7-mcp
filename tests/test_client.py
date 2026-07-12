@@ -1885,7 +1885,9 @@ class TestWriteFidelityJourneys:
         start_ts = now().strftime("%Y-%m-%dT%H:%M:%SZ")
         client = MockBPClient(now_fn=now, settle_after=__import__("datetime").timedelta(minutes=5))
         usage_before = client.get_current_limits_and_usage()["concurrentSessionsUsed"]
-        result = client.start_process("7c0e4f2b-93d1-4b66-a2af-000000000201", "5d2c8e0a-71b4-4a8e-9f30-000000000001")
+        result = client.start_process(
+            "7c0e4f2b-93d1-4b66-a2af-000000000201", "5d2c8e0a-71b4-4a8e-9f30-000000000001"
+        )
         sid = result["sessionId"]
 
         sessions = client.get_sessions()
@@ -1932,7 +1934,9 @@ class TestWriteFidelityJourneys:
         now, advance = self._clock()
         client = MockBPClient(now_fn=now, settle_after=__import__("datetime").timedelta(minutes=5))
         usage_before = client.get_current_limits_and_usage()["concurrentSessionsUsed"]
-        result = client.start_process("7c0e4f2b-93d1-4b66-a2af-000000000201", "5d2c8e0a-71b4-4a8e-9f30-000000000001")
+        result = client.start_process(
+            "7c0e4f2b-93d1-4b66-a2af-000000000201", "5d2c8e0a-71b4-4a8e-9f30-000000000001"
+        )
         sid = result["sessionId"]
 
         advance(minutes=2)
