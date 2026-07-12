@@ -2035,6 +2035,30 @@ class TestWriteFidelityJourneys:
         last = client.get_last_schedule_run(1)
         assert last["status"] == "terminated"
 
+    def test_settle_discards_orphaned_run_id(self):
+        now, advance = self._clock()
+        client = MockBPClient(now_fn=now, settle_after=__import__("datetime").timedelta(minutes=5))
+        client._live_run_ids.add("ghost-session-id")
+        advance(minutes=6)
+        client.get_sessions()
+        assert "ghost-session-id" not in client._live_run_ids
+
+    def test_settle_discards_orphaned_schedule_log_id(self):
+        now, advance = self._clock()
+        client = MockBPClient(now_fn=now, settle_after=__import__("datetime").timedelta(minutes=5))
+        client._live_schedule_log_ids.add(99999)
+        advance(minutes=6)
+        client.get_schedule_logs()
+        assert 99999 not in client._live_schedule_log_ids
+
+    def test_release_worker_tolerates_unknown_resource(self):
+        client = MockBPClient()
+        client._release_worker("no-such-id", "no-such-name")
+
+    def test_occupy_worker_tolerates_unknown_resource(self):
+        client = MockBPClient()
+        client._occupy_worker("no-such-id", "no-such-name")
+
 
 @pytest.fixture(autouse=True)
 def _no_real_http(monkeypatch):
