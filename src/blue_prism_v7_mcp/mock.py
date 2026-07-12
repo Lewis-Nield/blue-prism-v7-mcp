@@ -908,6 +908,12 @@ class MockBPClient:
     def _fmt(self, dt: datetime) -> str:
         return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
+    def _duration(self, start: datetime, end: datetime) -> str:
+        delta = end - start
+        hours, rem = divmod(int(max(delta.total_seconds(), 0)), 3600)
+        mins, secs = divmod(rem, 60)
+        return f"{hours:02d}:{mins:02d}:{secs:02d}"
+
     def _release_worker(self, resource_id: str, resource_name: str) -> None:
         row = next(
             (r for r in self._resources if r["id"] == resource_id or r["name"] == resource_name),
@@ -991,10 +997,7 @@ class MockBPClient:
                 continue
             log_row["status"] = "completed"
             log_row["endTime"] = self._fmt(now)
-            delta = now - start
-            hours, rem = divmod(int(delta.total_seconds()), 3600)
-            mins, secs = divmod(rem, 60)
-            log_row["duration"] = f"{hours:02d}:{mins:02d}:{secs:02d}"
+            log_row["duration"] = self._duration(start, now)
             settled_logs.add(log_id)
         self._live_schedule_log_ids -= settled_logs
 
@@ -1408,7 +1411,13 @@ class MockBPClient:
             return None
         sid = str(schedule["id"])
         now = self._now()
-        st = start_time if start_time else self._fmt(now)
+        if start_time:
+            parsed = datetime.fromisoformat(start_time.replace("Z", "+00:00"))
+            if parsed.tzinfo is not None:
+                parsed = parsed.astimezone(timezone.utc)
+            st = self._fmt(parsed)
+        else:
+            st = self._fmt(now)
         all_ids = [r["scheduleLogId"] for rows in self._schedule_logs.values() for r in rows]
         next_id = max(all_ids, default=0) + 1
         log_row = {
@@ -1476,10 +1485,7 @@ class MockBPClient:
                 start = datetime.strptime(row["startTime"], "%Y-%m-%dT%H:%M:%SZ").replace(
                     tzinfo=timezone.utc
                 )
-                delta = now - start
-                hours, rem = divmod(int(delta.total_seconds()), 3600)
-                mins, secs = divmod(rem, 60)
-                row["duration"] = f"{hours:02d}:{mins:02d}:{secs:02d}"
+                row["duration"] = self._duration(start, now)
                 self._live_schedule_log_ids.discard(row["scheduleLogId"])
         return None
 

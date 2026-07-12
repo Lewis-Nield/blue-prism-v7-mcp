@@ -1151,6 +1151,48 @@ class TestCreateQueueItems:
         assert "s3cr3t-pw" not in audit.path.read_text()
         assert "9999" not in json.dumps(result["would"]["items"])
 
+    def test_dry_run_data_type_casing_is_canonicalised_in_audit_shape(self, tmp_path):
+        tools, _, _ = tier3(tmp_path)
+        result = tools["create_queue_items"](
+            "Invoices",
+            [{"data": {"rows": [{"Ref": {"valueType": "text", "value": "INV-1"}}]}}],
+        )
+        item_shape = result["would"]["items"][0]
+        assert item_shape["data_types"] == {"Ref": "Text"}
+
+    def test_nested_collection_inner_values_never_reach_audit_shape(self, tmp_path):
+        tools, audit, _ = tier3(tmp_path)
+        result = tools["create_queue_items"](
+            "Invoices",
+            [
+                {
+                    "data": {
+                        "rows": [
+                            {
+                                "Items": {
+                                    "valueType": "Collection",
+                                    "value": {
+                                        "rows": [
+                                            {
+                                                "Secret": {
+                                                    "valueType": "Password",
+                                                    "value": "s3cr3t-nested",
+                                                }
+                                            }
+                                        ]
+                                    },
+                                }
+                            }
+                        ]
+                    }
+                }
+            ],
+        )
+        item_shape = result["would"]["items"][0]
+        assert item_shape["data_types"] == {"Items": "Collection"}
+        assert "s3cr3t-nested" not in json.dumps(result)
+        assert "s3cr3t-nested" not in audit.path.read_text()
+
     def test_unknown_queue_fails_with_suggestions(self, tmp_path):
         tools, _, _ = tier3(tmp_path)
         with pytest.raises(ValueError, match="Invoices"):

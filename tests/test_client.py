@@ -2035,6 +2035,43 @@ class TestWriteFidelityJourneys:
         last = client.get_last_schedule_run(1)
         assert last["status"] == "terminated"
 
+    def test_trigger_schedule_normalises_offset_start_time(self):
+        now, advance = self._clock()
+        client = MockBPClient(now_fn=now, settle_after=__import__("datetime").timedelta(minutes=5))
+        client.trigger_schedule("Daily Invoice Run", start_time="2026-07-12T10:00:00+00:00")
+
+        last = client.get_last_schedule_run(1)
+        assert last["startTime"] == "2026-07-12T10:00:00Z"
+
+        # Subsequent settling reads must not raise on the canonicalised row.
+        client.get_sessions()
+        advance(minutes=6)
+        last = client.get_last_schedule_run(1)
+        assert last["status"] == "completed"
+
+    def test_trigger_schedule_normalises_date_only_start_time(self):
+        now, _ = self._clock()
+        client = MockBPClient(now_fn=now, settle_after=__import__("datetime").timedelta(minutes=5))
+        client.trigger_schedule("Daily Invoice Run", start_time="2026-08-01")
+
+        # Must not raise on a date-only start_time.
+        last = client.get_last_schedule_run(1)
+        assert last["startTime"] == "2026-08-01T00:00:00Z"
+        client.get_sessions()
+        client.get_schedule_logs()
+
+    def test_stop_schedule_future_start_time_duration_never_negative(self):
+        now, _ = self._clock()
+        client = MockBPClient(now_fn=now, settle_after=__import__("datetime").timedelta(minutes=5))
+        future = (now() + __import__("datetime").timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        client.trigger_schedule("Daily Invoice Run", start_time=future)
+
+        client.stop_schedule("Daily Invoice Run")
+
+        last = client.get_last_schedule_run(1)
+        assert last["status"] == "terminated"
+        assert last["duration"] == "00:00:00"
+
     def test_settle_discards_orphaned_run_id(self):
         now, advance = self._clock()
         client = MockBPClient(now_fn=now, settle_after=__import__("datetime").timedelta(minutes=5))

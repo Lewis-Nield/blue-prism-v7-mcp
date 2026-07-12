@@ -317,7 +317,7 @@ def _validate_collection_rows(context: str, data: dict) -> None:
         if not isinstance(row, dict):
             raise ValueError(f"{context} Collection rows[{i}] must be an object.")
         for field_name, field_spec in row.items():
-            validate_data_value(f"{context}.rows[{i}].{field_name}", field_spec)
+            row[field_name] = validate_data_value(f"{context}.rows[{i}].{field_name}", field_spec)
 
 
 def validate_session_parameters(parameters: Any) -> dict[str, dict] | None:

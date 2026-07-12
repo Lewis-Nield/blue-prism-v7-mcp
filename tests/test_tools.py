@@ -1874,3 +1874,31 @@ class TestValidateQueueItems:
         }
         result = validate_queue_items([item])
         assert result[0] == item
+
+    def test_data_row_value_type_casing_is_canonicalised(self):
+        result = validate_queue_items(
+            [{"data": {"rows": [{"Ref": {"valueType": "text", "value": "x"}}]}}]
+        )
+        assert result[0]["data"]["rows"][0]["Ref"]["valueType"] == "Text"
+
+    def test_nested_collection_value_type_casing_is_canonicalised(self):
+        result = validate_queue_items(
+            [
+                {
+                    "data": {
+                        "rows": [
+                            {
+                                "Items": {
+                                    "valueType": "collection",
+                                    "value": {
+                                        "rows": [{"Inner": {"valueType": "number", "value": 1}}]
+                                    },
+                                }
+                            }
+                        ]
+                    }
+                }
+            ]
+        )
+        inner = result[0]["data"]["rows"][0]["Items"]["value"]["rows"][0]["Inner"]
+        assert inner["valueType"] == "Number"
