@@ -7,12 +7,36 @@ additive endpoint is a minor bump.
 
 ## [Unreleased]
 
+## [0.14.0] — 2026-07-12
+
+### Added
+- **Mock write-fidelity — governed writes now visibly mutate the demo
+  estate.** `MockBPClient` gained injectable time (`now_fn`, `settle_after`)
+  so tests can drive the clock deterministically, and a lazy `_settle` pass
+  that auto-completes in-flight runs and schedule logs on read without
+  touching the seeded stale/Running fixtures the severity demos rely on.
+  Every write method now produces an observable state change: `start_process`
+  occupies the worker, bumps usage, and seeds a session log; `stop_session`
+  releases the worker and closes the log; `retry_queue_item` and
+  `defer_queue_item` keep queue counts consistent and grow attempt history;
+  `trigger_schedule` and `stop_schedule` append and close schedule-log rows.
+  Also fixed a cross-instance bug where the default fixture lists were
+  shallow-copied, letting one client instance's writes mutate another's data.
+
 ### Fixed
+- **`trigger_schedule` no longer poisons the mock on non-canonical
+  `start_time` input.** The caller's value was stored verbatim, but settling
+  reads re-parse it with a strict format — any valid ISO variant other than
+  the exact canonical form (an offset, a date-only string, fractional
+  seconds) made every later settling read raise `ValueError` permanently,
+  with no recovery path. Now normalised to the canonical form once, at
+  ingest; duration calculations also floor at zero so a future-dated run
+  stopped early can't report a negative duration.
 - **`_validate_collection_rows` now canonicalises queue-item data rows in
   place**, not just session parameters — a lowercase `valueType` inside a
   queue item's `data` (including nested Collections) is normalised before it
-  reaches the POST body and the audit shape, matching the 0.13.0 changelog's
-  claim that canonicalisation applies identically to both paths.
+  reaches the POST body and the audit shape, matching this changelog's own
+  0.13.0 claim that canonicalisation applies identically to both paths.
 
 ## [0.13.0] — 2026-07-11
 
@@ -434,7 +458,9 @@ First runnable release — the foundation, built in eight phases (see
 - FastMCP stdio server, a first-class mock run mode, console entrypoint, and
   deployment / day-one verification docs.
 
-[Unreleased]: https://github.com/Lewis-Nield/blue-prism-v7-mcp/compare/v0.12.0...HEAD
+[Unreleased]: https://github.com/Lewis-Nield/blue-prism-v7-mcp/compare/v0.14.0...HEAD
+[0.14.0]: https://github.com/Lewis-Nield/blue-prism-v7-mcp/compare/v0.13.0...v0.14.0
+[0.13.0]: https://github.com/Lewis-Nield/blue-prism-v7-mcp/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/Lewis-Nield/blue-prism-v7-mcp/compare/v0.11.1...v0.12.0
 [0.11.1]: https://github.com/Lewis-Nield/blue-prism-v7-mcp/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/Lewis-Nield/blue-prism-v7-mcp/compare/v0.10.0...v0.11.0
