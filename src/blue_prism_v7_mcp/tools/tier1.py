@@ -297,6 +297,7 @@ class _Tier1ReadsMixin:
         within_sla: bool | None = None,
         sla_before: str | None = None,
         sort_by: str | None = None,
+        max_records: int | None = None,
     ) -> Ranked:
         """Rank one queue's items, filtered by state and (usually) a date window.
 
@@ -308,6 +309,13 @@ class _Tier1ReadsMixin:
         first, and asks the API to sort server-side too — so the true oldest
         item surfaces even from a max-pages-capped fetch over an unbounded
         history.
+
+        `max_records` (embeddable-core only — not exposed on the MCP tool)
+        stops the underlying fetch as soon as that many rows are collected,
+        for a caller that only needs a bounded prefix. Only safe paired with
+        a `sort_by` that puts the wanted rows first — e.g.
+        `sort_by="loadedDate asc", max_records=1` for "the single oldest
+        pending item" without paging the whole queue history.
         """
         state = validate_choice(state, "state", ITEM_STATES)
         scoped_by_sla = within_sla is not None or sla_before is not None
@@ -327,6 +335,7 @@ class _Tier1ReadsMixin:
             within_sla=within_sla,
             sla_before=sla_before,
             sort_by=_ITEM_SORT_API_VALUES[sort_choice] if sort_choice else None,
+            max_records=max_records,
         )
         scrubbed = [self._scrubbed_item(i) for i in items]
         if sort_choice == "loadedDate asc":

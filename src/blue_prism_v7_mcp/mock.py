@@ -1054,6 +1054,7 @@ class MockBPClient:
         within_sla: bool | None = None,
         sla_before: str | None = None,
         sort_by: str | None = None,
+        max_records: int | None = None,
     ) -> list[dict]:
         items = [i for i in self._queue_items if i.get("queue") == queue_id]
         if state:
@@ -1070,6 +1071,8 @@ class MockBPClient:
             items = [i for i in items if (i.get("slaDatetime") or "") <= sla_before]
         if sort_by == "LoadedDateAsc":
             items = sorted(items, key=lambda i: i.get("loadedDate") or "")
+        if max_records is not None:
+            items = items[:max_records]
         return [dict(i) for i in items]
 
     def get_queue_item(self, item_id: str) -> dict:

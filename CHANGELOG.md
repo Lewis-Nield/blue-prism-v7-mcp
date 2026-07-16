@@ -7,6 +7,33 @@ additive endpoint is a minor bump.
 
 ## [Unreleased]
 
+## [0.15.0] — 2026-07-16
+
+### Added
+- **`max_records` on the queue-items domain read (embeddable-core only).**
+  `Engine.list_queue_items` (and the underlying `BPClient.get_queue_items`)
+  gain an optional fetch-time cap that stops paging as soon as that many
+  rows are collected, instead of always walking a queue's full token-paged
+  history. Paired with `sort_by="loadedDate asc"`, `max_records=1` answers
+  "the single oldest item in this queue" in one page instead of an
+  unbounded sweep. Deliberately not exposed on the MCP tool surface:
+  early-stop is only correctness-safe alongside a server-side sort that
+  puts the wanted rows first, a pairing rule an embeddable-core caller
+  (e.g. a console reading its own Overview aggregate) can hold but an MCP
+  caller has no way to know to apply.
+
+### Fixed
+- **Two schedule-trigger mock tests used a hardcoded calendar date/time as
+  the "most recent run" expectation.** `get_last_schedule_run` picks the
+  run with the latest `startTime` across a schedule's *entire* history,
+  fixture rows included, and the demo/mock estate's own seeded schedule
+  runs are anchored relative to real wall-clock time (`_ts(1, ...)` —
+  "yesterday"). A fixed past/future literal in the test eventually drifts
+  behind (or, for the future one, into) that moving anchor and the
+  assertion starts reading the seeded fixture row instead of the one the
+  test just triggered. Both tests now derive their `start_time` from the
+  injected clock instead.
+
 ## [0.14.0] — 2026-07-12
 
 ### Added
@@ -458,7 +485,8 @@ First runnable release — the foundation, built in eight phases (see
 - FastMCP stdio server, a first-class mock run mode, console entrypoint, and
   deployment / day-one verification docs.
 
-[Unreleased]: https://github.com/Lewis-Nield/blue-prism-v7-mcp/compare/v0.14.0...HEAD
+[Unreleased]: https://github.com/Lewis-Nield/blue-prism-v7-mcp/compare/v0.15.0...HEAD
+[0.15.0]: https://github.com/Lewis-Nield/blue-prism-v7-mcp/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/Lewis-Nield/blue-prism-v7-mcp/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/Lewis-Nield/blue-prism-v7-mcp/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/Lewis-Nield/blue-prism-v7-mcp/compare/v0.11.1...v0.12.0

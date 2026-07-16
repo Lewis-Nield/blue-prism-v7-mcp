@@ -415,6 +415,38 @@ class TestPagination:
         second_call_params = session.get.call_args_list[1].kwargs["params"]
         assert second_call_params["startIndex"] == 2
 
+    def test_max_records_stops_paging_once_satisfied(self):
+        client, session = make_client()
+        session.get.side_effect = [
+            _resp({"items": [{"id": 1}, {"id": 2}], "pagingToken": "p2"}),
+            _resp({"items": [{"id": 3}, {"id": 4}], "pagingToken": "p3"}),
+            _resp({"items": [{"id": 5}]}),
+        ]
+        result = client._get_collection("/sessions", max_records=2)
+        assert result == [{"id": 1}, {"id": 2}]
+        assert session.get.call_count == 1  # first page already satisfies max_records
+
+    def test_max_records_does_not_slice_within_a_page(self):
+        # A fetch-time cap, not a truncation: an overshooting page is kept whole.
+        client, session = make_client()
+        session.get.side_effect = [
+            _resp({"items": [{"id": 1}, {"id": 2}, {"id": 3}], "pagingToken": "p2"}),
+            _resp({"items": [{"id": 4}]}),
+        ]
+        result = client._get_collection("/sessions", max_records=1)
+        assert result == [{"id": 1}, {"id": 2}, {"id": 3}]
+        assert session.get.call_count == 1
+
+    def test_max_records_none_pages_to_exhaustion_as_before(self):
+        client, session = make_client()
+        session.get.side_effect = [
+            _resp({"items": [{"id": 1}], "pagingToken": "p2"}),
+            _resp({"items": [{"id": 2}]}),
+        ]
+        result = client._get_collection("/sessions", max_records=None)
+        assert result == [{"id": 1}, {"id": 2}]
+        assert session.get.call_count == 2
+
 
 class TestPageNumberPagination:
     """_get_paged_by_number — the resourceUtilization-only pageNumber/pageSize scheme."""
@@ -541,6 +573,23 @@ class TestExtendedReads:
         session.get.return_value = _resp([])
         client.get_queue_items("q-uuid-1", sort_by="LoadedDateAsc")
         assert session.get.call_args.kwargs["params"]["sortBy"] == "LoadedDateAsc"
+
+    def test_get_queue_items_max_records_stops_paging_early(self):
+        client, session = make_client()
+        session.get.side_effect = [
+            _resp({"items": [{"id": "i1"}], "pagingToken": "p2"}),
+            _resp({"items": [{"id": "i2"}]}),
+        ]
+        result = client.get_queue_items("q-uuid-1", sort_by="LoadedDateAsc", max_records=1)
+        assert result == [{"id": "i1"}]
+        assert session.get.call_count == 1
+
+    def test_get_queue_items_caches_per_max_records(self):
+        client, session = make_client()
+        session.get.return_value = _resp([{"id": "i1"}])
+        client.get_queue_items("Q", max_records=1)
+        client.get_queue_items("Q", max_records=5)
+        assert session.get.call_count == 2  # distinct cache keys, not shared
 
     def test_get_queue_items_without_sla_params_sends_no_sla_params(self):
         client, session = make_client()
@@ -1418,6 +1467,18 @@ class TestMockExtended:
         qid = _queue_id(client)
         assert client.get_queue_items(qid) == client.get_queue_items(qid, sort_by="Bogus")
 
+    def test_get_queue_items_max_records_caps_the_oldest_first_slice(self):
+        client = MockBPClient()
+        qid = _queue_id(client)
+        full = client.get_queue_items(qid, sort_by="LoadedDateAsc")
+        capped = client.get_queue_items(qid, sort_by="LoadedDateAsc", max_records=1)
+        assert capped == full[:1]
+
+    def test_get_queue_items_max_records_none_returns_everything(self):
+        client = MockBPClient()
+        qid = _queue_id(client)
+        assert client.get_queue_items(qid, max_records=None) == client.get_queue_items(qid)
+
     def test_get_queue_items_within_sla_true_includes_items_with_no_sla(self):
         # An item with no slaDatetime at all has nothing to breach — it reads
         # as within SLA (true), and is excluded from a breach (false) query.
@@ -2036,12 +2097,20 @@ class TestWriteFidelityJourneys:
         assert last["status"] == "terminated"
 
     def test_trigger_schedule_normalises_offset_start_time(self):
+        # start_time is derived from the injected clock, not a hardcoded
+        # calendar literal: get_last_schedule_run picks the MOST RECENT run
+        # across the whole schedule, fixture history included, and the
+        # fixture's own seeded runs (_ts(1, ...) etc.) are anchored to real
+        # wall-clock time — a fixed past literal eventually drifts behind
+        # them and the assertion starts reading the seeded row instead.
         now, advance = self._clock()
         client = MockBPClient(now_fn=now, settle_after=__import__("datetime").timedelta(minutes=5))
-        client.trigger_schedule("Daily Invoice Run", start_time="2026-07-12T10:00:00+00:00")
+        canonical = now().strftime("%Y-%m-%dT%H:%M:%SZ")
+        offset_form = now().strftime("%Y-%m-%dT%H:%M:%S") + "+00:00"
+        client.trigger_schedule("Daily Invoice Run", start_time=offset_form)
 
         last = client.get_last_schedule_run(1)
-        assert last["startTime"] == "2026-07-12T10:00:00Z"
+        assert last["startTime"] == canonical
 
         # Subsequent settling reads must not raise on the canonicalised row.
         client.get_sessions()
@@ -2050,13 +2119,17 @@ class TestWriteFidelityJourneys:
         assert last["status"] == "completed"
 
     def test_trigger_schedule_normalises_date_only_start_time(self):
+        # Same clock-relative reasoning as the offset test above — a fixed
+        # future calendar literal would itself become a past date (and start
+        # losing to fresher seeded fixture runs) once real time caught up.
         now, _ = self._clock()
         client = MockBPClient(now_fn=now, settle_after=__import__("datetime").timedelta(minutes=5))
-        client.trigger_schedule("Daily Invoice Run", start_time="2026-08-01")
+        future_date = (now() + __import__("datetime").timedelta(days=30)).strftime("%Y-%m-%d")
+        client.trigger_schedule("Daily Invoice Run", start_time=future_date)
 
         # Must not raise on a date-only start_time.
         last = client.get_last_schedule_run(1)
-        assert last["startTime"] == "2026-08-01T00:00:00Z"
+        assert last["startTime"] == f"{future_date}T00:00:00Z"
         client.get_sessions()
         client.get_schedule_logs()
 
