@@ -112,11 +112,11 @@ library it was always implicitly built on.
   sorted, so a max-pages-capped fetch still returns the true oldest). Envelope-capped.
   The domain method (`Engine.list_queue_items`, embeddable-core only — v0.15.0)
   additionally takes `max_records`, a fetch-time cap that stops paging as soon
-  as enough rows are collected (e.g. `sort_by="loadedDate asc", max_records=1`
-  for "the single oldest item" without paging a whole queue's history). Not on
-  the MCP tool: early-stop is only correct paired with a server-side sort, a
-  pairing rule an embeddable-core caller controls but an MCP caller can't be
-  trusted to hold.
+  as enough rows are collected and returns exactly that many (e.g.
+  `sort_by="loadedDate asc", max_records=1` for "the single oldest item"
+  without paging a whole queue's history). Requires `sort_by="loadedDate asc"`
+  (enforced) — not on the MCP tool surface, since an MCP caller can't be
+  trusted to hold that pairing.
 - `get_queue_item` — one item in full **including its payload `data`** (the only
   read that returns it). The `data` DataCollection is scrubbed type-aware: free
   text through the scrubber, passwords redacted, binary/image dropped, scalars

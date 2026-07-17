@@ -261,7 +261,9 @@ class BPClient:
         list (the caller may still hold more than `max_records` rows if the
         last page overshoots). Only sound when the endpoint's ordering
         already puts the wanted rows first (e.g. a server-side `sortBy`); it
-        does not itself impose an order.
+        does not itself impose an order. Under `paging_mode="none"`, there is
+        only one request regardless — `max_records` saves nothing at fetch
+        time there, only at the caller's own result-size cap.
         """
         cfg = self._config
         params = dict(base_params or {})
@@ -591,14 +593,16 @@ class BPClient:
         still returns the true oldest/most-relevant items first, rather than
         relying on a local re-sort of a possibly-truncated page set.
 
-        `max_records` (v0.15.0) stops paging once that many rows are in hand
-        — a fetch-time cap for callers that only need a bounded prefix (e.g.
+        `max_records` (v0.15.0) is an exact cap on the returned list — it
+        stops paging once that many rows are in hand (e.g.
         `sort_by="LoadedDateAsc"` + `max_records=1` for "the single oldest
-        item"). It is only meaningful paired with a `sort_by` that puts the
-        wanted rows first; without one, the API's own default order is
-        unspecified and an early-stopped fetch is an arbitrary subset, not a
-        top-N. Not exposed on the MCP tool surface for that reason — it is a
-        domain/embeddable-core primitive for callers that control ordering.
+        item"), then slices the result down to exactly that count, since the
+        last page fetched may overshoot. It is only meaningful paired with a
+        `sort_by` that puts the wanted rows first; without one, the API's own
+        default order is unspecified and an early-stopped fetch is an
+        arbitrary subset, not a top-N. Not exposed on the MCP tool surface
+        for that reason — it is a domain/embeddable-core primitive for
+        callers that control ordering.
         """
         params: dict[str, str] = {}
         if state:
@@ -615,6 +619,13 @@ class BPClient:
             params["slaDateTime[lte]"] = sla_before
         if sort_by:
             params["sortBy"] = sort_by
+
+        def fetch() -> list:
+            collected = self._get_collection(
+                f"/workqueues/{queue_id}/items", base_params=params or None, max_records=max_records
+            )
+            return collected[:max_records] if max_records is not None else collected
+
         return self._cached(
             (
                 "queue_items",
@@ -628,9 +639,7 @@ class BPClient:
                 sort_by,
                 max_records,
             ),
-            lambda: self._get_collection(
-                f"/workqueues/{queue_id}/items", base_params=params or None, max_records=max_records
-            ),
+            fetch,
         )
 
     def get_queue_item(self, item_id: str) -> dict:

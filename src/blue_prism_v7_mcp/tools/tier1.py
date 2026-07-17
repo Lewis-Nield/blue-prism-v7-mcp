@@ -312,8 +312,9 @@ class _Tier1ReadsMixin:
 
         `max_records` (embeddable-core only — not exposed on the MCP tool)
         stops the underlying fetch as soon as that many rows are collected,
-        for a caller that only needs a bounded prefix. Only safe paired with
-        a `sort_by` that puts the wanted rows first — e.g.
+        for a caller that only needs a bounded prefix, and requires
+        `sort_by="loadedDate asc"` so the early-stopped fetch is the true
+        oldest-first prefix rather than an arbitrary subset — e.g.
         `sort_by="loadedDate asc", max_records=1` for "the single oldest
         pending item" without paging the whole queue history.
         """
@@ -325,6 +326,15 @@ class _Tier1ReadsMixin:
             require_window(start_date, end_date)
         validate_iso(sla_before, "sla_before", required=False)
         sort_choice = validate_choice(sort_by, "sort_by", ITEM_SORTS) if sort_by else None
+        if max_records is not None:
+            if max_records < 1:
+                raise ValueError("max_records must be a positive integer")
+            if sort_choice != "loadedDate asc":
+                raise ValueError(
+                    "max_records requires sort_by='loadedDate asc' — without a "
+                    "server-side sort that puts the wanted rows first, an "
+                    "early-stopped fetch is an arbitrary subset, not a top-N."
+                )
         queue_id = resolve_id(queue, self.client.get_queues(), entity="queue")
         items = self.client.get_queue_items(
             queue_id,

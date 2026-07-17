@@ -591,6 +591,16 @@ class TestExtendedReads:
         client.get_queue_items("Q", max_records=5)
         assert session.get.call_count == 2  # distinct cache keys, not shared
 
+    def test_get_queue_items_max_records_slices_an_overshooting_page(self):
+        # The one request that satisfies max_records may still hold more rows
+        # than asked for (a fetch-time cap, not a truncation at that layer) —
+        # get_queue_items must slice the result down to exactly max_records.
+        client, session = make_client()
+        session.get.return_value = _resp([{"id": "i1"}, {"id": "i2"}, {"id": "i3"}])
+        result = client.get_queue_items("q-uuid-1", sort_by="LoadedDateAsc", max_records=1)
+        assert result == [{"id": "i1"}]
+        assert session.get.call_count == 1
+
     def test_get_queue_items_without_sla_params_sends_no_sla_params(self):
         client, session = make_client()
         session.get.return_value = _resp([{"id": "i1"}])

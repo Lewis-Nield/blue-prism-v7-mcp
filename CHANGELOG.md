@@ -33,6 +33,15 @@ additive endpoint is a minor bump.
   assertion starts reading the seeded fixture row instead of the one the
   test just triggered. Both tests now derive their `start_time` from the
   injected clock instead.
+- **`max_records` was a docstring-only contract, enforced nowhere.**
+  `Engine.list_queue_items` now rejects `max_records` unless paired with
+  `sort_by="loadedDate asc"` (without a server-side sort putting the wanted
+  rows first, an early-stopped fetch is an arbitrary subset, not a top-N) and
+  rejects non-positive values. Separately, `BPClient.get_queue_items` was
+  capping only the *fetch* — the page that satisfies `max_records` could
+  still overshoot it, so `max_records=1` could return up to a full page,
+  diverging from `MockBPClient`'s exact truncation. It now slices its result
+  down to exactly `max_records` after the capped fetch.
 
 ## [0.14.0] — 2026-07-12
 
