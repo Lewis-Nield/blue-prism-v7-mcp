@@ -19,8 +19,9 @@ thin MCP adapter applying the envelope representation.
 
 from __future__ import annotations
 
+import math
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Callable
 
 from .common import (
@@ -50,6 +51,45 @@ _ENTITLEMENT_FIELDS = {
     "runtimeresourceslimit": "runtime_resources_limit",
     "processalertmachineslimit": "process_alert_machines_limit",
 }
+
+
+def _run_minutes(start: str | None, end: str | None) -> float | None:
+    """Parse one completed run's wall-clock duration in minutes, or None if unusable.
+
+    Either bound missing, malformed, or giving a negative span (a clock
+    anomaly, not a real run) all skip the run rather than fabricating a
+    number — the same "loud or absent, never guessed" posture as the rest of
+    the tools layer. ``datetime.fromisoformat`` (3.11+) parses both a
+    trailing "Z" and an explicit "+00:00" offset once "Z" is swapped for the
+    latter; a naive result (no offset at all) is assumed UTC rather than
+    rejected, since the v7 timestamps this engine has seen are already UTC.
+    """
+    if not start or not end:
+        return None
+    try:
+        started = datetime.fromisoformat(str(start).replace("Z", "+00:00"))
+        ended = datetime.fromisoformat(str(end).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=timezone.utc)
+    if ended.tzinfo is None:
+        ended = ended.replace(tzinfo=timezone.utc)
+    minutes = (ended - started).total_seconds() / 60
+    return minutes if minutes >= 0 else None
+
+
+def _nearest_rank(sorted_vals: list[float], q: float) -> float:
+    """Return the nearest-rank *q*-percentile over already-sorted values.
+
+    The ceil(q * n)-th smallest value, 1-indexed (clamped into [1, n] so q=1
+    lands on the max rather than overrunning) — deterministic, stdlib-only,
+    and needs no interpolation policy to justify. *q* is a fraction in (0, 1],
+    e.g. 0.5 for the median, 0.95 for the 95th percentile.
+    """
+    n = len(sorted_vals)
+    idx = min(max(math.ceil(q * n), 1), n)
+    return sorted_vals[idx - 1]
 
 
 def _entitlement_tier(tier: dict | None) -> dict:
@@ -167,7 +207,19 @@ class _Tier2InsightMixin:
     def throughput_summary(
         self, start_date: str, end_date: str, process: str | None = None
     ) -> Ranked:
-        """Aggregate session outcomes per process over a window, ranked by volume."""
+        """Aggregate session outcomes per process over a window, ranked by volume.
+
+        Alongside the outcome counts, each row carries completed-run duration
+        statistics — `duration_runs`, `duration_p50_minutes`,
+        `duration_p95_minutes`, `duration_max_minutes` — computed mechanically
+        from the same session read: nearest-rank percentiles over ONLY the
+        `Completed` runs with a parseable, non-negative `startTime`/`endTime`
+        span (Terminated/Stopped runs are not normal completions and must not
+        shape the figure). No thresholds, no "stale" or "slow" opinion — that
+        stays a consumer's L2 call (see DESIGN.md, the same posture as
+        resource_utilization). All four fields are `None` when no run
+        qualifies, never fabricated from a smaller or different population.
+        """
         require_window(start_date, end_date)
         sessions = self.client.get_sessions(start_date, end_date)
         if process:
@@ -190,6 +242,13 @@ class _Tier2InsightMixin:
             reasons = Counter(
                 str(s.get("terminationReason")) for s in runs if s.get("status") == "Terminated"
             )
+            durations = sorted(
+                minutes
+                for s in runs
+                if str(s.get("status")) == "Completed"
+                and (minutes := _run_minutes(s.get("startTime"), s.get("endTime"))) is not None
+            )
+            duration_runs = len(durations)
             rows.append(
                 {
                     "process": name,
@@ -203,6 +262,14 @@ class _Tier2InsightMixin:
                     ),
                     "terminated_process_errors": reasons.get("ProcessError", 0),
                     "terminated_internal_errors": reasons.get("InternalError", 0),
+                    "duration_runs": duration_runs,
+                    "duration_p50_minutes": (
+                        round(_nearest_rank(durations, 0.50), 1) if duration_runs else None
+                    ),
+                    "duration_p95_minutes": (
+                        round(_nearest_rank(durations, 0.95), 1) if duration_runs else None
+                    ),
+                    "duration_max_minutes": round(durations[-1], 1) if duration_runs else None,
                 }
             )
         return rank(
@@ -393,9 +460,14 @@ def build_tier2_tools(engine) -> list[Callable]:
         `start_date`/`end_date` (ISO) are REQUIRED. Each item gives, for one
         process: total sessions, counts by outcome (completed, terminated,
         stopped, other), the completion rate as a percentage of finished runs,
-        and the terminated runs split by cause (process errors vs internal
-        errors). Use it to see which processes are busiest and which are
-        failing. Optionally scope to one `process` name (case-insensitive).
+        the terminated runs split by cause (process errors vs internal
+        errors), and completed-run duration statistics — `duration_runs`,
+        `duration_p50_minutes`, `duration_p95_minutes`, `duration_max_minutes`
+        (nearest-rank percentiles over ONLY the Completed runs with a
+        parseable, non-negative duration; all four `None` when none qualify).
+        Use it to see which processes are busiest, which are failing, and how
+        long a normal run takes. Optionally scope to one `process` name
+        (case-insensitive).
 
         Results come back as {"items": [...], "meta": {...}}, busiest first,
         capped at `limit` (default 50).

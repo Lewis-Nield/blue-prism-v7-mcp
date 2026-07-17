@@ -1673,6 +1673,21 @@ _DEMO_HISTORY_PROCESSES = [
     (_D_PROC_COMPLIANCE, "Compliance Screening", _D_BOT_O02, "BOT-O02"),
 ]
 
+# Each process's typical completed-run length in minutes — distinct per
+# process rather than one flat figure, so a per-process duration baseline
+# (throughput_summary's duration_p50/p95/max) actually has shape to derive
+# from. Payment Run is the deliberately long batch (a real payment run can
+# take the best part of two hours) — everything else is a normal few-minute
+# transactional process. Only Completed runs use these; Terminated runs stay
+# short (a failure, not a full run) regardless of process.
+_DEMO_HISTORY_BASE_MINUTES = {
+    "Invoice Processing": 12,
+    "Payment Run": 90,
+    "Payroll Run": 20,
+    "Customer Onboarding": 8,
+    "Compliance Screening": 6,
+}
+
 # How many complete days of finished-session history the demo backlog spans. The
 # Intelligence quarter view reads 90 days AND its prior-period delta reads the 90
 # before that, so the backlog covers both off real data rather than a flat zero
@@ -1688,9 +1703,13 @@ def _demo_history() -> list[dict]:
     STP-rate KPI moves period to period: weekdays are busier than weekends, and a
     small termination fraction worsens over the most recent fortnight (a degrading
     signal the deltas should pick up). Every session is past-dated (the foreground
-    list owns today) and references this estate's own processes and workers. A
-    pure function of the day offset — no RNG — so get_sessions() is reproducible
-    run to run and the tests can assert against the shape.
+    list owns today) and references this estate's own processes and workers.
+    Completed-run lengths follow _DEMO_HISTORY_BASE_MINUTES per process — most
+    are a normal few minutes, Payment Run is a genuinely long batch — so
+    throughput_summary's duration percentiles have real, distinct per-process
+    shape rather than one flat figure. A pure function of the day offset — no
+    RNG — so get_sessions() is reproducible run to run and the tests can assert
+    against the shape.
     """
     sessions: list[dict] = []
     number = 100  # clear of the dozen explicit foreground sessions (1..12)
@@ -1710,7 +1729,14 @@ def _demo_history() -> list[dict]:
             # Spread the runs across the working day; both ends are >= a day ago,
             # so any time of day stays safely in the past.
             start_dt = datetime.combine(day, time(6 + k % 12, k * 7 % 60), tzinfo=timezone.utc)
-            end_dt = start_dt + timedelta(minutes=4 if terminated else 11)
+            # Terminated runs stay a short, flat 4 minutes (a failure, not a
+            # completed run, so it must not shape the process's own baseline);
+            # completed runs take that process's typical length plus a small
+            # reproducible wobble, still a pure function of (days_ago, k).
+            duration = (
+                4 if terminated else _DEMO_HISTORY_BASE_MINUTES[proc_name] + (days_ago + k) % 3
+            )
+            end_dt = start_dt + timedelta(minutes=duration)
             stamp = "%Y-%m-%dT%H:%M:%SZ"
             # Terminated runs land on k that is a multiple of term_every (always
             # even), so vary the reason by the day, not k, to get a real mix of
@@ -2004,16 +2030,20 @@ def demo_estate() -> MockBPClient:
             _ts(4, "09:00:00"),
             _ts(4, "09:11:00"),
         ),
-        # In-flight runs on the working bots (started a couple of hours ago).
+        # In-flight runs on the working bots. This one is Payment Run — the
+        # genuinely long batch (~90min baseline, see _DEMO_HISTORY_BASE_MINUTES)
+        # — an hour into its run: healthy under its own baseline, where a flat
+        # global threshold would misread it as stale. Session #12 below is the
+        # other direction: a short-baseline process truthfully stuck for days.
         _session(
             "e8a9d7c2-5f10-4b3e-bd64-0000000d0307",
             7,
-            _PROC_INVOICES,
-            "Invoice Processing",
+            _D_PROC_PAYMENTS,
+            "Payment Run",
             _D_BOT_F03,
             "BOT-F03",
             "Running",
-            _recent(150),
+            _recent(60),
             None,
         ),
         _session(
@@ -2071,7 +2101,10 @@ def demo_estate() -> MockBPClient:
             exception_message="Customer record not found",
         ),
         # A stale Running session on a bot that reads Idle — silently stuck for
-        # days, the in-flight-severity case a console must surface.
+        # days, the in-flight-severity case a console must surface. Invoice
+        # Processing's own baseline is ~12min (see _DEMO_HISTORY_BASE_MINUTES),
+        # so this reads truthfully Warning/Critical against ITS OWN history,
+        # not just a flat global threshold.
         _session(
             "e8a9d7c2-5f10-4b3e-bd64-0000000d0312",
             12,

@@ -7,6 +7,27 @@ additive endpoint is a minor bump.
 
 ## [Unreleased]
 
+## [0.16.0] — 2026-07-17
+
+### Added
+- **`throughput_summary` gains completed-run duration statistics.** Each
+  per-process row now also carries `duration_runs`,
+  `duration_p50_minutes`, `duration_p95_minutes`, and `duration_max_minutes`
+  — nearest-rank percentiles computed from the same session read, over ONLY
+  the `Completed` runs with a parseable, non-negative `startTime`/`endTime`
+  span (Terminated/Stopped runs don't shape it). All four are `None` when no
+  run qualifies. Mechanical aggregation only — no thresholds, same posture
+  as `resource_utilization` — so a consumer can derive its own per-process
+  staleness baseline instead of judging every process against one flat
+  ceiling.
+- The demo estate's historical backlog now gives each process its own
+  typical completed-run length (`_DEMO_HISTORY_BASE_MINUTES` in `mock.py`)
+  instead of one flat 11 minutes, with Payment Run as a genuinely long
+  batch (~90min) — so the new duration statistics have real per-process
+  shape, and the foreground in-flight sessions demonstrate both a
+  long-running-but-healthy process and a short-baseline process truthfully
+  stuck past its own typical duration.
+
 ## [0.15.0] — 2026-07-16
 
 ### Added
