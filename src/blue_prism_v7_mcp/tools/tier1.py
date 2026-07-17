@@ -297,6 +297,7 @@ class _Tier1ReadsMixin:
         within_sla: bool | None = None,
         sla_before: str | None = None,
         sort_by: str | None = None,
+        max_records: int | None = None,
     ) -> Ranked:
         """Rank one queue's items, filtered by state and (usually) a date window.
 
@@ -308,6 +309,14 @@ class _Tier1ReadsMixin:
         first, and asks the API to sort server-side too — so the true oldest
         item surfaces even from a max-pages-capped fetch over an unbounded
         history.
+
+        `max_records` (embeddable-core only — not exposed on the MCP tool)
+        stops the underlying fetch as soon as that many rows are collected,
+        for a caller that only needs a bounded prefix, and requires
+        `sort_by="loadedDate asc"` so the early-stopped fetch is the true
+        oldest-first prefix rather than an arbitrary subset — e.g.
+        `sort_by="loadedDate asc", max_records=1` for "the single oldest
+        pending item" without paging the whole queue history.
         """
         state = validate_choice(state, "state", ITEM_STATES)
         scoped_by_sla = within_sla is not None or sla_before is not None
@@ -317,6 +326,15 @@ class _Tier1ReadsMixin:
             require_window(start_date, end_date)
         validate_iso(sla_before, "sla_before", required=False)
         sort_choice = validate_choice(sort_by, "sort_by", ITEM_SORTS) if sort_by else None
+        if max_records is not None:
+            if max_records < 1:
+                raise ValueError("max_records must be a positive integer")
+            if sort_choice != "loadedDate asc":
+                raise ValueError(
+                    "max_records requires sort_by='loadedDate asc' — without a "
+                    "server-side sort that puts the wanted rows first, an "
+                    "early-stopped fetch is an arbitrary subset, not a top-N."
+                )
         queue_id = resolve_id(queue, self.client.get_queues(), entity="queue")
         items = self.client.get_queue_items(
             queue_id,
@@ -327,6 +345,7 @@ class _Tier1ReadsMixin:
             within_sla=within_sla,
             sla_before=sla_before,
             sort_by=_ITEM_SORT_API_VALUES[sort_choice] if sort_choice else None,
+            max_records=max_records,
         )
         scrubbed = [self._scrubbed_item(i) for i in items]
         if sort_choice == "loadedDate asc":

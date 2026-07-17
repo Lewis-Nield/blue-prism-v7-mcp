@@ -205,3 +205,58 @@ class TestQueueItemFilterWidening:
         engine = make_engine()
         ranked = engine.list_queue_items(queue="Invoices", state="Exceptioned", **WINDOW)
         assert ranked.sorted_by == "lastUpdated desc"
+
+
+class TestMaxRecords:
+    """v0.15.0: max_records is an embeddable-core-only fetch-time cap."""
+
+    def test_max_records_one_with_oldest_first_sort_gives_the_single_oldest(self):
+        engine = make_engine()
+        full = engine.list_queue_items(
+            queue="Invoices", state="Exceptioned", sort_by="loadedDate asc", **WINDOW
+        )
+        capped = engine.list_queue_items(
+            queue="Invoices",
+            state="Exceptioned",
+            sort_by="loadedDate asc",
+            max_records=1,
+            **WINDOW,
+        )
+        assert [i["id"] for i in capped.records] == [i["id"] for i in full.records[:1]]
+
+    def test_max_records_none_is_unaffected(self):
+        engine = make_engine()
+        without = engine.list_queue_items(queue="Invoices", state="Exceptioned", **WINDOW)
+        with_none = engine.list_queue_items(
+            queue="Invoices", state="Exceptioned", max_records=None, **WINDOW
+        )
+        assert [i["id"] for i in with_none.records] == [i["id"] for i in without.records]
+
+    def test_max_records_without_sort_by_is_rejected(self):
+        # ITEM_SORTS currently offers only "loadedDate asc" — the one sort
+        # that puts the wanted rows first — so the only unpaired case
+        # reachable today is no sort_by at all.
+        with pytest.raises(ValueError):
+            make_engine().list_queue_items(
+                queue="Invoices", state="Exceptioned", max_records=5, **WINDOW
+            )
+
+    def test_max_records_zero_is_rejected(self):
+        with pytest.raises(ValueError):
+            make_engine().list_queue_items(
+                queue="Invoices",
+                state="Exceptioned",
+                sort_by="loadedDate asc",
+                max_records=0,
+                **WINDOW,
+            )
+
+    def test_max_records_negative_is_rejected(self):
+        with pytest.raises(ValueError):
+            make_engine().list_queue_items(
+                queue="Invoices",
+                state="Exceptioned",
+                sort_by="loadedDate asc",
+                max_records=-1,
+                **WINDOW,
+            )
