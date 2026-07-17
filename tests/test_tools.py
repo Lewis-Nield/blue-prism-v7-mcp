@@ -1444,6 +1444,171 @@ class TestThroughputSummary:
         assert result["items"] == []
         assert result["meta"]["total"] == 0
 
+    def test_duration_percentiles_over_a_hand_built_run_set(self):
+        # Four completed runs of 10/20/30/40 minutes. Nearest-rank, 1-indexed:
+        # p50 = ceil(0.5*4)=2nd smallest = 20; p95 = ceil(0.95*4)=4th = the max.
+        client = MockBPClient(
+            sessions=[
+                {
+                    "processName": "P",
+                    "status": "Completed",
+                    "startTime": "2026-03-02T09:00:00Z",
+                    "endTime": "2026-03-02T09:10:00Z",
+                },
+                {
+                    "processName": "P",
+                    "status": "Completed",
+                    "startTime": "2026-03-02T10:00:00Z",
+                    "endTime": "2026-03-02T10:20:00Z",
+                },
+                {
+                    "processName": "P",
+                    "status": "Completed",
+                    "startTime": "2026-03-02T11:00:00Z",
+                    "endTime": "2026-03-02T11:30:00Z",
+                },
+                {
+                    "processName": "P",
+                    "status": "Completed",
+                    "startTime": "2026-03-02T12:00:00Z",
+                    "endTime": "2026-03-02T13:20:00Z",
+                },
+            ]
+        )
+        [row] = tier2(client)["throughput_summary"](**WINDOW)["items"]
+        assert row["duration_runs"] == 4
+        assert row["duration_p50_minutes"] == 20.0
+        assert row["duration_p95_minutes"] == 80.0
+        assert row["duration_max_minutes"] == 80.0
+
+    def test_only_completed_runs_with_parseable_timestamps_feed_duration_stats(self):
+        # Terminated, Stopped, and a Completed run with a malformed endTime all
+        # must not shape the baseline — only the one clean Completed run counts.
+        client = MockBPClient(
+            sessions=[
+                {
+                    "processName": "P",
+                    "status": "Completed",
+                    "startTime": "2026-03-02T09:00:00Z",
+                    "endTime": "2026-03-02T09:10:00Z",
+                },
+                {
+                    "processName": "P",
+                    "status": "Terminated",
+                    "startTime": "2026-03-02T10:00:00Z",
+                    "endTime": "2026-03-02T10:01:00Z",
+                },
+                {
+                    "processName": "P",
+                    "status": "Stopped",
+                    "startTime": "2026-03-02T11:00:00Z",
+                    "endTime": "2026-03-02T11:01:00Z",
+                },
+                {
+                    "processName": "P",
+                    "status": "Completed",
+                    "startTime": "2026-03-02T12:00:00Z",
+                    "endTime": "not-a-timestamp",
+                },
+            ]
+        )
+        [row] = tier2(client)["throughput_summary"](**WINDOW)["items"]
+        assert row["duration_runs"] == 1
+        assert row["duration_p50_minutes"] == 10.0
+        assert row["duration_p95_minutes"] == 10.0
+        assert row["duration_max_minutes"] == 10.0
+
+    def test_zero_qualifying_runs_yields_none_duration_fields(self):
+        # All Running (no endTime yet) — nothing has finished, so the duration
+        # fields must be None, never a fabricated 0 or a guess.
+        client = MockBPClient(
+            sessions=[
+                {"processName": "P", "status": "Running", "startTime": "2026-03-02T09:00:00Z"},
+            ]
+        )
+        [row] = tier2(client)["throughput_summary"](**WINDOW)["items"]
+        assert row["duration_runs"] == 0
+        assert row["duration_p50_minutes"] is None
+        assert row["duration_p95_minutes"] is None
+        assert row["duration_max_minutes"] is None
+
+    def test_nearest_rank_percentile_at_n_equals_one(self):
+        client = MockBPClient(
+            sessions=[
+                {
+                    "processName": "P",
+                    "status": "Completed",
+                    "startTime": "2026-03-02T09:00:00Z",
+                    "endTime": "2026-03-02T09:15:00Z",
+                },
+            ]
+        )
+        [row] = tier2(client)["throughput_summary"](**WINDOW)["items"]
+        assert row["duration_runs"] == 1
+        assert row["duration_p50_minutes"] == 15.0
+        assert row["duration_p95_minutes"] == 15.0
+        assert row["duration_max_minutes"] == 15.0
+
+    def test_naive_timestamps_without_an_offset_are_assumed_utc(self):
+        # No trailing "Z" or explicit offset — still parseable by fromisoformat,
+        # and treated as UTC rather than rejected (the v7 timestamps this engine
+        # has seen are already UTC).
+        client = MockBPClient(
+            sessions=[
+                {
+                    "processName": "P",
+                    "status": "Completed",
+                    "startTime": "2026-03-02T09:00:00",
+                    "endTime": "2026-03-02T09:12:00",
+                },
+            ]
+        )
+        [row] = tier2(client)["throughput_summary"](**WINDOW)["items"]
+        assert row["duration_runs"] == 1
+        assert row["duration_p50_minutes"] == 12.0
+
+    def test_a_negative_span_is_excluded_not_fabricated(self):
+        # A valid-looking but backwards startTime/endTime pair (a clock
+        # anomaly, not a real run) must be skipped, not reported as a negative
+        # or absolute-value duration.
+        client = MockBPClient(
+            sessions=[
+                {
+                    "processName": "P",
+                    "status": "Completed",
+                    "startTime": "2026-03-02T09:10:00Z",
+                    "endTime": "2026-03-02T09:00:00Z",
+                },
+            ]
+        )
+        [row] = tier2(client)["throughput_summary"](**WINDOW)["items"]
+        assert row["duration_runs"] == 0
+        assert row["duration_p50_minutes"] is None
+
+    def test_nearest_rank_percentile_at_n_equals_two(self):
+        # p50 = ceil(0.5*2)=1st smallest = 10; p95 = ceil(0.95*2)=2nd = 20 (max).
+        client = MockBPClient(
+            sessions=[
+                {
+                    "processName": "P",
+                    "status": "Completed",
+                    "startTime": "2026-03-02T09:00:00Z",
+                    "endTime": "2026-03-02T09:10:00Z",
+                },
+                {
+                    "processName": "P",
+                    "status": "Completed",
+                    "startTime": "2026-03-02T10:00:00Z",
+                    "endTime": "2026-03-02T10:20:00Z",
+                },
+            ]
+        )
+        [row] = tier2(client)["throughput_summary"](**WINDOW)["items"]
+        assert row["duration_runs"] == 2
+        assert row["duration_p50_minutes"] == 10.0
+        assert row["duration_p95_minutes"] == 20.0
+        assert row["duration_max_minutes"] == 20.0
+
 
 class TestEstateHealth:
     def test_rolls_up_worker_status_and_licence(self):
