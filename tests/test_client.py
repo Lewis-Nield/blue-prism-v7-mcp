@@ -290,6 +290,53 @@ class TestAuth:
         a._token = "token-a"
         assert b._token is None
 
+    def test_concurrent_callers_cost_the_auth_server_one_fetch(self):
+        # The token POST is exempt from the limiter, the semaphore and the retry
+        # layer — a different host with a different budget — so an unserialised
+        # fetch would be the one path where a wide thread pool still bursts
+        # unbounded. Eight threads on distinct cache keys (single-flight cannot
+        # collapse them) must still cost the auth server one round-trip.
+        session = MagicMock()
+        session.post.side_effect = lambda *a, **k: (time.sleep(0.02), _auth_resp())[1]
+        session.get.return_value = _resp({"id": "q"})
+        client = BPClient(make_config(), session=session)
+
+        barrier = threading.Barrier(8)
+
+        def worker(n: int) -> None:
+            barrier.wait()
+            client.get_queue(f"queue-{n}")
+
+        threads = [threading.Thread(target=worker, args=(n,)) for n in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert session.post.call_count == 1
+        assert client.transport_stats()["token_fetches"] == 1
+        assert session.get.call_count == 8  # the API reads themselves all went
+
+    def test_a_401_carrying_an_already_replaced_token_does_not_re_invalidate(self):
+        # Under concurrency the 401s from one expiry keep arriving after another
+        # caller has refreshed. Clearing unconditionally would discard the fresh
+        # token and re-fetch — an expiry storm feeding itself, one wasted auth
+        # round-trip per in-flight request.
+        client, session = make_client()
+        prime_token(client, "fresh-token")
+        client._invalidate_token("expired-token")
+
+        assert client._token == "fresh-token"
+        session.post.assert_not_called()
+
+    def test_an_unattributable_401_still_invalidates(self):
+        # No token to name (the caller brought its own Authorization), so we
+        # cannot say the cached one is innocent.
+        client, _ = make_client()
+        prime_token(client, "some-token")
+        client._invalidate_token()
+        assert client._token is None
+
 
 # --- Live client: reads and cache (mocked HTTP) ---------------------------------
 
@@ -2481,6 +2528,27 @@ class TestRateLimiterWiring:
 
         assert session.get.call_count == 0
         assert client.transport_stats()["errors"]["limiter_exhausted"] == 1
+
+    def test_a_refused_token_releases_the_concurrency_slot_it_was_holding(self):
+        # The semaphore is taken BEFORE the limiter token, so a refusal unwinds
+        # a slot that is already held. Leaking it would be permanent: capacity
+        # lost for the life of the client, and with max_concurrency=1 the very
+        # next call would fail as a concurrency timeout instead.
+        session = MagicMock()
+        session.post.return_value = _auth_resp()
+        client = BPClient(
+            make_config(max_concurrency=1, limiter_timeout_seconds=0.05),
+            session=session,
+            limiter=RecordingLimiter(grant=False),
+        )
+        prime_token(client)
+
+        for _ in range(3):
+            with pytest.raises(TransportBudgetExceeded, match="rate-limit token"):
+                client.get_resources()
+
+        assert client.transport_stats()["errors"]["limiter_exhausted"] == 3
+        assert client._semaphore.acquire(timeout=0)  # the slot came back every time
 
     def test_limiter_and_semaphore_share_one_wait_budget(self):
         # limiter_timeout_seconds is the END-TO-END bound. Time spent waiting on

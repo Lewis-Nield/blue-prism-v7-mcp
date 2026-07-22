@@ -137,6 +137,11 @@ class BPClient:
         self._session = session or requests.Session()  # pools TCP connections
         self._token: str | None = None
         self._token_expiry: float = 0.0  # monotonic deadline; 0 → no token
+        # Guards the token pair. The token fetch is the one send that is
+        # deliberately exempt from every transport bound below (different host,
+        # different budget), which would otherwise make it the one place a wide
+        # thread pool can still burst unbounded — see _get_token.
+        self._token_lock = threading.Lock()
         self._cache = cache if cache is not None else TTLCache(config.cache_ttl)
         # Cache keys are namespaced by estate so an injected store shared across
         # clients (e.g. one Redis backing several processes) never serves one
@@ -181,6 +186,14 @@ class BPClient:
         against the estate at precisely the moment it is busiest. The pool is
         raised to at least `max_concurrency` so it can never be the narrower
         limit than the semaphore that is meant to be doing the bounding.
+
+        Note for an embedding host: this mounts on whatever session it was
+        given, so sizing the pool REPLACES any adapter already mounted on an
+        injected `session` for http:// and https://. That is the honest
+        direction — silently ignoring a configured pool size would leave the
+        deployment believing in a bound it does not have — but a host with its
+        own adapter should either size the pool on that adapter and leave these
+        settings at 0, or re-mount after construction.
         """
         size = max(self._config.pool_maxsize, self._config.max_concurrency)
         if size <= 0:
@@ -223,9 +236,23 @@ class BPClient:
         client registration allows (the auth guide's documented request shape).
         expires_in is honoured with a skew so the token is refreshed before the
         server would reject it.
+
+        The whole body is serialised, and every caller re-checks the cached token
+        *inside* the lock. Concurrent callers arriving on an absent or expired
+        token therefore cost the Authentication Server ONE POST between them
+        rather than one each — the same collapse `_cached` applies to a read
+        stampede, for the same reason. It matters most here precisely because
+        this send is exempt from the limiter, the semaphore and the retry layer:
+        with no bound of its own, an unlocked fetch is where a wide host thread
+        pool would still fan out unchecked.
         """
-        if self._token and time.monotonic() < self._token_expiry:
-            return self._token
+        with self._token_lock:
+            if self._token and time.monotonic() < self._token_expiry:
+                return self._token
+            return self._fetch_token()
+
+    def _fetch_token(self) -> str:
+        """POST the credentials and cache the token. Caller holds _token_lock."""
         data = {
             "grant_type": "client_credentials",
             "client_id": self._config.client_id,
@@ -262,9 +289,23 @@ class BPClient:
         )
         return self._token
 
-    def _invalidate_token(self) -> None:
-        self._token = None
-        self._token_expiry = 0.0
+    def _invalidate_token(self, stale: str | None = None) -> None:
+        """Drop the cached token so the next send fetches a fresh one.
+
+        `stale` is the token the failing request actually carried. Under
+        concurrency the 401s from a single expiry keep arriving after another
+        caller has already refreshed, and clearing unconditionally would throw
+        that fresh token away and re-fetch — an expiry storm feeding itself, one
+        wasted auth round-trip per in-flight request. A token that is no longer
+        the current one has already been replaced, so there is nothing to
+        invalidate. `stale=None` (the caller brought its own Authorization, so
+        we cannot say which token failed) keeps the unconditional behaviour.
+        """
+        with self._token_lock:
+            if stale is not None and self._token != stale:
+                return
+            self._token = None
+            self._token_expiry = 0.0
 
     # --- HTTP ---------------------------------------------------------------
 
@@ -340,15 +381,23 @@ class BPClient:
         url = f"{self._config.base_url}{path}"
         template = normalise_path(path)
 
+        # The token this attempt actually carried, so a 401 invalidates that
+        # token rather than whatever is cached by the time the 401 is handled —
+        # under concurrency those are not the same thing (see _invalidate_token).
+        sent_token: str | None = None
+
         def _send():
             # Caller headers take precedence (the JSON Patch endpoint needs
             # its own Content-Type; requests fills in application/json for
             # json= bodies otherwise). The bearer token is only fetched when
             # the caller didn't bring an Authorization of their own — an
             # override must not trigger a needless auth round-trip.
+            nonlocal sent_token
             send_headers = dict(headers or {})
+            sent_token = None
             if not any(k.lower() == "authorization" for k in send_headers):
-                send_headers["Authorization"] = f"Bearer {self._get_token()}"
+                sent_token = self._get_token()
+                send_headers["Authorization"] = f"Bearer {sent_token}"
             # The token fetch sits deliberately OUTSIDE the slot: it goes to a
             # different host, so it neither spends the estate's budget nor
             # occupies a concurrency slot while the auth server thinks about it.
@@ -380,8 +429,9 @@ class BPClient:
                 # Token may have expired — re-auth once and retry. Orthogonal to
                 # the transient-failure layer below: it is in-band, it applies to
                 # writes as much as reads, and it is not a "retry" for counting
-                # purposes. Left exactly as it was.
-                self._invalidate_token()
+                # purposes. Scoped to the token this attempt carried, so a 401
+                # answering an already-replaced token is a no-op.
+                self._invalidate_token(sent_token)
                 resp = _send()
             if not retriable:
                 break

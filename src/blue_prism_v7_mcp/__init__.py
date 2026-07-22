@@ -1,15 +1,15 @@
 """blue-prism-v7-mcp — distributable MCP server for Blue Prism v7 Enterprise.
 
 Layer map (see DESIGN.md for the full design):
-    config.py   — per-deployment configuration (Phase 0/1)
-    client.py   — BPClient: the v7 REST client, decoupled from Streamlit (Phase 1-2)
-    pii.py      — pluggable Scrubber protocol + Presidio backend (Phase 3)
-    tools/      — Tier 1 Visibility, Tier 2 Insight, Tier 3 Control (Phase 4-5)
-    engine.py   — Engine: the embeddable domain facade over the reads (Phase 8)
-    cache.py    — Cache protocol + thread-safe TTLCache (Phase 8)
-    transport.py— rate limiting, retry policy, request counters (Phase 12)
-    server.py   — FastMCP stdio server + console entrypoint (Phase 6)
-    __main__.py — `python -m blue_prism_v7_mcp` entrypoint (Phase 7)
+    config.py    — per-deployment configuration (Phase 0/1)
+    client.py    — BPClient: the v7 REST client, decoupled from Streamlit (Phase 1-2)
+    pii.py       — pluggable Scrubber protocol + Presidio backend (Phase 3)
+    tools/       — Tier 1 Visibility, Tier 2 Insight, Tier 3 Control (Phase 4-5)
+    engine.py    — Engine: the embeddable domain facade over the reads (Phase 8)
+    cache.py     — Cache protocol + thread-safe TTLCache (Phase 8)
+    transport.py — rate limiting, retry policy, request counters (Phase 12)
+    server.py    — FastMCP stdio server + console entrypoint (Phase 6)
+    __main__.py  — `python -m blue_prism_v7_mcp` entrypoint (Phase 7)
 
 Embeddable core (Phase 8): a host can embed the engine in-process and consume
 ranked domain records directly, applying its own representation —

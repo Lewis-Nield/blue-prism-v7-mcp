@@ -646,6 +646,17 @@ Sequenced as:
     the waiters re-raise its exception rather than each re-attempting; a failing
     upstream call is the last thing that should be multiplied by the number of
     threads waiting on it.
+  - **Single-flight on the token fetch**, for the same reason and by the same
+    shape: `_get_token` serialises and re-checks under its lock, so a fan-out
+    arriving on an absent or expired token costs the Authentication Server one
+    POST between them rather than one each. This is the one send deliberately
+    exempt from the limiter, the semaphore and the retry layer — a different
+    host with a different budget — which makes it the one path where a wide
+    thread pool could otherwise still burst unbounded. A 401 likewise
+    invalidates *the token that attempt actually carried*: under concurrency the
+    401s from one expiry keep arriving after another caller has refreshed, and
+    clearing unconditionally would discard the fresh token and re-fetch, an
+    expiry storm feeding itself.
   - **`RequestCounters` / `BPClient.transport_stats()`** — so a load budget can
     be *measured* rather than asserted. The returned dict is a published
     contract (stable keys, every error bucket always present, a fresh copy each

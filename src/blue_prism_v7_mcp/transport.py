@@ -281,19 +281,26 @@ class RetryPolicy:
         None means "this is not retriable" — either the status does not warrant
         it or the retry budget is spent. The caller then surfaces the response
         as-is, which for an error status means `raise_for_status`.
+
+        Never negative. The delays are configuration-derived (`retry_base_delay`,
+        `retry_max_delay`) and nothing validates a deployment's numbers, so a
+        negative one must degrade to "no pause" rather than reach `time.sleep`
+        and raise — a misconfigured knob should not turn a retriable 503 into an
+        unrelated ValueError out of a read.
         """
         if attempt >= self.max_retries:
             return None
         if status == 429:
             stated = retry_after_seconds(retry_after)
             if stated is not None:
-                return min(stated, self._max_delay)
+                return self._bounded(stated)
         elif status not in self.TRANSIENT_STATUSES:
             return None
-        return min(
-            backoff_delay(attempt, base=self._base_delay, jitter=self._jitter),
-            self._max_delay,
-        )
+        return self._bounded(backoff_delay(attempt, base=self._base_delay, jitter=self._jitter))
+
+    def _bounded(self, delay: float) -> float:
+        """Clamp a delay to [0, max_delay]."""
+        return max(min(delay, self._max_delay), 0.0)
 
     def wait(self, delay: float) -> None:
         self._sleep(delay)

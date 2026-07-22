@@ -355,6 +355,22 @@ class TestRetryPolicy:
         # long enough to be a real pause, short enough not to look like a hang.
         assert RetryPolicy(1, jitter=lambda: 0.0).delay_for(503, 0) == 0.25
 
+    @pytest.mark.parametrize(
+        "kwargs,status,retry_after",
+        [
+            ({"max_delay": -1.0}, 503, None),
+            ({"max_delay": -1.0}, 429, "5"),
+            ({"base_delay": -10.0}, 503, None),
+        ],
+    )
+    def test_a_negative_configured_delay_degrades_to_no_pause(self, kwargs, status, retry_after):
+        # Nothing validates a deployment's retry numbers, and time.sleep rejects
+        # a negative argument — so a mistyped BP_API_RETRY_MAX_DELAY must mean
+        # "don't pause", not an unrelated ValueError raised out of a read.
+        delay = self._policy(**kwargs).delay_for(status, 0, retry_after)
+        assert delay == 0.0
+        self._policy(**kwargs).wait(delay)  # reaches a real time.sleep
+
     def test_wait_delegates_to_the_injected_sleep(self):
         slept: list[float] = []
         self._policy(sleep=slept.append).wait(1.25)

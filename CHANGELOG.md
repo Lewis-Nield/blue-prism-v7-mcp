@@ -73,8 +73,23 @@ The engine ships the mechanism; the deployment owns the policy.
   default implementation would mean an injected shared store silently *loses*
   it, and the herd is worse across processes, which is exactly when a host would
   inject one.
+- **Single-flight on the token fetch**, by the same shape and for the same
+  reason: concurrent callers arriving on an absent or expired token now cost the
+  Authentication Server one POST between them rather than one each. The token
+  fetch is the one send deliberately exempt from the limiter, the semaphore and
+  the retry layer — a different host with a different budget — which made it the
+  one path where a wide thread pool could still burst unbounded.
 
 ### Changed
+- **A 401 now invalidates the token that attempt actually carried**, not
+  whatever is cached by the time the 401 is handled. Under concurrency the 401s
+  from a single expiry keep arriving after another caller has already refreshed,
+  and clearing unconditionally discarded that fresh token and re-fetched — one
+  wasted auth round-trip per in-flight request, an expiry storm feeding itself.
+  Single-threaded behaviour is unchanged.
+- A negative `BP_API_RETRY_MAX_DELAY` or `BP_API_RETRY_BASE_DELAY` now degrades
+  to no pause rather than reaching `time.sleep` and raising: a mistyped knob
+  should not surface as an unrelated `ValueError` out of a read.
 - Reads opt into the retry layer and writes do not, via a new keyword-only
   `retriable` on the internal request path that defaults to **False**. A retried
   write is a duplicate estate mutation — a second `start_process` is a second
