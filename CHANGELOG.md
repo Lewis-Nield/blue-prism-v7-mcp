@@ -7,6 +7,74 @@ additive endpoint is a minor bump.
 
 ## [Unreleased]
 
+## [0.18.0] — 2026-07-22
+
+Transport governance: the client gains a ceiling on the load it puts on the
+Blue Prism application server, and a way to report the load it actually emitted.
+That host also serves interactive Control Room clients, the scheduler, and the
+runtime resources' own connections, so a tool that degrades the estate it
+monitors is a worse outcome than a tool that is simply down.
+
+**Every setting below defaults to off.** An unconfigured server emits exactly
+what it did in 0.17.0 — a distributable artifact should not change its posture
+on upgrade, and the right numbers depend on a deployment's concurrent users,
+poll cadence, and application-server headroom, none of which the engine can see.
+The engine ships the mechanism; the deployment owns the policy.
+
+### Added
+- **New `transport.py`**: a `RateLimiter` protocol with a thread-safe, FIFO
+  `TokenBucket` default (`BP_API_MAX_REQUESTS_PER_SECOND`, `BP_API_MAX_BURST`),
+  a `RetryPolicy`, and `RequestCounters`. FIFO is deliberate — a plain lock lets
+  a busy caller starve one that has been waiting, which under contention is the
+  request most likely to be a person waiting on a page. The limiter is
+  injectable (`BPClient(config, limiter=...)`) on the `Cache` protocol's
+  precedent, because a host running several processes against one estate needs a
+  budget they *share*, which a per-instance bucket cannot express.
+- **A concurrency ceiling** (`BP_API_MAX_CONCURRENCY`), enforced by a bounded
+  semaphore. A token bucket bounds *rate* and says nothing about how many
+  requests are in flight; a wide host thread pool fanning out is what actually
+  melts an application server. The connection pool is mounted at no less than
+  that ceiling (`BP_API_POOL_MAXSIZE`), since above `pool_maxsize` `requests`
+  opens and discards connections — TLS re-handshakes against the estate at
+  exactly its busiest moment.
+- **One end-to-end wait budget** (`BP_API_LIMITER_TIMEOUT`) covering the
+  concurrency slot and the rate token together, rather than each getting the
+  full allowance and the configured number silently becoming two stacked
+  timeouts. When it is spent the call raises `TransportBudgetExceeded` —
+  deliberately not a `requests.RequestException`, since nothing was sent. Block,
+  then fail visibly: never drop a request, never queue unboundedly.
+- **Bounded retry of transient failures** (`BP_API_MAX_RETRIES`,
+  `BP_API_RETRY_BASE_DELAY`): 429 honouring a numeric `Retry-After`, and
+  502/503/504 with equal-jitter exponential backoff. Not 500 — as likely a bad
+  request as a blip. The `Retry-After` HTTP-date form is ignored, because
+  honouring it requires the estate's clock to agree with ours and a skewed one
+  could park a caller for hours.
+- **`BPClient.transport_stats()`** — requests sent, retries, bytes received,
+  errors bucketed (`rate_limited`, `client_error`, `server_error`, `timeout`,
+  `connection_error`, `limiter_exhausted`), and a per-endpoint tally with
+  id-shaped path segments collapsed to `{id}` so it counts endpoints rather than
+  entities. A published contract: stable keys, every error bucket always
+  present, and a fresh copy per call. It exists so a load budget can be
+  *measured* rather than asserted. Token fetches are counted separately — the
+  Authentication Server is a different service from the API host, so token
+  traffic must not inflate the estate's budget, but must not vanish from the
+  report either.
+- **Single-flight on cache miss.** Concurrent callers missing the same key now
+  share one upstream read instead of each issuing it; a TTL expiry under load
+  was previously a thundering herd. It lives in `BPClient._cached` rather than
+  in `TTLCache` because `Cache` is a published protocol — putting it in the
+  default implementation would mean an injected shared store silently *loses*
+  it, and the herd is worse across processes, which is exactly when a host would
+  inject one.
+
+### Changed
+- Reads opt into the retry layer and writes do not, via a new keyword-only
+  `retriable` on the internal request path that defaults to **False**. A retried
+  write is a duplicate estate mutation — a second `start_process` is a second
+  live run — so that is now a property of the construction rather than a
+  convention someone has to remember. The single 401 re-auth is orthogonal,
+  unchanged, and not counted as a retry.
+
 ## [0.17.0] — 2026-07-22
 
 ### Added
@@ -551,7 +619,8 @@ First runnable release — the foundation, built in eight phases (see
 - FastMCP stdio server, a first-class mock run mode, console entrypoint, and
   deployment / day-one verification docs.
 
-[Unreleased]: https://github.com/Lewis-Nield/blue-prism-v7-mcp/compare/v0.17.0...HEAD
+[Unreleased]: https://github.com/Lewis-Nield/blue-prism-v7-mcp/compare/v0.18.0...HEAD
+[0.18.0]: https://github.com/Lewis-Nield/blue-prism-v7-mcp/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/Lewis-Nield/blue-prism-v7-mcp/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/Lewis-Nield/blue-prism-v7-mcp/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/Lewis-Nield/blue-prism-v7-mcp/compare/v0.14.0...v0.15.0

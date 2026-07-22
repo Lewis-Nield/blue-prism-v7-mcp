@@ -25,13 +25,24 @@ the attempt-based item write model.
 from __future__ import annotations
 
 import logging
+import threading
 import time
-from typing import Any, Callable, Sequence
+from contextlib import contextmanager
+from typing import Any, Callable, Iterator, Sequence
 
 import requests
+from requests.adapters import HTTPAdapter
 
 from .cache import MISS, Cache, TTLCache
 from .config import BPConfig
+from .transport import (
+    RateLimiter,
+    RequestCounters,
+    RetryPolicy,
+    TokenBucket,
+    TransportBudgetExceeded,
+    normalise_path,
+)
 
 logger = logging.getLogger("blue_prism_v7_mcp.client")
 
@@ -56,6 +67,46 @@ _ERROR_STAGE_TYPES = "Exception,Recover,Resume"
 _LATEST_RUNS_MAX_PAGES = 3
 
 
+def _build_limiter(config: BPConfig) -> RateLimiter | None:
+    """The configured token bucket, or None when rate limiting is off."""
+    if config.max_requests_per_second <= 0:
+        return None
+    return TokenBucket(config.max_requests_per_second, config.max_burst)
+
+
+def _body_size(resp: Any) -> int:
+    """Bytes of response body, when the body is materialised as bytes.
+
+    Counted for the load report, so this must never be the thing that breaks a
+    request: a streamed or stubbed response whose `content` is not bytes simply
+    contributes nothing rather than raising.
+    """
+    content = getattr(resp, "content", None)
+    return len(content) if isinstance(content, (bytes, bytearray)) else 0
+
+
+def _header(resp: Any, name: str) -> Any:
+    """One response header, or None when the response carries none.
+
+    Only `Retry-After` is read this way, and an unusable value already falls
+    through to the calculated backoff (see transport.retry_after_seconds), so
+    this stays lenient rather than asserting a response shape.
+    """
+    headers = getattr(resp, "headers", None)
+    return headers.get(name) if hasattr(headers, "get") else None
+
+
+class _InFlight:
+    """One in-progress `_cached` production, and the result the losers wait for."""
+
+    __slots__ = ("done", "error", "value")
+
+    def __init__(self) -> None:
+        self.done = threading.Event()
+        self.value: Any = None
+        self.error: BaseException | None = None
+
+
 class BPClient:
     """Stateful client for one Blue Prism v7 estate.
 
@@ -65,6 +116,12 @@ class BPClient:
     embedding the engine can supply a shared store behind the `Cache` protocol.
     Read methods mirror the v7 entities; write methods (Phase 2/5) are only
     surfaced as MCP tools when config.enable_actions is True.
+
+    Transport governance (DESIGN Phase 12) lives here too: an optional rate
+    limiter and concurrency semaphore bound what this client emits, a bounded
+    retry layer absorbs transient failures, single-flight collapses a cache-miss
+    stampede into one upstream read, and `transport_stats()` reports what was
+    actually sent. All of it is off unless configured — see BPConfig.
     """
 
     def __init__(
@@ -72,6 +129,7 @@ class BPClient:
         config: BPConfig,
         session: requests.Session | None = None,
         cache: Cache | None = None,
+        limiter: RateLimiter | None = None,
     ) -> None:
         self._config = config
         self._session = session or requests.Session()  # pools TCP connections
@@ -87,6 +145,54 @@ class BPClient:
         # Session-log endpoint pin: None until /logs is proven the only option,
         # then "logs" for the life of the instance (see get_session_log).
         self._log_path: str | None = None
+
+        # --- Transport governance (DESIGN Phase 12) -------------------------
+        # Injectable like the cache, and for the same reason: a host running
+        # several processes against one estate needs a budget they share, which
+        # a per-instance bucket cannot express.
+        self._limiter = limiter if limiter is not None else _build_limiter(config)
+        # The bucket bounds RATE; it says nothing about how many requests are
+        # in flight at once. That is what actually melts an application server
+        # when a wide thread pool fans out, so it gets its own ceiling.
+        self._semaphore = (
+            threading.BoundedSemaphore(config.max_concurrency)
+            if config.max_concurrency > 0
+            else None
+        )
+        self._retry = RetryPolicy(config.max_retries, base_delay=config.retry_base_delay)
+        self._counters = RequestCounters()
+        # Single-flight bookkeeping for _cached. The lock guards only the
+        # registry — never the production of a value (see _cached).
+        self._inflight: dict[Any, _InFlight] = {}
+        self._inflight_lock = threading.Lock()
+        self._mount_adapter()
+
+    def _mount_adapter(self) -> None:
+        """Size the connection pool from config, when configured.
+
+        Left alone, `requests` pools 10 connections per host and silently opens
+        and discards any beyond that — connection churn and TLS re-handshakes
+        against the estate at precisely the moment it is busiest. The pool is
+        raised to at least `max_concurrency` so it can never be the narrower
+        limit than the semaphore that is meant to be doing the bounding.
+        """
+        size = max(self._config.pool_maxsize, self._config.max_concurrency)
+        if size <= 0:
+            return
+        # pool_connections is the number of per-host pools; this client talks to
+        # one API host (plus the auth server), so one knob sizes both honestly.
+        adapter = HTTPAdapter(pool_connections=size, pool_maxsize=size)
+        self._session.mount("https://", adapter)
+        self._session.mount("http://", adapter)
+
+    def transport_stats(self) -> dict[str, Any]:
+        """What this client has emitted since construction.
+
+        The published shape is documented on `transport.RequestCounters` — a
+        host surfacing it (e.g. on a health endpoint) is relying on those keys
+        being stable, so treat it as a contract rather than debug output.
+        """
+        return self._counters.stats()
 
     def clear_cache(self) -> None:
         """Drop all cached reads (mirrors st.cache_data.clear()).
@@ -124,6 +230,12 @@ class BPClient:
         scope = self._config.token_scope.strip()
         if scope:
             data["scope"] = scope
+        # Deliberately NOT routed through _request: the Authentication Server is
+        # a different service from the API host, so token traffic must not spend
+        # the estate's request budget (no limiter, no semaphore, no retry). It
+        # is tallied separately so the budget report still accounts for it —
+        # see RequestCounters.
+        self._counters.record_token_fetch()
         resp = self._session.post(
             f"{self._config.auth_url}/connect/token",
             data=data,
@@ -150,6 +262,46 @@ class BPClient:
 
     # --- HTTP ---------------------------------------------------------------
 
+    @contextmanager
+    def _request_slot(self, template: str) -> Iterator[None]:
+        """Hold a governed slot for one send: semaphore, then a limiter token.
+
+        The order is deliberate. The semaphore bounds how many callers are in
+        flight; the limiter then paces those that are. Acquiring the token first
+        would let an unbounded crowd sit on tokens while the pool thrashes.
+
+        Both waits draw on ONE budget (`limiter_timeout_seconds`) rather than
+        each getting the full allowance, so the configured number stays the
+        honest end-to-end bound a caller can reason about. Exhausting it raises
+        rather than dropping or queueing — the caller degrades through the path
+        it already has for an unreachable estate.
+        """
+        deadline = time.monotonic() + self._config.limiter_timeout_seconds
+        held = False
+        try:
+            if self._semaphore is not None:
+                if not self._semaphore.acquire(timeout=max(deadline - time.monotonic(), 0.0)):
+                    self._counters.record_budget_exhausted()
+                    raise TransportBudgetExceeded(
+                        f"waited {self._config.limiter_timeout_seconds}s for a "
+                        f"concurrency slot (max_concurrency="
+                        f"{self._config.max_concurrency}) before {template}"
+                    )
+                held = True
+            if self._limiter is not None and not self._limiter.acquire(
+                max(deadline - time.monotonic(), 0.0)
+            ):
+                self._counters.record_budget_exhausted()
+                raise TransportBudgetExceeded(
+                    f"waited {self._config.limiter_timeout_seconds}s for a rate-limit "
+                    f"token (max_requests_per_second="
+                    f"{self._config.max_requests_per_second}) before {template}"
+                )
+            yield
+        finally:
+            if held:
+                self._semaphore.release()  # type: ignore[union-attr]
+
     def _request(
         self,
         method: str,
@@ -158,6 +310,7 @@ class BPClient:
         params: dict | None = None,
         json: list | dict | None = None,
         headers: dict | None = None,
+        retriable: bool = False,
     ) -> Any:
         """Issue an authenticated request, re-authing once on a 401 and retrying.
 
@@ -166,12 +319,20 @@ class BPClient:
         put/patch), which keeps the reused connection pool and lets tests stub a
         single verb at a time.
 
+        `retriable` opts a call into the transient-failure retry layer (429 and
+        the gateway 5xx). It defaults to **False** so the fail-closed case needs
+        no opt-out: `_get` passes True, `_write` passes False, and a retried
+        write would be a duplicate estate mutation — a second `start_process` is
+        a second live run. That is a property of the construction, not a
+        convention someone must remember.
+
         Returns the decoded JSON body, which per the v7 spec is not always an
         object: writes answer 204/empty (→ None here) and POST /sessions returns
         a bare UUID string. The body may also be a JSON Patch *list*.
         """
         send = getattr(self._session, method.lower())
         url = f"{self._config.base_url}{path}"
+        template = normalise_path(path)
 
         def _send():
             # Caller headers take precedence (the JSON Patch endpoint needs
@@ -182,28 +343,61 @@ class BPClient:
             send_headers = dict(headers or {})
             if not any(k.lower() == "authorization" for k in send_headers):
                 send_headers["Authorization"] = f"Bearer {self._get_token()}"
-            return send(
-                url,
-                headers=send_headers,
-                params=params,
-                json=json,
-                verify=self._config.verify_ssl,
-                timeout=self._config.request_timeout,
+            # The token fetch sits deliberately OUTSIDE the slot: it goes to a
+            # different host, so it neither spends the estate's budget nor
+            # occupies a concurrency slot while the auth server thinks about it.
+            with self._request_slot(template):
+                try:
+                    resp = send(
+                        url,
+                        headers=send_headers,
+                        params=params,
+                        json=json,
+                        verify=self._config.verify_ssl,
+                        timeout=self._config.request_timeout,
+                    )
+                except requests.Timeout:
+                    self._counters.record_request(template, error="timeout")
+                    raise
+                except requests.ConnectionError:
+                    self._counters.record_request(template, error="connection_error")
+                    raise
+            self._counters.record_request(
+                template, status=resp.status_code, bytes_received=_body_size(resp)
             )
+            return resp
 
-        resp = _send()
-        if resp.status_code == 401:
-            # Token may have expired — re-auth once and retry.
-            self._invalidate_token()
+        attempt = 0
+        while True:
             resp = _send()
+            if resp.status_code == 401:
+                # Token may have expired — re-auth once and retry. Orthogonal to
+                # the transient-failure layer below: it is in-band, it applies to
+                # writes as much as reads, and it is not a "retry" for counting
+                # purposes. Left exactly as it was.
+                self._invalidate_token()
+                resp = _send()
+            if not retriable:
+                break
+            delay = self._retry.delay_for(resp.status_code, attempt, _header(resp, "Retry-After"))
+            if delay is None:
+                break
+            self._counters.record_retry()
+            self._retry.wait(delay)
+            attempt += 1
+
         resp.raise_for_status()
         if resp.status_code == 204 or not resp.content:
             return None
         return resp.json()
 
     def _get(self, path: str, params: dict | None = None) -> Any:
-        """GET a path through the shared request/auth/retry path."""
-        return self._request("GET", path, params=params)
+        """GET a path through the shared request/auth/retry path.
+
+        Reads are idempotent, so they opt into the transient-failure retry layer
+        (a no-op unless config.max_retries is set).
+        """
+        return self._request("GET", path, params=params, retriable=True)
 
     # --- Pagination ---------------------------------------------------------
     # Collection endpoints are fetched page-by-page so a large estate cannot
@@ -360,14 +554,61 @@ class BPClient:
 
         The key is namespaced by estate (see ``_cache_ns``) so a shared cache
         never crosses estates.
+
+        Misses are **single-flighted** (DESIGN Phase 12): the first caller to
+        miss a key claims it and produces the value; concurrent callers missing
+        the same key wait for that one result instead of each issuing the same
+        upstream request. Without this, a TTL expiry under load is a thundering
+        herd — the poller and every open surface hitting the estate at the same
+        instant for the same rows.
+
+        It lives here rather than in the cache because `Cache` is a published
+        protocol (see cache.py): a host injecting a shared store would otherwise
+        silently lose single-flight, and the herd is *worse* across processes,
+        which is exactly when a host would inject one.
+
+        The registry lock is never held while producing — only while claiming or
+        releasing a key — so a slow upstream read cannot block cache traffic for
+        other keys.
+
+        **If the producer raises, the waiters re-raise its exception** rather
+        than each re-attempting. A failing upstream call is the last thing that
+        should be immediately multiplied by the number of threads that were
+        waiting on it; the next call through gets a clean attempt.
         """
         namespaced = (self._cache_ns, key)
         hit = self._cache.get(namespaced)
         if hit is not MISS:
             return hit
-        value = produce()
-        self._cache.set(namespaced, value)
-        return value
+
+        with self._inflight_lock:
+            entry = self._inflight.get(namespaced)
+            claimed = entry is None
+            if entry is None:
+                entry = self._inflight[namespaced] = _InFlight()
+
+        if not claimed:
+            entry.done.wait()
+            if entry.error is not None:
+                raise entry.error
+            return entry.value
+
+        try:
+            value = produce()
+        except BaseException as exc:
+            entry.error = exc
+            raise
+        else:
+            entry.value = value
+            self._cache.set(namespaced, value)
+            return value
+        finally:
+            # Drop the claim BEFORE waking the losers, so a caller arriving
+            # after a failed production starts a fresh flight rather than
+            # joining a finished one.
+            with self._inflight_lock:
+                self._inflight.pop(namespaced, None)
+            entry.done.set()
 
     # --- Tier 1 reads -------------------------------------------------------
 
@@ -994,8 +1235,13 @@ class BPClient:
         body: list | dict | None = None,
         headers: dict | None = None,
     ) -> Any:
-        """Issue a mutating request and invalidate the read cache on success."""
-        result = self._request(method, path, json=body, headers=headers)
+        """Issue a mutating request and invalidate the read cache on success.
+
+        `retriable=False` is stated rather than left to the default: a write is
+        the one thing that must never be re-sent automatically, and a reader of
+        this line should not have to go and check what the default is.
+        """
+        result = self._request(method, path, json=body, headers=headers, retriable=False)
         self._cache.clear()
         return result
 

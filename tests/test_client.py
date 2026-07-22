@@ -8,6 +8,8 @@ client-credentials auth, token paging, deepObject filters, attempt-based item
 writes — follows the official v7 API specs (see DESIGN.md's ground truth).
 """
 
+import threading
+import time
 from unittest.mock import MagicMock
 
 import pytest
@@ -22,6 +24,11 @@ from blue_prism_v7_mcp.mock import (
     _date,
     _ts,
     demo_estate,
+)
+from blue_prism_v7_mcp.transport import (
+    RetryPolicy,
+    TokenBucket,
+    TransportBudgetExceeded,
 )
 
 
@@ -231,6 +238,32 @@ class TestAuth:
         session.post.return_value = _resp({"access_token": "no-expiry"})
         client._get_token()
         assert client._token_expiry == float("inf")
+
+    def test_expiry_is_the_stated_lifetime_less_the_refresh_skew(self):
+        # The skew is the point: refresh BEFORE the server would reject, so a
+        # token never goes stale mid-request.
+        client, session = make_client()
+        session.post.return_value = _auth_resp(expires_in=3600)
+        before = time.monotonic()
+        client._get_token()
+        assert client._token_expiry == pytest.approx(before + 3600 - 60, abs=0.5)
+
+    def test_a_lifetime_shorter_than_the_skew_still_leaves_a_positive_window(self):
+        # Otherwise the subtraction goes negative and every single request
+        # re-authenticates.
+        client, session = make_client()
+        session.post.return_value = _auth_resp(expires_in=5)
+        before = time.monotonic()
+        client._get_token()
+        assert client._token_expiry == pytest.approx(before + 1.0, abs=0.5)
+
+    def test_the_token_post_honours_the_configured_tls_and_timeout(self):
+        # The auth server is often an internal host with its own certificate
+        # posture, and an untimed token POST can hang the whole client.
+        client, session = make_client(verify_ssl=False, request_timeout=7.5)
+        client._get_token()
+        assert session.post.call_args.kwargs["verify"] is False
+        assert session.post.call_args.kwargs["timeout"] == 7.5
 
     def test_token_refresh_on_401(self):
         client, session = make_client()
@@ -2291,6 +2324,500 @@ class TestWriteFidelityJourneys:
     def test_occupy_worker_tolerates_unknown_resource(self):
         client = MockBPClient()
         client._occupy_worker("no-such-id", "no-such-name")
+
+
+# --- Phase 12: transport governance -------------------------------------------
+
+
+class RecordingLimiter:
+    """A RateLimiter that records the wait budget it was handed."""
+
+    def __init__(self, grant: bool = True) -> None:
+        self.grant = grant
+        self.timeouts: list[float] = []
+
+    def acquire(self, timeout: float) -> bool:
+        self.timeouts.append(timeout)
+        return self.grant
+
+
+def _resp_with(status_code: int, *, headers=None, content=b"{}", body=None):
+    """A response mock with real headers/content, for the transport paths."""
+    return MagicMock(
+        status_code=status_code,
+        headers=headers if headers is not None else {},
+        content=content,
+        json=MagicMock(return_value=body if body is not None else {}),
+        raise_for_status=MagicMock(),
+    )
+
+
+class TestTransportDefaultsAreOff:
+    """An unconfigured client emits exactly what it did before Phase 12."""
+
+    def test_no_limiter_no_semaphore_no_retries_by_default(self):
+        client, _ = make_client()
+        assert client._limiter is None
+        assert client._semaphore is None
+        assert client._retry.max_retries == 0
+
+    def test_no_adapter_is_mounted_unless_sized(self):
+        client, session = make_client()
+        assert session.mount.call_count == 0
+
+    def test_retry_settings_are_wired_from_config(self):
+        client, _ = make_client(max_retries=3, retry_base_delay=2.0)
+        assert client._retry.max_retries == 3
+        client._retry._jitter = lambda: 0.0
+        assert client._retry.delay_for(503, 0) == 1.0  # half of the 2.0 window
+
+    def test_a_limiter_is_built_only_when_a_rate_is_configured(self):
+        client, _ = make_client(max_requests_per_second=5.0, max_burst=10)
+        assert isinstance(client._limiter, TokenBucket)
+
+    def test_an_injected_limiter_wins_over_config(self):
+        limiter = RecordingLimiter()
+        session = MagicMock()
+        session.post.return_value = _auth_resp()
+        client = BPClient(
+            make_config(max_requests_per_second=5.0), session=session, limiter=limiter
+        )
+        assert client._limiter is limiter
+
+
+class TestConnectionPoolSizing:
+    def test_adapter_mounted_on_both_schemes_when_configured(self):
+        client, session = make_client(pool_maxsize=12)
+        schemes = [call.args[0] for call in session.mount.call_args_list]
+        assert schemes == ["https://", "http://"]
+
+        adapters = {id(call.args[1]) for call in session.mount.call_args_list}
+        assert len(adapters) == 1  # one adapter, shared
+
+    def test_pool_is_never_narrower_than_the_concurrency_ceiling(self):
+        # Otherwise requests opens and discards connections above the pool size
+        # — TLS re-handshakes against the estate at the worst moment.
+        _, session = make_client(pool_maxsize=2, max_concurrency=8)
+        adapter = session.mount.call_args_list[0].args[1]
+        assert adapter._pool_maxsize == 8
+
+    def test_configured_pool_size_is_honoured_when_it_is_the_larger(self):
+        _, session = make_client(pool_maxsize=20, max_concurrency=8)
+        adapter = session.mount.call_args_list[0].args[1]
+        assert adapter._pool_maxsize == 20
+
+    def test_concurrency_alone_sizes_the_pool(self):
+        _, session = make_client(max_concurrency=6)
+        adapter = session.mount.call_args_list[0].args[1]
+        assert adapter._pool_maxsize == 6
+
+
+class TestConcurrencyCeiling:
+    def test_semaphore_caps_requests_in_flight(self):
+        client, session = make_client(max_concurrency=2, limiter_timeout_seconds=5.0)
+        prime_token(client)
+        in_flight = 0
+        peak = 0
+        lock = threading.Lock()
+
+        def slow_get(*_a, **_k):
+            nonlocal in_flight, peak
+            with lock:
+                in_flight += 1
+                peak = max(peak, in_flight)
+            time.sleep(0.02)
+            with lock:
+                in_flight -= 1
+            return _resp_with(200, body={"items": []})
+
+        session.get = slow_get
+        threads = [threading.Thread(target=client.get_resources) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert peak <= 2
+
+    def test_exhausting_the_wait_budget_raises_rather_than_dropping(self):
+        client, session = make_client(max_concurrency=1, limiter_timeout_seconds=0.05)
+        prime_token(client)
+        client._semaphore.acquire()  # occupy the only slot
+        try:
+            # The message names the call that was refused — a budget error with
+            # no endpoint in it tells an operator nothing.
+            with pytest.raises(TransportBudgetExceeded, match="concurrency slot.*/resources"):
+                client.get_resources()
+        finally:
+            client._semaphore.release()
+
+        stats = client.transport_stats()
+        assert stats["errors"]["limiter_exhausted"] == 1
+        assert stats["requests"] == 0  # nothing was sent
+        assert session.get.call_count == 0
+
+    def test_the_slot_is_released_when_the_request_raises(self):
+        client, session = make_client(max_concurrency=1, limiter_timeout_seconds=0.05)
+        prime_token(client)
+        session.get.side_effect = requests.ConnectionError("boom")
+
+        for _ in range(3):
+            with pytest.raises(requests.ConnectionError):
+                client.get_resources()
+        # A leaked slot would turn the second call into a budget error instead.
+        assert client.transport_stats()["errors"]["connection_error"] == 3
+
+
+class TestRateLimiterWiring:
+    def test_a_refused_token_raises_and_sends_nothing(self):
+        session = MagicMock()
+        session.post.return_value = _auth_resp()
+        client = BPClient(make_config(), session=session, limiter=RecordingLimiter(grant=False))
+        prime_token(client)
+
+        with pytest.raises(TransportBudgetExceeded, match="rate-limit token.*/resources"):
+            client.get_resources()
+
+        assert session.get.call_count == 0
+        assert client.transport_stats()["errors"]["limiter_exhausted"] == 1
+
+    def test_limiter_and_semaphore_share_one_wait_budget(self):
+        # limiter_timeout_seconds is the END-TO-END bound. Time spent waiting on
+        # the semaphore must come out of the limiter's allowance, or the
+        # configured number silently becomes two stacked timeouts.
+        limiter = RecordingLimiter()
+        session = MagicMock()
+        session.post.return_value = _auth_resp()
+        session.get.return_value = _resp_with(200, body={"items": []})
+        client = BPClient(
+            make_config(max_concurrency=1, limiter_timeout_seconds=0.5),
+            session=session,
+            limiter=limiter,
+        )
+        prime_token(client)
+
+        client._semaphore.acquire()
+        releaser = threading.Timer(0.1, client._semaphore.release)
+        releaser.start()
+        client.get_resources()
+        releaser.join()
+
+        assert len(limiter.timeouts) == 1
+        # It waited ~0.1s on the semaphore, so the limiter got the remainder —
+        # visibly less than the full budget, and still positive.
+        assert 0.0 < limiter.timeouts[0] < 0.45
+
+    def test_the_full_budget_reaches_the_limiter_when_uncontended(self):
+        limiter = RecordingLimiter()
+        session = MagicMock()
+        session.post.return_value = _auth_resp()
+        session.get.return_value = _resp_with(200, body={"items": []})
+        client = BPClient(
+            make_config(limiter_timeout_seconds=10.0), session=session, limiter=limiter
+        )
+        prime_token(client)
+        client.get_resources()
+
+        assert limiter.timeouts[0] == pytest.approx(10.0, abs=0.05)
+
+
+class TestRetryLayer:
+    def _client(self, **cfg):
+        client, session = make_client(max_retries=2, **cfg)
+        prime_token(client)
+        self.slept: list[float] = []
+        client._retry = RetryPolicy(2, base_delay=1.0, jitter=lambda: 0.0, sleep=self.slept.append)
+        return client, session
+
+    def test_retry_after_is_honoured_on_429(self):
+        client, session = self._client()
+        session.get.side_effect = [
+            _resp_with(429, headers={"Retry-After": "3"}),
+            _resp_with(200, body={"items": [{"id": "r1"}]}),
+        ]
+
+        assert client.get_resources() == [{"id": "r1"}]
+        assert self.slept == [3.0]
+        assert client.transport_stats()["retries"] == 1
+        assert client.transport_stats()["errors"]["rate_limited"] == 1
+
+    def test_transient_gateway_errors_back_off_and_stop_at_max_retries(self):
+        client, session = self._client()
+        session.get.return_value = _http_error_resp(503)
+
+        with pytest.raises(requests.HTTPError):
+            client.get_resources()
+
+        assert session.get.call_count == 3  # the original plus two retries
+        assert self.slept == [0.5, 1.0]  # doubling window, jitter pinned to 0
+        stats = client.transport_stats()
+        assert stats["retries"] == 2
+        assert stats["errors"]["server_error"] == 3
+
+    def test_a_non_transient_error_is_not_retried(self):
+        client, session = self._client()
+        session.get.return_value = _http_error_resp(500)
+
+        with pytest.raises(requests.HTTPError):
+            client.get_resources()
+
+        assert session.get.call_count == 1
+        assert self.slept == []
+
+    def test_writes_are_never_retried(self):
+        # A retried write is a duplicate estate mutation — a second
+        # start_process is a second live run.
+        client, session = self._client()
+        session.patch.return_value = _http_error_resp(503)
+
+        with pytest.raises(requests.HTTPError):
+            client.stop_session("3f2504e0-4f89-11d3-9a0c-0305e82c3301")
+
+        assert session.patch.call_count == 1
+        assert self.slept == []
+        assert client.transport_stats()["retries"] == 0
+
+    def test_the_retry_opt_in_is_fail_closed_by_default(self):
+        # Every current call site is explicit, so this pins the DEFAULT: a call
+        # site added later without thinking gets the safe behaviour, not the
+        # one that could duplicate an estate mutation.
+        client, session = self._client()
+        session.post.return_value = _http_error_resp(503)
+
+        with pytest.raises(requests.HTTPError):
+            client._request("POST", "/sessions")
+
+        assert session.post.call_count == 1
+        assert self.slept == []
+
+    def test_the_401_reauth_is_untouched_and_is_not_counted_as_a_retry(self):
+        client, session = make_client(max_retries=2)
+        session.get.side_effect = [
+            _resp_with(401),
+            _resp_with(200, body={"items": [{"id": "r1"}]}),
+        ]
+
+        assert client.get_resources() == [{"id": "r1"}]
+        assert session.get.call_count == 2
+        stats = client.transport_stats()
+        assert stats["retries"] == 0  # in-band re-auth, not a transient retry
+        assert stats["token_fetches"] == 2  # the initial fetch plus the re-auth
+
+    def test_a_429_without_headers_falls_back_to_calculated_backoff(self):
+        client, session = self._client()
+        headless = MagicMock(status_code=429, content=b"{}", spec=["status_code", "content"])
+        session.get.side_effect = [headless, _resp_with(200, body={"items": []})]
+
+        assert client.get_resources() == []
+        assert self.slept == [0.5]  # the bounded backoff, not a server instruction
+
+    def test_a_retry_still_re_auths_within_each_attempt(self):
+        client, session = self._client()
+        session.get.side_effect = [
+            _resp_with(503),
+            _resp_with(401),
+            _resp_with(200, body={"items": []}),
+        ]
+
+        assert client.get_resources() == []
+        assert session.get.call_count == 3
+        assert client.transport_stats()["retries"] == 1
+
+
+class TestRequestAccounting:
+    def test_requests_are_tallied_by_path_template(self):
+        client, session = make_client()
+        prime_token(client)
+        session.get.return_value = _resp_with(200, body={"items": []})
+        client.get_resources()
+        client.get_queue("3f2504e0-4f89-11d3-9a0c-0305e82c3301")
+
+        stats = client.transport_stats()
+        assert stats["requests"] == 2
+        assert stats["by_path"] == {"/resources": 1, "/workqueues/{id}": 1}
+
+    def test_response_bytes_are_counted(self):
+        client, session = make_client()
+        prime_token(client)
+        session.get.return_value = _resp_with(200, content=b'{"items": []}', body={"items": []})
+        client.get_resources()
+
+        assert client.transport_stats()["bytes_received"] == 13
+
+    def test_a_body_that_is_not_bytes_contributes_nothing_rather_than_raising(self):
+        client, session = make_client()
+        prime_token(client)
+        session.get.return_value = _resp(  # a plain MagicMock content
+            {"items": []}
+        )
+        client.get_resources()
+
+        assert client.transport_stats()["bytes_received"] == 0
+        assert client.transport_stats()["requests"] == 1
+
+    def test_timeouts_and_connection_errors_are_classified(self):
+        client, session = make_client()
+        prime_token(client)
+        session.get.side_effect = requests.Timeout("slow")
+        with pytest.raises(requests.Timeout):
+            client.get_resources()
+
+        session.get.side_effect = requests.ConnectionError("refused")
+        with pytest.raises(requests.ConnectionError):
+            client.get_queues()
+
+        stats = client.transport_stats()
+        assert stats["errors"]["timeout"] == 1
+        assert stats["errors"]["connection_error"] == 1
+        # A failed request still cost the estate a connection, so it is counted
+        # against the endpoint that made it.
+        assert stats["by_path"] == {"/resources": 1, "/workqueues": 1}
+
+    def test_reads_carry_the_configured_tls_and_timeout(self):
+        client, session = make_client(verify_ssl=False, request_timeout=7.5)
+        prime_token(client)
+        session.get.return_value = _resp_with(200, body={"items": []})
+        client.get_resources()
+
+        assert session.get.call_args.kwargs["verify"] is False
+        assert session.get.call_args.kwargs["timeout"] == 7.5
+
+    def test_a_204_means_no_content_whatever_arrived_with_it(self):
+        client, session = make_client()
+        prime_token(client)
+        session.get.return_value = _resp_with(204, content=b'{"stray": true}')
+        assert client._request("GET", "/resources") is None
+
+    def test_token_fetches_stay_out_of_the_api_budget(self):
+        client, session = make_client()
+        session.get.return_value = _resp_with(200, body={"items": []})
+        client.get_resources()
+
+        stats = client.transport_stats()
+        assert stats["token_fetches"] == 1
+        assert stats["requests"] == 1  # the /resources GET only
+        assert "/connect/token" not in stats["by_path"]
+
+
+class TestSingleFlight:
+    """A cache miss under load is one upstream read, not one per caller."""
+
+    def test_concurrent_missers_share_one_production(self):
+        client, _ = make_client()
+        calls: list[int] = []
+        barrier = threading.Barrier(8)
+        results: list[object] = []
+        lock = threading.Lock()
+
+        def produce():
+            calls.append(1)
+            time.sleep(0.05)  # a genuinely slow upstream read
+            return ["the-value"]
+
+        def worker():
+            barrier.wait()
+            value = client._cached("k", produce)
+            with lock:
+                results.append(value)
+
+        threads = [threading.Thread(target=worker) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert len(calls) == 1
+        assert results == [["the-value"]] * 8
+
+    def test_the_value_is_cached_for_callers_arriving_afterwards(self):
+        client, _ = make_client()
+        calls: list[int] = []
+
+        def produce():
+            calls.append(1)
+            return ["v"]
+
+        assert client._cached("k", produce) == ["v"]
+        assert client._cached("k", produce) == ["v"]
+        assert len(calls) == 1
+
+    def test_a_failing_producer_does_not_wedge_the_waiters(self):
+        # The losers re-raise rather than each re-attempting: a failing upstream
+        # call is the last thing to multiply by the number of waiting threads.
+        client, _ = make_client()
+        calls: list[int] = []
+        barrier = threading.Barrier(6)
+        raised: list[BaseException] = []
+        lock = threading.Lock()
+
+        def produce():
+            calls.append(1)
+            time.sleep(0.05)
+            raise RuntimeError("upstream is down")
+
+        def worker():
+            barrier.wait()
+            try:
+                client._cached("k", produce)
+            except BaseException as exc:  # noqa: BLE001 - the point of the test
+                with lock:
+                    raised.append(exc)
+
+        threads = [threading.Thread(target=worker) for _ in range(6)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=5)
+
+        assert not any(t.is_alive() for t in threads)
+        assert len(calls) == 1
+        assert len(raised) == 6
+        assert all(isinstance(exc, RuntimeError) for exc in raised)
+
+    def test_a_failed_key_is_released_so_the_next_call_retries(self):
+        client, _ = make_client()
+        calls: list[int] = []
+
+        def produce():
+            calls.append(1)
+            raise RuntimeError("down")
+
+        for _ in range(3):
+            with pytest.raises(RuntimeError):
+                client._cached("k", produce)
+        assert len(calls) == 3
+
+    def test_distinct_keys_do_not_block_each_other(self):
+        # The registry lock guards bookkeeping only — never the production —
+        # so a slow read of one key must not stall every other key.
+        client, _ = make_client()
+        overlapped = threading.Barrier(2, timeout=5)
+
+        def produce():
+            overlapped.wait()  # only clears if both producers run at once
+            return ["v"]
+
+        threads = [
+            threading.Thread(target=client._cached, args=(key, produce)) for key in ("a", "b")
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=5)
+
+        assert not any(t.is_alive() for t in threads)
+
+    def test_a_write_still_clears_the_cache(self):
+        client, session = make_client()
+        prime_token(client)
+        session.get.return_value = _resp_with(200, body={"items": [{"id": "r1"}]})
+        client.get_resources()
+        session.patch.return_value = _resp_with(204, content=b"")
+
+        client.stop_session("3f2504e0-4f89-11d3-9a0c-0305e82c3301")
+
+        client.get_resources()
+        assert session.get.call_count == 2
 
 
 @pytest.fixture(autouse=True)

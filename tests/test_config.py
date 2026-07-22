@@ -22,6 +22,20 @@ def test_from_env_defaults_with_empty_environment():
     assert cfg.pii_custom_patterns == ()
 
 
+def test_transport_governance_is_off_unless_configured():
+    # A distributable artifact must not change its posture on upgrade: with no
+    # transport settings the client emits exactly what it did before Phase 12.
+    cfg = BPConfig.from_env(env={})
+    assert cfg.max_requests_per_second == 0.0  # no limiter constructed
+    assert cfg.max_concurrency == 0  # no semaphore
+    assert cfg.pool_maxsize == 0  # requests' own pool default left alone
+    assert cfg.max_retries == 0  # no retry layer
+    # Only meaningful once the switches above are on.
+    assert cfg.max_burst == 10
+    assert cfg.limiter_timeout_seconds == 10.0
+    assert cfg.retry_base_delay == 0.5
+
+
 def test_from_env_reads_all_fields():
     cfg = BPConfig.from_env(
         env={
@@ -39,6 +53,13 @@ def test_from_env_reads_all_fields():
             "BP_API_PAGE_SIZE_PARAM": "limit",
             "BP_API_PAGE_TOKEN_PARAM": "cursor",
             "BP_API_PAGE_OFFSET_PARAM": "skip",
+            "BP_API_MAX_REQUESTS_PER_SECOND": "5",
+            "BP_API_MAX_BURST": "12",
+            "BP_API_MAX_CONCURRENCY": "8",
+            "BP_API_LIMITER_TIMEOUT": "15",
+            "BP_API_POOL_MAXSIZE": "16",
+            "BP_API_MAX_RETRIES": "2",
+            "BP_API_RETRY_BASE_DELAY": "0.25",
             "BP_ENABLE_ACTIONS": "true",
             "BP_DATA_SOURCE": "mock",
             "BP_AUDIT_LOG_PATH": "/var/log/blue-prism-v7-mcp/audit.jsonl",
@@ -61,6 +82,13 @@ def test_from_env_reads_all_fields():
     assert cfg.page_size_param == "limit"
     assert cfg.page_token_param == "cursor"
     assert cfg.page_offset_param == "skip"
+    assert cfg.max_requests_per_second == 5.0
+    assert cfg.max_burst == 12
+    assert cfg.max_concurrency == 8
+    assert cfg.limiter_timeout_seconds == 15.0
+    assert cfg.pool_maxsize == 16
+    assert cfg.max_retries == 2
+    assert cfg.retry_base_delay == 0.25
     assert cfg.enable_actions is True
     assert cfg.data_source == "mock"
     assert cfg.audit_log_path == "/var/log/blue-prism-v7-mcp/audit.jsonl"
