@@ -92,7 +92,9 @@ def _header(resp: Any, name: str) -> Any:
     through to the calculated backoff (see transport.retry_after_seconds), so
     this stays lenient rather than asserting a response shape.
     """
-    headers = getattr(resp, "headers", None)
+    # Annotated Any rather than inferred `Any | None`: the hasattr guard is the
+    # real check, and mypy does not narrow through it.
+    headers: Any = getattr(resp, "headers", None)
     return headers.get(name) if hasattr(headers, "get") else None
 
 
