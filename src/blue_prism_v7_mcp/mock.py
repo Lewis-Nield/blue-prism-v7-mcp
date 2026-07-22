@@ -39,7 +39,7 @@ Seed it with your own data, or accept the small built-in fixtures below.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import datetime, time, timedelta, timezone
 
 # Fixtures are anchored to a "now" captured once at import, so the mock estate
@@ -1024,14 +1024,34 @@ class MockBPClient:
         return [dict(s) for s in self._schedules]
 
     def get_sessions(
-        self, start_date: str | None = None, end_date: str | None = None
+        self,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        status: str | Sequence[str] | None = None,
+        process_name: str | None = None,
+        resource_name: str | None = None,
     ) -> list[dict]:
+        """Mirror the live signature, filtering in memory.
+
+        The narrowing filters match EXACTLY, matching the live API's `[eq]`
+        and its comma-joined status enum. Case-insensitivity is the tool
+        layer's job (it canonicalises names against the catalogues before
+        calling); a lenient mock here would hide a bug in that step from
+        every mock-backed test.
+        """
         self._settle()
         sessions = self._sessions
         if start_date:
             sessions = [s for s in sessions if (s.get("startTime") or "") >= start_date]
         if end_date:
             sessions = [s for s in sessions if _at_or_before(s.get("startTime"), end_date)]
+        if status:
+            wanted = {status} if isinstance(status, str) else set(status)
+            sessions = [s for s in sessions if s.get("status") in wanted]
+        if process_name:
+            sessions = [s for s in sessions if s.get("processName") == process_name]
+        if resource_name:
+            sessions = [s for s in sessions if s.get("resourceName") == resource_name]
         return [dict(s) for s in sessions]
 
     def get_session(self, session_id: str) -> dict:

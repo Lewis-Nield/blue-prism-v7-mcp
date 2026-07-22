@@ -687,6 +687,61 @@ class TestListSessions:
         with pytest.raises(ValueError, match="status must be one of"):
             tier1()["list_sessions"](**WINDOW, status="Crashed")
 
+    def test_filters_narrow_server_side(self):
+        # The point of the scoped read: the filters reach the client rather
+        # than being applied to a whole-window payload after the fact.
+        client = MockBPClient()
+        seen: dict = {}
+        original = client.get_sessions
+
+        def recording(*args, **kwargs):
+            seen.update(kwargs)
+            return original(*args, **kwargs)
+
+        client.get_sessions = recording  # type: ignore[method-assignment]
+        Engine(client, NullScrubber()).list_sessions(
+            **WINDOW, process="invoice processing", resource="bot-02", status="terminated"
+        )
+        assert seen["status"] == ("Terminated",)
+        assert seen["process_name"] == "Invoice Processing"  # canonicalised
+        assert seen["resource_name"] == "BOT-02"
+
+    def test_a_status_set_reaches_the_client_as_one_call(self):
+        # D21: Custera's worker join wants several in-flight statuses at once.
+        # Looping this per status would cost a full window read each time.
+        client = MockBPClient()
+        calls: list = []
+        original = client.get_sessions
+
+        def recording(*args, **kwargs):
+            calls.append(kwargs)
+            return original(*args, **kwargs)
+
+        client.get_sessions = recording  # type: ignore[method-assignment]
+        result = Engine(client, NullScrubber()).list_sessions(
+            **WINDOW, status=["Running", "Terminated"]
+        )
+        assert len(calls) == 1
+        assert calls[0]["status"] == ("Running", "Terminated")
+        assert {s["status"] for s in result.records} == {"Running", "Terminated"}
+
+    def test_a_status_set_is_validated_per_member(self):
+        with pytest.raises(ValueError, match="status must be one of"):
+            Engine(MockBPClient(), NullScrubber()).list_sessions(
+                **WINDOW, status=["Running", "Crashed"]
+            )
+
+    def test_an_unknown_process_name_returns_zero_rows_without_raising(self):
+        # Unlike resolve_id, canonicalisation degrades rather than raising: a
+        # narrowing filter that matches nothing is an empty answer, not an error.
+        result = tier1()["list_sessions"](**WINDOW, process="No Such Process")
+        assert result["items"] == []
+        assert result["meta"]["total"] == 0
+
+    def test_an_unknown_resource_name_returns_zero_rows_without_raising(self):
+        result = tier1()["list_sessions"](**WINDOW, resource="NO-SUCH-BOT")
+        assert result["items"] == []
+
     def test_exception_message_is_scrubbed(self):
         result = tier1(scrubber=MarkerScrubber())["list_sessions"](**WINDOW, status="Terminated")
         assert result["items"][0]["exceptionMessage"] == "[SCRUBBED]"

@@ -246,7 +246,7 @@ webhook plumbing.
 | `list_queue_items` | `GET /workqueues/{id}/items` | 7.0 |
 | `get_queue_item` | `GET /workqueues/items/{id}` (→ `WorkQueueItem`, the only read with `data`) | 7.0 |
 | `list_item_attempts` | `GET /workqueues/{id}/items/{itemId}/attempts` (→ `WorkQueueItemNoData[]`) | 7.2 |
-| `list_sessions` | `GET /sessions` | 7.0 |
+| `list_sessions` | `GET /sessions`; window→`startTime[gte]/[lte]`, and every narrowing filter goes server-side in ONE request — `status` as a comma-joined array (`style=form explode=false`, so a whole status SET costs one read), `process`/`resource`→`processName[eq]`/`resourceName[eq]` (`BasicStringFilter`, deepObject, exact — names are canonicalised against the process/resource catalogues first, since the tool surface matches case-insensitively) | 7.0 |
 | `get_session` | `GET /sessions/{id}` (→ `SessionSummary`) | 7.0 |
 | `get_session_log` | `GET /sessions/{id}/logs` (`logslight` on 7.4+); `errors_only`→`stageType=Exception,Recover,Resume`, window→`resourceStartTime[gte]/[lte]` | 7.0 |
 | `list_schedules` last-run | `GET /scheduleLogs` (→ `ScheduleLogSummary`, one newest-first sweep grouped by `scheduleId`; per-schedule `GET /scheduleLogs/{id}` only as the straggler fallback — not the deprecated `/schedules/{id}/logs`) | 7.1 |

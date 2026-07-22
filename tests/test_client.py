@@ -104,6 +104,34 @@ class TestMockClient:
         assert all(s["startTime"][:10] >= mid for s in filtered)
         assert len(filtered) <= len(all_sessions)
 
+    def test_get_sessions_filters_by_status(self):
+        client = MockBPClient()
+        filtered = client.get_sessions(status="Completed")
+        assert filtered  # the fixture estate has completed runs
+        assert {s["status"] for s in filtered} == {"Completed"}
+
+    def test_get_sessions_filters_by_a_status_set_in_one_call(self):
+        client = MockBPClient()
+        wanted = {"Completed", "Terminated"}
+        filtered = client.get_sessions(status=sorted(wanted))
+        assert {s["status"] for s in filtered} == wanted
+
+    def test_get_sessions_filters_by_process_and_resource_name(self):
+        client = MockBPClient()
+        sample = client.get_sessions()[0]
+        by_process = client.get_sessions(process_name=sample["processName"])
+        assert {s["processName"] for s in by_process} == {sample["processName"]}
+        by_resource = client.get_sessions(resource_name=sample["resourceName"])
+        assert {s["resourceName"] for s in by_resource} == {sample["resourceName"]}
+
+    def test_get_sessions_name_filters_match_exactly_like_the_live_api(self):
+        # The live filter is BasicStringFilter[eq] — exact. The mock must not
+        # be lenient, or a missing canonicalisation upstream would pass here
+        # and fail against a real estate.
+        client = MockBPClient()
+        sample = client.get_sessions()[0]
+        assert client.get_sessions(process_name=sample["processName"].swapcase()) == []
+
     def test_get_sessions_with_end_date_filter(self):
         # A date-only end bound includes the whole day: a session at
         # 2026-03-02T10:00 is within end_date 2026-03-02 even though the raw
@@ -262,6 +290,56 @@ class TestBPClient:
         params = session.get.call_args.kwargs["params"]
         assert params["startTime[gte]"] == "2026-03-01"
         assert params["startTime[lte]"] == "2026-03-07"
+
+    def test_get_sessions_unfiltered_request_is_unchanged(self):
+        # The v0.17.0 filters are additive: a caller passing none must put the
+        # exact same request on the wire as before they existed.
+        client, session = make_client()
+        session.get.return_value = _resp([])
+        client.get_sessions(start_date="2026-03-01", end_date="2026-03-07")
+        params = session.get.call_args.kwargs["params"]
+        assert set(params) == {"startTime[gte]", "startTime[lte]", "itemsPerPage"}
+
+    def test_get_sessions_sends_status_comma_joined_in_one_request(self):
+        # style=form explode=false (7.5.1, unchanged on 7.1/7.2): a whole SET
+        # of statuses is ONE param in ONE request — not one request per status.
+        client, session = make_client()
+        session.get.return_value = _resp([])
+        client.get_sessions(status=["Running", "Stopping", "Warning"])
+        assert session.get.call_count == 1
+        assert session.get.call_args.kwargs["params"]["status"] == "Running,Stopping,Warning"
+
+    def test_get_sessions_accepts_a_scalar_status(self):
+        client, session = make_client()
+        session.get.return_value = _resp([])
+        client.get_sessions(status="Running")
+        assert session.get.call_args.kwargs["params"]["status"] == "Running"
+
+    def test_get_sessions_sends_names_as_deepobject_eq(self):
+        # BasicStringFilter, style=deepObject — NOT the comma-joined form the
+        # status array uses. Two encodings in the one call.
+        client, session = make_client()
+        session.get.return_value = _resp([])
+        client.get_sessions(process_name="HR Onboarding", resource_name="BOT-01")
+        params = session.get.call_args.kwargs["params"]
+        assert params["processName[eq]"] == "HR Onboarding"
+        assert params["resourceName[eq]"] == "BOT-01"
+
+    def test_get_sessions_status_set_order_shares_one_cache_entry(self):
+        client, session = make_client()
+        session.get.return_value = _resp([])
+        client.get_sessions(status=["Warning", "Running"])
+        client.get_sessions(status=["Running", "Warning"])
+        session.get.assert_called_once()  # sorted tuple key — same set, same entry
+
+    def test_get_sessions_filter_combinations_get_separate_cache_entries(self):
+        client, session = make_client()
+        session.get.return_value = _resp([])
+        client.get_sessions(start_date="2026-03-01")
+        client.get_sessions(start_date="2026-03-01", status="Running")
+        client.get_sessions(start_date="2026-03-01", process_name="HR Onboarding")
+        client.get_sessions(start_date="2026-03-01", resource_name="BOT-01")
+        assert session.get.call_count == 4
 
     def test_read_is_cached_within_ttl(self):
         client, session = make_client()
@@ -447,6 +525,27 @@ class TestPagination:
         assert result == [{"id": 1}, {"id": 2}]
         assert session.get.call_count == 2
 
+    def test_page_size_override_replaces_the_configured_size(self):
+        client, session = make_client(page_size=500)
+        session.get.return_value = _resp({"items": [{"id": 1}]})
+        client._get_collection("/sessions", page_size=5)
+        assert session.get.call_args.kwargs["params"]["itemsPerPage"] == 5
+
+    def test_page_size_override_omitted_uses_the_configured_size(self):
+        client, session = make_client(page_size=500)
+        session.get.return_value = _resp({"items": [{"id": 1}]})
+        client._get_collection("/sessions")
+        assert session.get.call_args.kwargs["params"]["itemsPerPage"] == 500
+
+    def test_page_size_override_sets_the_offset_short_page_threshold(self):
+        # A short page ends offset paging — "short" must mean short of the
+        # OVERRIDE, not of the configured size, or the loop never terminates.
+        client, session = make_client(paging_mode="offset", page_size=100)
+        session.get.side_effect = [_resp([{"id": 1}, {"id": 2}]), _resp([{"id": 3}])]
+        result = client._get_collection("/sessions", page_size=2)
+        assert result == [{"id": 1}, {"id": 2}, {"id": 3}]
+        assert session.get.call_count == 2
+
 
 class TestPageNumberPagination:
     """_get_paged_by_number — the resourceUtilization-only pageNumber/pageSize scheme."""
@@ -600,6 +699,20 @@ class TestExtendedReads:
         result = client.get_queue_items("q-uuid-1", sort_by="LoadedDateAsc", max_records=1)
         assert result == [{"id": "i1"}]
         assert session.get.call_count == 1
+
+    def test_get_queue_items_shrinks_the_page_to_a_sorted_max_records(self):
+        client, session = make_client(page_size=1000)
+        session.get.return_value = _resp([{"id": "i1"}])
+        client.get_queue_items("q-uuid-1", sort_by="LoadedDateAsc", max_records=1)
+        assert session.get.call_args.kwargs["params"]["itemsPerPage"] == 1
+
+    def test_get_queue_items_max_records_without_sort_does_not_shrink_the_page(self):
+        # The v0.15.0 guard applied to page size: unsorted, an early-stopped
+        # fetch is an arbitrary subset, and a smaller page only shrinks it.
+        client, session = make_client(page_size=1000)
+        session.get.return_value = _resp([{"id": "i1"}])
+        client.get_queue_items("q-uuid-1", max_records=1)
+        assert session.get.call_args.kwargs["params"]["itemsPerPage"] == 1000
 
     def test_get_queue_items_without_sla_params_sends_no_sla_params(self):
         client, session = make_client()

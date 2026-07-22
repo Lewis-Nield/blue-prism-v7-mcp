@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 import requests
 
@@ -246,7 +246,12 @@ class BPClient:
         return any(key in body for key in self._config.page_token_keys)
 
     def _get_collection(
-        self, path: str, base_params: dict | None = None, max_records: int | None = None
+        self,
+        path: str,
+        base_params: dict | None = None,
+        max_records: int | None = None,
+        *,
+        page_size: int | None = None,
     ) -> list:
         """Fetch every page of a collection endpoint and return a flat list.
 
@@ -264,6 +269,12 @@ class BPClient:
         does not itself impose an order. Under `paging_mode="none"`, there is
         only one request regardless — `max_records` saves nothing at fetch
         time there, only at the caller's own result-size cap.
+
+        `page_size` overrides config.page_size for this call only (spelled and
+        placed to match `_get_paged_by_number`). Pair it with `max_records` on
+        a server-SORTED read to cap the first page near what the caller will
+        keep; on an unsorted read a shrunken page makes an early stop an
+        arbitrary subset rather than a top-N, so don't.
         """
         cfg = self._config
         params = dict(base_params or {})
@@ -272,7 +283,8 @@ class BPClient:
             items, _ = self._unpack_page(self._get(path, params=params or None))
             return items
 
-        params[cfg.page_size_param] = cfg.page_size
+        size = page_size or cfg.page_size
+        params[cfg.page_size_param] = size
         collected: list = []
         token: str | None = None
         detected = cfg.paging_mode  # "auto" resolves to token/offset after page 1
@@ -298,7 +310,7 @@ class BPClient:
                 if not token:
                     break
             else:  # offset
-                if len(page_items) < cfg.page_size:
+                if len(page_items) < size:
                     break
         else:
             logger.warning(
@@ -529,22 +541,60 @@ class BPClient:
         )
 
     def get_sessions(
-        self, start_date: str | None = None, end_date: str | None = None
+        self,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        status: str | Sequence[str] | None = None,
+        process_name: str | None = None,
+        resource_name: str | None = None,
     ) -> list[dict]:
-        """GET /sessions — run history, with optional server-side date filtering.
+        """GET /sessions — run history, with optional server-side filtering.
 
         Passing a date window avoids loading the entire session history; the
-        tool layer (Phase 4) requires it and ISO-validates the bounds. v7
-        filters are deepObject-encoded — the window goes as startTime[gte] /
-        startTime[lte] (per the spec's RangeOrEqualFilter).
+        tool layer (Phase 4) requires it and ISO-validates the bounds. The
+        window goes as startTime[gte] / startTime[lte] (the spec's
+        RangeOrEqualFilter, deepObject-encoded).
+
+        The narrowing filters use TWO different encodings in the one call —
+        verified against 7.5.1 and unchanged on 7.1.0/7.2.0, so no version
+        degrade applies:
+
+          status        ARRAY, style=form explode=false -> comma-joined into a
+                        single `status=` param. A whole SET of statuses is one
+                        request, not one per status; passing a sequence here
+                        is strictly cheaper than looping the caller.
+          processName   BasicStringFilter, deepObject -> processName[eq]=…
+          resourceName  BasicStringFilter, deepObject -> resourceName[eq]=…
+
+        BasicStringFilter offers eq/gte/lte/strtw but NOT `ctn`, so the name
+        filters are exact — callers wanting case-insensitive matching must
+        canonicalise before calling (the tool layer does, against the process
+        and resource catalogues).
+
+        `status` is normalised to a sorted tuple for the cache key so that the
+        same set in a different order shares one entry. Callers passing no
+        filters send a byte-identical request to the pre-filter behaviour (the
+        cache key gains trailing None slots, which only costs a cold entry on
+        upgrade — the cache is per-instance and in-memory).
         """
         params: dict[str, str] = {}
         if start_date:
             params["startTime[gte]"] = start_date
         if end_date:
             params["startTime[lte]"] = end_date
+
+        status_key: tuple[str, ...] | None = None
+        if status:
+            statuses = (status,) if isinstance(status, str) else tuple(status)
+            status_key = tuple(sorted(statuses))
+            params["status"] = ",".join(status_key)
+        if process_name:
+            params["processName[eq]"] = process_name
+        if resource_name:
+            params["resourceName[eq]"] = resource_name
+
         return self._cached(
-            ("sessions", start_date, end_date),
+            ("sessions", start_date, end_date, status_key, process_name, resource_name),
             lambda: self._get_collection("/sessions", base_params=params or None),
         )
 
@@ -620,9 +670,17 @@ class BPClient:
         if sort_by:
             params["sortBy"] = sort_by
 
+        # Shrink the page to the cap ONLY when a server-side sort makes an
+        # early stop a genuine top-N. Unsorted, a smaller page just makes the
+        # arbitrary subset smaller — the v0.15.0 guard applied to page size.
+        page_size = max_records if (max_records is not None and sort_by) else None
+
         def fetch() -> list:
             collected = self._get_collection(
-                f"/workqueues/{queue_id}/items", base_params=params or None, max_records=max_records
+                f"/workqueues/{queue_id}/items",
+                base_params=params or None,
+                max_records=max_records,
+                page_size=page_size,
             )
             return collected[:max_records] if max_records is not None else collected
 
