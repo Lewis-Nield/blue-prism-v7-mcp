@@ -112,6 +112,7 @@ server has, none of which the engine can see.
 | `BP_API_POOL_MAXSIZE` | `0` (requests' own default) | connection-pool size; raised to `MAX_CONCURRENCY` where that is larger |
 | `BP_API_MAX_RETRIES` | `0` (off) | retries per **read** for 429 / 502 / 503 / 504 |
 | `BP_API_RETRY_BASE_DELAY` | `0.5` | first backoff window, in seconds; doubles per retry |
+| `BP_API_RETRY_MAX_DELAY` | `60` | ceiling on any single retry wait, whatever its source |
 
 Tuning notes:
 
@@ -137,6 +138,15 @@ Tuning notes:
 - **Retries apply to reads only.** A write is never retried automatically: a
   repeated `start_process` is a second live run on your estate. The 401
   token-refresh retry is separate and always active.
+- **`BP_API_RETRY_MAX_DELAY` bounds how long the estate can park a caller.** A
+  429 may carry a `Retry-After` as either a number of seconds or an absolute
+  timestamp; both are honoured, and both are capped here. The timestamp form is
+  the reason the cap matters: converting an instant into a wait subtracts your
+  host's clock from the Blue Prism server's. Ordinary NTP drift is seconds and
+  harmless — but a host that has lost time sync, or a gateway emitting local
+  time labelled GMT, can be hours out. If you see retries pausing far longer
+  than your estate's `Retry-After` values suggest, check clock sync between the
+  two hosts before raising this number.
 
 ## Wiring into an MCP client
 

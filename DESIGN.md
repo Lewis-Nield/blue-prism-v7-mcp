@@ -620,12 +620,20 @@ Sequenced as:
     becomes two stacked timeouts. Exhausting it raises `TransportBudgetExceeded`
     (deliberately *not* a `requests.RequestException`: nothing was sent). Block,
     then fail visibly — never drop a request, never queue unboundedly.
-  - **Bounded retry** of the failures worth retrying: 429 honouring a numeric
-    `Retry-After`, and the transient gateway statuses 502/503/504 with
-    equal-jitter exponential backoff. Not 500 (as likely a bad request as a
-    blip). The HTTP-date form of `Retry-After` is ignored, since honouring it
-    needs the estate's clock to agree with ours and a skewed one could park a
-    caller for hours. Opt-in per call via `_request(..., retriable=)`, defaulting
+  - **Bounded retry** of the failures worth retrying: 429 honouring
+    `Retry-After` in either RFC 7231 form, and the transient gateway statuses
+    502/503/504 with equal-jitter exponential backoff. Not 500 (as likely a bad
+    request as a blip). **Every delay is capped at `retry_max_delay`, whatever
+    its source** — the estate gets to ask us to wait, not to decide how long we
+    hang. That cap is what makes the absolute `Retry-After` date safe to honour:
+    turning an instant into a wait means subtracting our clock from the estate's,
+    and while ordinary NTP drift is seconds (a domain-joined estate cannot drift
+    past Kerberos's 5-minute skew tolerance without authentication failing), a
+    genuinely unsynced host or a gateway writing local time as GMT is hours out.
+    The same cap binds a plain `Retry-After: 3600` — the identical unbounded wait
+    expressed as a number — and a doubling backoff window, so raising
+    `max_retries` never requires recomputing the worst case by hand.
+    Opt-in per call via `_request(..., retriable=)`, defaulting
     to **False** so the fail-closed case needs no opt-out: reads pass True and
     writes pass False, making "a retried `start_process` is a second live run" a
     property of the construction rather than a convention to remember. The

@@ -31,6 +31,8 @@ import re
 import threading
 import time
 from collections import deque
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any, Callable, Protocol, runtime_checkable
 
 # The v7 API's ids are UUIDs (schedules being the one integer exception), so a
@@ -184,32 +186,67 @@ def backoff_delay(attempt: int, *, base: float, jitter: Callable[[], float]) -> 
     return window / 2 + jitter() * (window / 2)
 
 
-def retry_after_seconds(value: Any) -> float | None:
+def retry_after_seconds(value: Any, *, now: "datetime | None" = None) -> float | None:
     """Parse a `Retry-After` header value as seconds, or None if unusable.
 
-    RFC 7231 allows either a delay in seconds or an HTTP-date. Only the numeric
-    form is honoured: the date form needs the server's clock to agree with ours,
-    and a skewed estate clock could park a caller for hours. An unparseable (or
-    date-form) value falls through to the calculated backoff, which is bounded
-    by construction.
+    RFC 7231 allows two forms and both are honoured: a delay in seconds, and an
+    HTTP-date. The date form is the interesting one, because turning an absolute
+    instant into a wait means subtracting OUR clock from the estate's — if the
+    Blue Prism host reads ahead of us, the wait inflates by exactly that gap.
+
+    That is not a reason to refuse it. Ordinary drift between NTP-synced hosts is
+    seconds, and a domain-joined estate cannot drift far without Kerberos itself
+    failing (5 minutes of skew by default). The genuine hazard is a *broken*
+    emitter — an unsynced host, or a gateway writing local time as though it were
+    GMT — where the error is hours, not seconds. So the value is taken at face
+    value here and the CEILING is applied by the caller (`RetryPolicy`), which
+    bounds the numeric form identically. A server saying "wait an hour" is not
+    obeyed just because it said it in seconds rather than as a date.
+
+    `now` is injectable so the date arithmetic is testable without a real clock.
     """
     if value is None:
         return None
+    raw = str(value).strip()
     try:
-        seconds = float(str(value).strip())
+        seconds = float(raw)
     except (TypeError, ValueError):
-        return None
+        return _http_date_seconds(raw, now)
     if seconds != seconds or seconds in (float("inf"), float("-inf")):  # NaN / inf
         return None
     return max(seconds, 0.0)
 
 
+def _http_date_seconds(raw: str, now: "datetime | None") -> float | None:
+    """Seconds until an HTTP-date, or None if it is not one."""
+    try:
+        parsed = parsedate_to_datetime(raw)
+    except (TypeError, ValueError):
+        return None
+    if parsed is None:  # pragma: no cover - older parsers answered None
+        return None
+    if parsed.tzinfo is None:
+        # RFC 7231 mandates GMT; a "-0000" offset parses naive. Reading it as
+        # anything but UTC would invent a timezone the header cannot express.
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    reference = now if now is not None else datetime.now(timezone.utc)
+    # A past instant means "now" — never a negative sleep.
+    return max((parsed - reference).total_seconds(), 0.0)
+
+
 class RetryPolicy:
     """Bounded retry of the failures that are worth retrying, and only those.
 
-    Retried: 429 (honouring `Retry-After` when it is a plain number) and the
+    Retried: 429 (honouring `Retry-After` in either RFC 7231 form) and the
     transient gateway statuses 502/503/504. Not retried: anything else — a 500
     is as likely to be a bad request as a blip, and a 404 will still be a 404.
+
+    **Every delay is capped at `max_delay`**, whatever its source. The estate
+    gets to ask us to wait; it does not get to decide how long we hang. That cap
+    is what makes it safe to honour an absolute `Retry-After` date, whose
+    arithmetic depends on the estate's clock agreeing with ours — but it applies
+    just as much to a plain `Retry-After: 3600`, which is the same unbounded wait
+    dressed up as a number, and to a calculated backoff whose window doubles.
 
     The 401 re-auth in `BPClient._request` is orthogonal and is NOT this: it is
     a single in-band token refresh, it is not counted here, and it happens
@@ -228,11 +265,13 @@ class RetryPolicy:
         max_retries: int,
         *,
         base_delay: float = 0.5,
+        max_delay: float = 60.0,
         jitter: Callable[[], float] = random.random,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self.max_retries = max(int(max_retries), 0)
         self._base_delay = base_delay
+        self._max_delay = max_delay
         self._jitter = jitter
         self._sleep = sleep
 
@@ -248,10 +287,13 @@ class RetryPolicy:
         if status == 429:
             stated = retry_after_seconds(retry_after)
             if stated is not None:
-                return stated
+                return min(stated, self._max_delay)
         elif status not in self.TRANSIENT_STATUSES:
             return None
-        return backoff_delay(attempt, base=self._base_delay, jitter=self._jitter)
+        return min(
+            backoff_delay(attempt, base=self._base_delay, jitter=self._jitter),
+            self._max_delay,
+        )
 
     def wait(self, delay: float) -> None:
         self._sleep(delay)

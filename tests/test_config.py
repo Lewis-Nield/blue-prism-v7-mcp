@@ -34,6 +34,7 @@ def test_transport_governance_is_off_unless_configured():
     assert cfg.max_burst == 10
     assert cfg.limiter_timeout_seconds == 10.0
     assert cfg.retry_base_delay == 0.5
+    assert cfg.retry_max_delay == 60.0
 
 
 def test_from_env_reads_all_fields():
@@ -60,6 +61,7 @@ def test_from_env_reads_all_fields():
             "BP_API_POOL_MAXSIZE": "16",
             "BP_API_MAX_RETRIES": "2",
             "BP_API_RETRY_BASE_DELAY": "0.25",
+            "BP_API_RETRY_MAX_DELAY": "45",
             "BP_ENABLE_ACTIONS": "true",
             "BP_DATA_SOURCE": "mock",
             "BP_AUDIT_LOG_PATH": "/var/log/blue-prism-v7-mcp/audit.jsonl",
@@ -89,6 +91,7 @@ def test_from_env_reads_all_fields():
     assert cfg.pool_maxsize == 16
     assert cfg.max_retries == 2
     assert cfg.retry_base_delay == 0.25
+    assert cfg.retry_max_delay == 45.0
     assert cfg.enable_actions is True
     assert cfg.data_source == "mock"
     assert cfg.audit_log_path == "/var/log/blue-prism-v7-mcp/audit.jsonl"

@@ -104,6 +104,15 @@ class BPConfig:
     # orthogonal and always active.
     max_retries: int = 0
     retry_base_delay: float = 0.5
+    # Ceiling on any single retry wait, whatever its source — a calculated
+    # backoff, a numeric Retry-After, or an absolute Retry-After date. The
+    # estate gets to ask us to wait; it does not get to decide how long we
+    # hang. Load-bearing for the date form, whose arithmetic depends on the
+    # Blue Prism host's clock agreeing with ours (ordinary NTP drift is
+    # seconds, but an unsynced host or a gateway writing local time as GMT is
+    # hours) — and equally for a plain `Retry-After: 3600`, which is the same
+    # unbounded wait expressed as a number.
+    retry_max_delay: float = 60.0
 
     # Feature flags.
     enable_actions: bool = False  # gates the Tier 3 control tools
@@ -183,6 +192,7 @@ class BPConfig:
             pool_maxsize=int(e.get("BP_API_POOL_MAXSIZE", "0")),
             max_retries=int(e.get("BP_API_MAX_RETRIES", "0")),
             retry_base_delay=float(e.get("BP_API_RETRY_BASE_DELAY", "0.5")),
+            retry_max_delay=float(e.get("BP_API_RETRY_MAX_DELAY", "60")),
             enable_actions=e.get("BP_ENABLE_ACTIONS", "false").lower() == "true",
             # Normalised like pii_backend below: casing/whitespace noise is
             # forgiven, unknown values still refuse to start in build_client.

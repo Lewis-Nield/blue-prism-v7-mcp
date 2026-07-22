@@ -10,6 +10,8 @@ real threads and say so.
 
 import threading
 import time
+from datetime import datetime, timedelta, timezone
+from email.utils import format_datetime
 
 import pytest
 
@@ -230,7 +232,6 @@ class TestRetryAfterSeconds:
         [
             None,
             "",
-            "Wed, 21 Oct 2026 07:28:00 GMT",  # the HTTP-date form is not honoured
             "soon",
             "inf",
             "nan",
@@ -241,6 +242,42 @@ class TestRetryAfterSeconds:
         assert retry_after_seconds(raw) is None
 
 
+class TestRetryAfterHttpDate:
+    """The absolute form: our clock subtracted from the estate's instant."""
+
+    NOW = datetime(2026, 10, 21, 7, 28, 0, tzinfo=timezone.utc)
+
+    def test_a_future_date_is_the_gap_from_now(self):
+        assert retry_after_seconds("Wed, 21 Oct 2026 07:28:30 GMT", now=self.NOW) == 30.0
+
+    def test_a_past_date_means_now_not_a_negative_sleep(self):
+        assert retry_after_seconds("Wed, 21 Oct 2026 07:00:00 GMT", now=self.NOW) == 0.0
+
+    def test_a_naive_offset_is_read_as_utc(self):
+        # RFC 7231 mandates GMT; "-0000" parses naive. Reading it as anything
+        # else would invent a timezone the header cannot express.
+        assert retry_after_seconds("Wed, 21 Oct 2026 07:28:30 -0000", now=self.NOW) == 30.0
+
+    def test_an_explicit_offset_is_respected(self):
+        # 08:28:30 +0100 is 07:28:30 GMT — the same instant, 30s out.
+        assert retry_after_seconds("Wed, 21 Oct 2026 08:28:30 +0100", now=self.NOW) == 30.0
+
+    def test_a_skewed_estate_clock_yields_an_absurd_but_finite_gap(self):
+        # This is the whole hazard: an unsynced host or a gateway writing local
+        # time as GMT. The value is computed honestly here and CAPPED by
+        # RetryPolicy — see TestRetryPolicy.
+        assert retry_after_seconds("Wed, 21 Oct 2026 11:28:00 GMT", now=self.NOW) == 4 * 3600.0
+
+    def test_a_real_clock_is_used_when_none_is_injected(self):
+        future = datetime.now(timezone.utc) + timedelta(seconds=120)
+        stamp = format_datetime(future, usegmt=True)
+        assert retry_after_seconds(stamp) == pytest.approx(120, abs=2)
+
+    @pytest.mark.parametrize("raw", ["Wed, 99 Xxx 2026 07:28:00 GMT", "21 Oct", "GMT"])
+    def test_a_malformed_date_is_not_a_date(self, raw):
+        assert retry_after_seconds(raw, now=self.NOW) is None
+
+
 # --- RetryPolicy --------------------------------------------------------------
 
 
@@ -248,7 +285,13 @@ class TestRetryPolicy:
     def _policy(self, max_retries=2, **kw):
         kw.setdefault("jitter", lambda: 0.0)
         kw.setdefault("base_delay", 1.0)
+        kw.setdefault("max_delay", 1000.0)  # out of the way unless a test sets it
         return RetryPolicy(max_retries, **kw)
+
+    def test_the_default_cap_is_a_minute(self):
+        # Long enough to ride out a real blip, short enough that a caller (and
+        # any browser request behind it) never looks hung.
+        assert RetryPolicy(1, jitter=lambda: 0.0).delay_for(429, 0, "600") == 60.0
 
     def test_honours_retry_after_on_429(self):
         assert self._policy().delay_for(429, 0, "7") == 7.0
@@ -256,6 +299,29 @@ class TestRetryPolicy:
     def test_429_without_a_usable_retry_after_falls_back_to_backoff(self):
         assert self._policy().delay_for(429, 0, None) == 0.5
         assert self._policy().delay_for(429, 0, "later") == 0.5
+
+    def test_honours_an_absolute_retry_after_date(self):
+        stamp = format_datetime(datetime.now(timezone.utc) + timedelta(seconds=20), usegmt=True)
+        assert self._policy().delay_for(429, 0, stamp) == pytest.approx(20, abs=2)
+
+    def test_an_hour_long_retry_after_is_capped_not_obeyed(self):
+        # The estate gets to ask us to wait; it does not get to decide how long
+        # we hang. Same ceiling whichever form it asks in.
+        policy = self._policy(max_delay=60.0)
+        assert policy.delay_for(429, 0, "3600") == 60.0
+
+        skewed = format_datetime(datetime.now(timezone.utc) + timedelta(hours=4), usegmt=True)
+        assert policy.delay_for(429, 0, skewed) == 60.0
+
+    def test_a_runaway_backoff_window_is_capped_too(self):
+        # base 1.0 doubling over 10 attempts would be minutes; the cap is what
+        # makes max_retries safe to raise without recomputing the worst case.
+        policy = self._policy(max_retries=20, max_delay=5.0)
+        assert policy.delay_for(503, 10) == 5.0
+
+    def test_a_delay_under_the_cap_is_untouched(self):
+        assert self._policy(max_delay=60.0).delay_for(429, 0, "7") == 7.0
+        assert self._policy(max_delay=60.0).delay_for(503, 0) == 0.5
 
     @pytest.mark.parametrize("status", [502, 503, 504])
     def test_transient_gateway_statuses_back_off(self, status):

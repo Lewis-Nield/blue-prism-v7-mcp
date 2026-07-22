@@ -44,11 +44,18 @@ The engine ships the mechanism; the deployment owns the policy.
   deliberately not a `requests.RequestException`, since nothing was sent. Block,
   then fail visibly: never drop a request, never queue unboundedly.
 - **Bounded retry of transient failures** (`BP_API_MAX_RETRIES`,
-  `BP_API_RETRY_BASE_DELAY`): 429 honouring a numeric `Retry-After`, and
-  502/503/504 with equal-jitter exponential backoff. Not 500 — as likely a bad
-  request as a blip. The `Retry-After` HTTP-date form is ignored, because
-  honouring it requires the estate's clock to agree with ours and a skewed one
-  could park a caller for hours.
+  `BP_API_RETRY_BASE_DELAY`): 429 honouring `Retry-After` in either RFC 7231
+  form, and 502/503/504 with equal-jitter exponential backoff. Not 500 — as
+  likely a bad request as a blip.
+- **A ceiling on every retry wait** (`BP_API_RETRY_MAX_DELAY`, default 60s),
+  whatever its source. The estate gets to ask us to wait; it does not get to
+  decide how long we hang. This is what makes the absolute `Retry-After` date
+  safe to honour — converting an instant into a wait means subtracting our clock
+  from the estate's, and while ordinary NTP drift is seconds, an unsynced host
+  or a gateway writing local time as GMT is hours out. The same ceiling binds a
+  plain `Retry-After: 3600` (the identical unbounded wait, expressed as a
+  number) and a doubling backoff window, so raising `max_retries` never requires
+  recomputing the worst case by hand.
 - **`BPClient.transport_stats()`** — requests sent, retries, bytes received,
   errors bucketed (`rate_limited`, `client_error`, `server_error`, `timeout`,
   `connection_error`, `limiter_exhausted`), and a per-endpoint tally with

@@ -161,7 +161,11 @@ class BPClient:
             if config.max_concurrency > 0
             else None
         )
-        self._retry = RetryPolicy(config.max_retries, base_delay=config.retry_base_delay)
+        self._retry = RetryPolicy(
+            config.max_retries,
+            base_delay=config.retry_base_delay,
+            max_delay=config.retry_max_delay,
+        )
         self._counters = RequestCounters()
         # Single-flight bookkeeping for _cached. The lock guards only the
         # registry — never the production of a value (see _cached).

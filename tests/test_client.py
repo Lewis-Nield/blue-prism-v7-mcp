@@ -2366,10 +2366,11 @@ class TestTransportDefaultsAreOff:
         assert session.mount.call_count == 0
 
     def test_retry_settings_are_wired_from_config(self):
-        client, _ = make_client(max_retries=3, retry_base_delay=2.0)
+        client, _ = make_client(max_retries=3, retry_base_delay=2.0, retry_max_delay=45.0)
         assert client._retry.max_retries == 3
         client._retry._jitter = lambda: 0.0
         assert client._retry.delay_for(503, 0) == 1.0  # half of the 2.0 window
+        assert client._retry.delay_for(429, 0, "9999") == 45.0  # the configured cap
 
     def test_a_limiter_is_built_only_when_a_rate_is_configured(self):
         client, _ = make_client(max_requests_per_second=5.0, max_burst=10)
