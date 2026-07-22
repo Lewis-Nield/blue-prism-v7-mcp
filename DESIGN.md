@@ -588,6 +588,94 @@ Sequenced as:
   Consuming this from Custera's `ControlService` (wiring `bind_actor` around
   each dispatch, retiring the `proposed_by`/`executed_by` store workaround or
   keeping it alongside) is a Custera-side change, tracked there.
+- **Phase 12 — Transport governance.** *Shipped in v0.18.0.* Everything above
+  concerns what the server is *allowed* to do; this concerns how hard it leans
+  on the estate while doing it. The Blue Prism application server hosting the v7
+  REST API is the same host serving interactive Control Room clients, the
+  scheduler, and the runtime resources' own connections — so "the monitoring
+  tool degraded the estate it monitors" is a worse failure than the tool being
+  down, and until now the client had no ceiling and no way to report the load it
+  emitted. A new `transport.py` (deliberately not `governance.py`, which already
+  means Tier-3 capability gating and the audit log — that is *authorisation*
+  governance, this is *transport* governance) supplies the mechanism, and a
+  deployment supplies the numbers:
+  - **`RateLimiter` protocol + `TokenBucket`** — one shared budget per client,
+    `rate` as the sustained ceiling and `burst` as the idle headroom a sudden
+    fan-out may cash in. FIFO, because a plain lock lets a busy caller starve
+    one that has been waiting, which under contention is the request most likely
+    to be a person waiting on a page. Injectable (`BPClient(config,
+    limiter=...)`) on the `Cache` protocol's precedent, since a host running
+    several processes against one estate needs a budget they *share* — which a
+    per-instance bucket cannot express.
+  - **A `BoundedSemaphore` concurrency ceiling**, because a token bucket bounds
+    rate and says nothing about how many requests are in flight; a wide host
+    thread pool fanning out is what actually melts an application server. The
+    connection pool is mounted (`HTTPAdapter`) at no less than that ceiling, so
+    the pool can never be the narrower limit — above `pool_maxsize`, `requests`
+    opens and discards connections, which is TLS re-handshakes against the
+    estate at precisely its busiest moment.
+  - **One end-to-end wait budget.** The semaphore is taken first, then a limiter
+    token, and `limiter_timeout_seconds` covers both together rather than each
+    getting the full allowance — otherwise the configured number silently
+    becomes two stacked timeouts. Exhausting it raises `TransportBudgetExceeded`
+    (deliberately *not* a `requests.RequestException`: nothing was sent). Block,
+    then fail visibly — never drop a request, never queue unboundedly.
+  - **Bounded retry** of the failures worth retrying: 429 honouring
+    `Retry-After` in either RFC 7231 form, and the transient gateway statuses
+    502/503/504 with equal-jitter exponential backoff. Not 500 (as likely a bad
+    request as a blip). **Every delay is capped at `retry_max_delay`, whatever
+    its source** — the estate gets to ask us to wait, not to decide how long we
+    hang. That cap is what makes the absolute `Retry-After` date safe to honour:
+    turning an instant into a wait means subtracting our clock from the estate's,
+    and while ordinary NTP drift is seconds (a domain-joined estate cannot drift
+    past Kerberos's 5-minute skew tolerance without authentication failing), a
+    genuinely unsynced host or a gateway writing local time as GMT is hours out.
+    The same cap binds a plain `Retry-After: 3600` — the identical unbounded wait
+    expressed as a number — and a doubling backoff window, so raising
+    `max_retries` never requires recomputing the worst case by hand.
+    Opt-in per call via `_request(..., retriable=)`, defaulting
+    to **False** so the fail-closed case needs no opt-out: reads pass True and
+    writes pass False, making "a retried `start_process` is a second live run" a
+    property of the construction rather than a convention to remember. The
+    single 401 re-auth is orthogonal, unchanged, and not counted as a retry.
+  - **Single-flight on cache miss**, in `BPClient._cached` rather than in
+    `TTLCache`: `Cache` is a published protocol, so putting it in the default
+    implementation would mean an injected shared store *silently loses it* — and
+    the herd is worse across processes, which is exactly when a host would inject
+    one. The registry lock is never held while producing. If the producer raises,
+    the waiters re-raise its exception rather than each re-attempting; a failing
+    upstream call is the last thing that should be multiplied by the number of
+    threads waiting on it.
+  - **Single-flight on the token fetch**, for the same reason and by the same
+    shape: `_get_token` serialises and re-checks under its lock, so a fan-out
+    arriving on an absent or expired token costs the Authentication Server one
+    POST between them rather than one each. This is the one send deliberately
+    exempt from the limiter, the semaphore and the retry layer — a different
+    host with a different budget — which makes it the one path where a wide
+    thread pool could otherwise still burst unbounded. A 401 likewise
+    invalidates *the token that attempt actually carried*: under concurrency the
+    401s from one expiry keep arriving after another caller has refreshed, and
+    clearing unconditionally would discard the fresh token and re-fetch, an
+    expiry storm feeding itself.
+  - **`RequestCounters` / `BPClient.transport_stats()`** — so a load budget can
+    be *measured* rather than asserted. The returned dict is a published
+    contract (stable keys, every error bucket always present, a fresh copy each
+    call): requests sent, retries, bytes received, errors bucketed
+    (`rate_limited`/`client_error`/`server_error`/`timeout`/`connection_error`/
+    `limiter_exhausted`), and per-path tallies with id-shaped segments collapsed
+    to `{id}` so the count is of endpoints rather than entities. Token fetches
+    are counted **separately**: the Authentication Server is a different service
+    from the API host, so token traffic must not inflate the estate's budget —
+    but it must not vanish from the report either. `limiter_exhausted` is the one
+    error bucket with no corresponding sent request, so it is excluded from
+    `requests` and `by_path`, which stay in step with what the estate actually
+    saw.
+
+  **Every knob defaults to off.** A distributable artifact must not quietly
+  change its posture on upgrade, and the engine has no basis to guess a
+  deployment's numbers — those depend on concurrent users, poll cadence, and how
+  much headroom the application server has. The engine ships the mechanism; the
+  deployment owns the policy. See DEPLOYMENT.md for the tuning guidance.
 
 ## Conventions
 - The stdio transport speaks JSON-RPC over stdout; nothing else may write there.

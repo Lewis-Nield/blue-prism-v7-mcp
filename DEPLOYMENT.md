@@ -90,6 +90,64 @@ error), an unknown data source or PII backend, a missing or unwritable audit
 path, and a failed permissions call each refuse to start rather than serve a
 degraded surface.
 
+## Bounding the load on your estate
+
+The Blue Prism application server hosting the v7 REST API is the same host
+serving interactive Control Room clients, the scheduler, and your runtime
+resources' own connections. A single stdio MCP server driven by one person is a
+rounding error against that; a long-lived host embedding the engine behind a web
+application is not. These settings give that host a ceiling it can be held to.
+
+**All of them are off by default**, so an upgrade never changes what your server
+emits. There are no recommended numbers here on purpose — they depend on your
+concurrent users, your poll cadence, and how much headroom the application
+server has, none of which the engine can see.
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `BP_API_MAX_REQUESTS_PER_SECOND` | `0` (off) | sustained request ceiling against the API host |
+| `BP_API_MAX_BURST` | `10` | idle headroom a sudden fan-out may spend at once |
+| `BP_API_MAX_CONCURRENCY` | `0` (unbounded) | ceiling on requests in flight at once |
+| `BP_API_LIMITER_TIMEOUT` | `10` | seconds a caller waits for a request slot, end to end |
+| `BP_API_POOL_MAXSIZE` | `0` (requests' own default) | connection-pool size; raised to `MAX_CONCURRENCY` where that is larger |
+| `BP_API_MAX_RETRIES` | `0` (off) | retries per **read** for 429 / 502 / 503 / 504 |
+| `BP_API_RETRY_BASE_DELAY` | `0.5` | first backoff window, in seconds; doubles per retry |
+| `BP_API_RETRY_MAX_DELAY` | `60` | ceiling on any single retry wait, whatever its source |
+
+Tuning notes:
+
+- **Start from what you already emit.** `BPClient.transport_stats()` reports
+  requests sent, retries, bytes received, errors by class, and a per-endpoint
+  tally, all since construction. Run unrestricted for a representative period,
+  read the numbers, then set a ceiling above your observed steady state — a
+  limit guessed before measuring is either theatre or an outage.
+- **Rate and concurrency bound different things.** The rate limit paces a steady
+  poller; the concurrency ceiling is what stops a wide thread pool fanning out
+  into the application server all at once. A host with either characteristic
+  wants both set.
+- **The pool follows concurrency automatically.** Left at `0` with a concurrency
+  ceiling configured, the pool is sized to match. Set it explicitly only to go
+  *higher*; it is never allowed lower, because above the pool size `requests`
+  opens and discards connections — TLS re-handshakes against the estate at
+  exactly the wrong moment.
+- **`BP_API_LIMITER_TIMEOUT` is one end-to-end budget**, covering the wait for a
+  concurrency slot and a rate token together, not each in turn. When it is spent
+  the call raises `TransportBudgetExceeded` rather than being dropped or queued
+  — an embedding host should degrade that the way it already degrades an
+  unreachable estate.
+- **Retries apply to reads only.** A write is never retried automatically: a
+  repeated `start_process` is a second live run on your estate. The 401
+  token-refresh retry is separate and always active.
+- **`BP_API_RETRY_MAX_DELAY` bounds how long the estate can park a caller.** A
+  429 may carry a `Retry-After` as either a number of seconds or an absolute
+  timestamp; both are honoured, and both are capped here. The timestamp form is
+  the reason the cap matters: converting an instant into a wait subtracts your
+  host's clock from the Blue Prism server's. Ordinary NTP drift is seconds and
+  harmless — but a host that has lost time sync, or a gateway emitting local
+  time labelled GMT, can be hours out. If you see retries pausing far longer
+  than your estate's `Retry-After` values suggest, check clock sync between the
+  two hosts before raising this number.
+
 ## Wiring into an MCP client
 
 The console entrypoint speaks the stdio transport; stdout carries JSON-RPC

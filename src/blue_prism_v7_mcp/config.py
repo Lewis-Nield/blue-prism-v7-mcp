@@ -65,6 +65,55 @@ class BPConfig:
     page_token_param: str = "pagingToken"
     page_offset_param: str = "startIndex"
 
+    # --- Transport governance (DESIGN Phase 12) --------------------------------
+    # The engine ships the mechanism; a deployment supplies the numbers. Every
+    # knob here defaults to OFF, so an unconfigured server emits exactly the
+    # traffic it did before transport governance existed — a distributable
+    # artifact must not quietly change its posture on upgrade. A host that knows
+    # its estate (concurrent users, poll cadence, how much headroom the BP
+    # application server has) sets these; the engine has no basis to guess.
+
+    # Sustained request ceiling against base_url, requests/second. 0 disables
+    # the limiter entirely (no token bucket is constructed).
+    max_requests_per_second: float = 0.0
+    # Idle headroom the limiter may release at once. Only meaningful when
+    # max_requests_per_second is set.
+    max_burst: int = 10
+    # Ceiling on requests in flight at once, enforced by a semaphore. 0 means
+    # unbounded. Matters for an embedding host whose thread pool is far wider
+    # than anything the estate wants to field concurrently.
+    max_concurrency: int = 0
+    # The single end-to-end budget a caller will wait for a request slot —
+    # covering the concurrency semaphore and the limiter token together, so
+    # these never become two stacked timeouts. Exhausting it raises
+    # TransportBudgetExceeded rather than dropping or queueing the request.
+    limiter_timeout_seconds: float = 10.0
+
+    # Connection-pool size for the mounted HTTPAdapter. 0 leaves requests'
+    # own default in place (no adapter is mounted). The effective size is
+    # raised to max_concurrency where that is larger, so the pool can never be
+    # the narrower limit — above pool_maxsize, requests opens and discards
+    # extra connections, which is TLS re-handshakes against the estate at
+    # exactly the wrong moment.
+    pool_maxsize: int = 0
+
+    # Retries per request for transient failures (429 honouring Retry-After;
+    # 502/503/504 with jittered exponential backoff). 0 disables the retry
+    # layer. Reads only: a write is never retried, since a repeated
+    # start_process is a duplicate estate run. The single 401 re-auth is
+    # orthogonal and always active.
+    max_retries: int = 0
+    retry_base_delay: float = 0.5
+    # Ceiling on any single retry wait, whatever its source — a calculated
+    # backoff, a numeric Retry-After, or an absolute Retry-After date. The
+    # estate gets to ask us to wait; it does not get to decide how long we
+    # hang. Load-bearing for the date form, whose arithmetic depends on the
+    # Blue Prism host's clock agreeing with ours (ordinary NTP drift is
+    # seconds, but an unsynced host or a gateway writing local time as GMT is
+    # hours) — and equally for a plain `Retry-After: 3600`, which is the same
+    # unbounded wait expressed as a number.
+    retry_max_delay: float = 60.0
+
     # Feature flags.
     enable_actions: bool = False  # gates the Tier 3 control tools
 
@@ -136,6 +185,14 @@ class BPConfig:
             page_size_param=e.get("BP_API_PAGE_SIZE_PARAM", "itemsPerPage"),
             page_token_param=e.get("BP_API_PAGE_TOKEN_PARAM", "pagingToken"),
             page_offset_param=e.get("BP_API_PAGE_OFFSET_PARAM", "startIndex"),
+            max_requests_per_second=float(e.get("BP_API_MAX_REQUESTS_PER_SECOND", "0")),
+            max_burst=int(e.get("BP_API_MAX_BURST", "10")),
+            max_concurrency=int(e.get("BP_API_MAX_CONCURRENCY", "0")),
+            limiter_timeout_seconds=float(e.get("BP_API_LIMITER_TIMEOUT", "10")),
+            pool_maxsize=int(e.get("BP_API_POOL_MAXSIZE", "0")),
+            max_retries=int(e.get("BP_API_MAX_RETRIES", "0")),
+            retry_base_delay=float(e.get("BP_API_RETRY_BASE_DELAY", "0.5")),
+            retry_max_delay=float(e.get("BP_API_RETRY_MAX_DELAY", "60")),
             enable_actions=e.get("BP_ENABLE_ACTIONS", "false").lower() == "true",
             # Normalised like pii_backend below: casing/whitespace noise is
             # forgiven, unknown values still refuse to start in build_client.
