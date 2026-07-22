@@ -17,13 +17,14 @@ recursed).
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 import requests
 
 from .common import (
     DEFAULT_LIMIT,
     Ranked,
+    canonical_name,
     rank,
     require_window,
     resolve_id,
@@ -386,21 +387,53 @@ class _Tier1ReadsMixin:
         end_date: str,
         process: str | None = None,
         resource: str | None = None,
-        status: str | None = None,
+        status: str | Sequence[str] | None = None,
     ) -> Ranked:
-        """Rank run history (sessions) by recency within a date window, filtered."""
+        """Rank run history (sessions) by recency within a date window, filtered.
+
+        Every filter narrows SERVER-side, so a scoped question costs a scoped
+        read rather than the whole window. Two details make that safe:
+
+        `status` accepts a SET as well as a single value, and the whole set
+        goes upstream as one comma-joined request. Callers wanting several
+        in-flight statuses should pass them together — looping this method
+        once per status would cost one full window read each.
+
+        Process and resource names are canonicalised against the (cached)
+        process and resource catalogues first, because the v7 name filters
+        are exact and this surface has always matched names case-insensitively.
+        An unknown name goes through unchanged and returns zero rows. The
+        local filters below are kept as a defensive second pass: an
+        unrecognised query param is IGNORED by the gateway rather than
+        rejected, so a filter that silently fails to narrow upstream must not
+        widen the answer here.
+        """
         require_window(start_date, end_date)
+        statuses: tuple[str, ...] | None = None
         if status is not None:
-            status = validate_choice(status, "status", SESSION_STATUSES)
-        sessions = self.client.get_sessions(start_date, end_date)
+            raw = (status,) if isinstance(status, str) else tuple(status)
+            statuses = tuple(validate_choice(s, "status", SESSION_STATUSES) for s in raw)
+        if process:
+            process = canonical_name(process, self.client.get_processes(), "processName")
+        if resource:
+            resource = canonical_name(resource, self.client.get_resources())
+
+        sessions = self.client.get_sessions(
+            start_date,
+            end_date,
+            status=statuses,
+            process_name=process,
+            resource_name=resource,
+        )
         if process:
             wanted = process.strip().casefold()
             sessions = [s for s in sessions if str(s.get("processName", "")).casefold() == wanted]
         if resource:
             wanted = resource.strip().casefold()
             sessions = [s for s in sessions if str(s.get("resourceName", "")).casefold() == wanted]
-        if status:
-            sessions = [s for s in sessions if s.get("status") == status]
+        if statuses:
+            wanted_statuses = set(statuses)
+            sessions = [s for s in sessions if s.get("status") in wanted_statuses]
         return rank(
             [self._scrubbed_session(s) for s in sessions],
             sort_key=lambda s: s.get("startTime") or "",

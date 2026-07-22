@@ -345,6 +345,18 @@ def validate_session_parameters(parameters: Any) -> dict[str, dict] | None:
     return normalised
 
 
+def _match_by_name(value: str, records: list[dict], name_key: str) -> list[dict]:
+    """Records whose `name_key` equals `value`, compared case-insensitively.
+
+    The tool layer's single definition of "the same name": agents type names
+    as the user said them, every v7 catalogue spells them canonically, and
+    both `resolve_id` (which raises on a miss) and `canonical_name` (which
+    degrades) branch off this one comparison.
+    """
+    wanted = value.strip().casefold()
+    return [r for r in records if str(r.get(name_key, "")).casefold() == wanted]
+
+
 def resolve_id(
     value: str,
     records: list[dict],
@@ -373,8 +385,7 @@ def resolve_id(
         if str(record.get(id_key)) == str(candidate):
             return str(candidate)
 
-    wanted = str(candidate).casefold()
-    matches = [r for r in records if str(r.get(name_key, "")).casefold() == wanted]
+    matches = _match_by_name(str(candidate), records, name_key)
     if len(matches) == 1:
         return str(matches[0][id_key])
     if matches:
@@ -394,6 +405,26 @@ def resolve_id(
         else ""
     )
     raise ValueError(f"No {entity} named {value!r}.{hint}")
+
+
+def canonical_name(value: str, records: list[dict], name_key: str = "name") -> str:
+    """Return `value` respelled to match the catalogue's casing, or unchanged.
+
+    The counterpart to `resolve_id` for endpoints that filter on the NAME
+    rather than the id. The v7 name filters are exact (BasicStringFilter
+    offers eq/gte/lte/strtw — no case-insensitive and no `ctn`), but the tool
+    surface has always matched names case-insensitively, so a name has to be
+    canonicalised BEFORE it goes server-side or "hr process" stops matching
+    "HR Process".
+
+    Deliberately does NOT raise on a miss, unlike `resolve_id`: an unknown
+    name is sent through unchanged so the read simply returns zero rows —
+    the behaviour callers already get — rather than turning a narrowing
+    filter into an error. Ambiguous names (same spelling, different case)
+    resolve to the first match; any of them filters identically upstream.
+    """
+    matches = _match_by_name(value, records, name_key)
+    return str(matches[0][name_key]) if matches else value
 
 
 def make_cached_scrub(

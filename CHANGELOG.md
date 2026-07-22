@@ -7,6 +7,42 @@ additive endpoint is a minor bump.
 
 ## [Unreleased]
 
+## [0.17.0] — 2026-07-22
+
+### Added
+- **`list_sessions` filters narrow server-side.** `process`, `resource`, and
+  `status` now go to the API as query filters instead of being applied to a
+  whole-window payload after it arrives, so a scoped question costs a scoped
+  read. Verified against the 7.5.1 spec and unchanged on 7.1.0/7.2.0, the
+  endpoint mixes two encodings in the one call: `status` is an array with
+  `style=form explode=false` (comma-joined into a single param), while
+  `processName`/`resourceName` are `BasicStringFilter` deepObject bounds sent
+  as `[eq]`.
+- **A whole SET of statuses is one request.** The domain facade
+  (`Engine.list_sessions`) accepts `status` as a sequence as well as a single
+  value, normalised to a sorted tuple for the cache key so the same set in a
+  different order shares one entry. A caller wanting several in-flight
+  statuses passes them together rather than looping — which would have cost a
+  full window read each. The MCP tool keeps its single-value schema.
+- `_get_collection` gains a keyword-only `page_size` override, spelled and
+  placed to match the one `_get_paged_by_number` already carries.
+  `get_queue_items` uses it to shrink the page to `max_records` — but **only**
+  when a server-side `sort_by` is also present, since without a known ordering
+  an early-stopped fetch is an arbitrary subset and a smaller page only makes
+  it a smaller one. Same guard as the v0.15.0 fetch-time cap it pairs with.
+
+### Changed
+- Process and resource names are canonicalised against the (already cached)
+  process and resource catalogues before being sent upstream. The v7 name
+  filters are exact — `BasicStringFilter` offers `eq`/`gte`/`lte`/`strtw` and
+  no `ctn` — whereas this tool surface has always matched names
+  case-insensitively, so `process="invoice processing"` still finds
+  `Invoice Processing`. Unlike name→id resolution, an unrecognised name is
+  passed through unchanged and simply returns zero rows rather than raising.
+- The local filters are retained as a defensive second pass: the gateway
+  ignores an unrecognised query parameter rather than rejecting it, so a
+  filter that silently failed to narrow upstream must not widen the answer.
+
 ## [0.16.0] — 2026-07-17
 
 ### Added
@@ -515,7 +551,9 @@ First runnable release — the foundation, built in eight phases (see
 - FastMCP stdio server, a first-class mock run mode, console entrypoint, and
   deployment / day-one verification docs.
 
-[Unreleased]: https://github.com/Lewis-Nield/blue-prism-v7-mcp/compare/v0.15.0...HEAD
+[Unreleased]: https://github.com/Lewis-Nield/blue-prism-v7-mcp/compare/v0.17.0...HEAD
+[0.17.0]: https://github.com/Lewis-Nield/blue-prism-v7-mcp/compare/v0.16.0...v0.17.0
+[0.16.0]: https://github.com/Lewis-Nield/blue-prism-v7-mcp/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/Lewis-Nield/blue-prism-v7-mcp/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/Lewis-Nield/blue-prism-v7-mcp/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/Lewis-Nield/blue-prism-v7-mcp/compare/v0.12.0...v0.13.0
