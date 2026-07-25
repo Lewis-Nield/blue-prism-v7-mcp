@@ -45,4 +45,7 @@ jobs:
         # The coverage gate (Phase 7): 100% on every measured module. The
         # suite has held this since Phase 1; --cov-fail-under makes a drop a
         # build failure rather than a number nobody reads.
-        run: pytest --cov=blue_prism_v7_mcp --cov-report=term-missing --cov-fail-under=100
+        # scripts/ is measured too: release.py automates the release tail, so
+        # a bug in it lands a wrong version or a misplaced tag — exactly the
+        # class of mistake it exists to prevent.
+        run: pytest --cov=blue_prism_v7_mcp --cov=scripts --cov-report=term-missing --cov-fail-under=100
