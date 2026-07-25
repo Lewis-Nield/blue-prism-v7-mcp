@@ -76,9 +76,11 @@ source = ["blue_prism_v7_mcp"]
 omit = ["*/__main__.py"]
 
 [tool.mypy]
-# The gate covers the shipped package; tests stay outside it (they are pinned
-# by execution — 100% coverage — not by static types).
-files = ["src"]
+# The gate covers the shipped package plus the release automation; tests stay
+# outside it (they are pinned by execution — 100% coverage — not by static
+# types). scripts/release.py rewrites five files and pushes a tag, so it earns
+# the same static checking as the code it ships.
+files = ["src", "scripts"]
 # Flag ignores that stop suppressing anything, so upstream fixes (e.g. the
 # presidio RecognizerResult split) get cleaned up rather than fossilising.
 warn_unused_ignores = true

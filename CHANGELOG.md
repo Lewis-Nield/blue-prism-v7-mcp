@@ -7,6 +7,27 @@ additive endpoint is a minor bump.
 
 ## [Unreleased]
 
+### Added
+- **`scripts/release.py`** — the release tail (version bump → CHANGELOG roll →
+  tag → GitHub release) as a stdlib-only script with `prepare` and `publish`
+  subcommands, both supporting `--dry-run`. The tail is five files that have to
+  agree on one number plus a tag that has to point at the right commit; each is
+  individually valid and only ever wrong *relative to the others*, so CI cannot
+  see the drift. It has bitten twice — a CHANGELOG section that never landed
+  before 0.8.0, and a tag left pointing at a pre-merge commit at 0.14.0.
+  `prepare` refuses on a dirty tree, a version that does not advance, or an
+  empty `[Unreleased]`, and re-reads every site afterwards rather than trusting
+  its own writes. `publish` reads the version from `HEAD` rather than the
+  working tree, since reading the working tree would pass on precisely the
+  mistake it exists to catch. `uv.lock` is hand-edited rather than regenerated,
+  because `uv lock` churns 200+ lines and drops the spaCy model pin.
+
+### Changed
+- The CI coverage gate now measures `scripts/` alongside the package. A bug in
+  the release automation lands a wrong version or a misplaced tag, which is the
+  class of mistake it was written to prevent, so it is held to the same 100%
+  bar as the shipped code.
+
 ## [0.18.0] — 2026-07-22
 
 Transport governance: the client gains a ceiling on the load it puts on the

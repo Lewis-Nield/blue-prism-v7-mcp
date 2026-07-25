@@ -11,7 +11,7 @@ python -m spacy download en_core_web_sm   # only needed for the [pii] backend
 ## The checks
 
 ```bash
-pytest --cov=blue_prism_v7_mcp --cov-report=term-missing   # tests + coverage
+pytest --cov=blue_prism_v7_mcp --cov=scripts --cov-report=term-missing   # tests + coverage
 ruff check .                                            # lint (E/F + bugbear)
 ruff format --check .                                   # formatting
 mypy                                                    # types (src/, see pyproject)
@@ -71,6 +71,44 @@ mutmut run            # mutate + run the suite against each mutant
 mutmut results        # list survivors
 mutmut show <id>      # see the exact surviving mutation
 ```
+
+## Cutting a release
+
+The release tail is five files that must agree on one number, plus a tag that
+must point at the right commit. Both have drifted before — a CHANGELOG section
+that never landed, and a tag left pointing at a pre-merge commit — and neither
+is something CI can catch, because each file is individually valid and only
+wrong relative to the others. `scripts/release.py` makes the agreement
+mechanical. It is stdlib-only and takes `--dry-run` on both subcommands.
+
+**On the release branch**, once the work is merged-ready and `[Unreleased]`
+holds the entry for it:
+
+```bash
+uv run --no-sync python scripts/release.py prepare 0.19.0 --dry-run
+uv run --no-sync python scripts/release.py prepare 0.19.0
+```
+
+`prepare` bumps `pyproject.toml`, `src/blue_prism_v7_mcp/__init__.py`, the
+README status line, and this package's own `version` line in `uv.lock`
+(hand-edited — **never** `uv lock`, which churns 200+ lines and drops the spaCy
+model pin), then moves `[Unreleased]` into a dated section and rewrites the
+compare links. It refuses on a dirty tree, on a version that does not advance,
+and on an empty `[Unreleased]` — a release with nothing recorded is the gap the
+CHANGELOG rule exists to close. Afterwards it re-reads all five sites and
+prints them, so a bump that silently failed to apply is visible rather than
+assumed.
+
+**On `main`, after the squash-merge:**
+
+```bash
+uv run --no-sync python scripts/release.py publish 0.19.0
+```
+
+`publish` reads the version out of `HEAD` — not the working tree, which would
+pass on the exact mistake it guards — refuses if it disagrees or if the tag
+already exists, then tags, pushes, and creates the GitHub release using the
+CHANGELOG section as its notes.
 
 ## Branches, commits, PRs
 
