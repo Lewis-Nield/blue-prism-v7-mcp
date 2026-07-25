@@ -52,7 +52,7 @@ pii = [
     "spacy>=3.8,<4",
 ]
 dev = [
-    "pytest==8.3.5",
+    "pytest==9.1.1",
     "pytest-cov==6.1.1",
     # Pinned exact now that ruff format --check gates CI: a new ruff's
     # formatter-style changes must not break every open branch overnight.
