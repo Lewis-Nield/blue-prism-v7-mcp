@@ -36,6 +36,38 @@ Development continues as themed minor releases on top of that foundation — see
 [CHANGELOG.md](https://github.com/Lewis-Nield/blue-prism-v7-mcp/blob/main/CHANGELOG.md)
 for the release history.
 
+## Verification status
+
+**This has not yet been run against a live Blue Prism estate.** It is built
+against the official v7 OpenAPI specifications (7.5.1, cross-checked on 7.2.0
+and 7.1.0) and exercised end-to-end against in-memory clients under a 100%
+coverage gate — but specification-built is not estate-verified, and the two
+should not be confused. That is why it is 0.x: v1.0.0 ships when the checklist
+below is cleared, not before.
+
+What that means by tier:
+
+- **Reads** — a wrong assumption surfaces as an error or an unexpectedly wide
+  result, not as a change to your estate. The specific risk worth knowing: the
+  v7 API *ignores* an unrecognised query parameter rather than rejecting it, so
+  a wrongly encoded filter returns unfiltered rows and looks correct. The
+  encodings are pinned against the spec; they are not yet confirmed on the wire.
+- **Control actions** — these write to a real estate. They ship **disabled**
+  (`BP_ENABLE_ACTIONS` defaults to `false`), behind a capability gate, an
+  append-only audit, and `dry_run=true` by default. Three of the endpoint
+  behaviours they depend on are underdocumented in the specification itself and
+  are therefore inferred rather than known.
+
+If you are trying this out: **point it at a development or test estate first**,
+leave the action surface off until the reads look right, and treat the first
+`dry_run=false` as a deliberate step rather than a default.
+
+[docs/VERIFICATION.md](https://github.com/Lewis-Nield/blue-prism-v7-mcp/blob/main/docs/VERIFICATION.md)
+is the fill-in report that closes this out — every inferred behaviour, with the
+exact call that settles it. If you have an estate and the inclination, a
+completed report (even Part A, which touches nothing) is the single most useful
+contribution this project can receive.
+
 ## Why v7 Enterprise
 
 SS&C is building MCP natively into Blue Prism Next Generation. v7 / Enterprise —

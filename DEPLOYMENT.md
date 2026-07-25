@@ -199,7 +199,12 @@ retire-only/queue-only account; widen permissions as trust is established.
 ## Day-one verification checklist
 
 The OpenAPI specs underdocument three things the control tools depend on.
-Verify them against *your* estate (7.2+) before allowing `dry_run=false`:
+Verify them against *your* estate (7.2+) before allowing `dry_run=false`.
+
+This section is the operator's short form. [docs/VERIFICATION.md](docs/VERIFICATION.md)
+is the long form: the same checks plus the read-side filter encodings, written
+as a fill-in report — no part of this server has yet been run against a live
+estate, and that document is how that changes.
 
 1. **Attempt PATCH paths** — `defer_queue_item` sends an RFC 6902 JSON Patch
    to `PATCH /workqueues/{id}/items/{itemId}/attempts/{attemptNumber}` with
