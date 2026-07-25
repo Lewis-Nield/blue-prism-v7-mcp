@@ -100,4 +100,7 @@ The server governs what crosses its own boundary; the deployment owns the rest:
   control. The server only appends: rotation and retention are yours.
 - Work the **day-one verification checklist** in
   [DEPLOYMENT.md](DEPLOYMENT.md) before allowing `dry_run=false` on a new
-  estate.
+  estate. This server has not yet been run against a live estate at all:
+  [docs/VERIFICATION.md](docs/VERIFICATION.md) states exactly which behaviours
+  are inferred from the specification rather than observed. Start on a
+  development or test estate.
