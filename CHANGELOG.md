@@ -27,6 +27,13 @@ additive endpoint is a minor bump.
   rights — so the project has to say plainly, where a reader lands, that it is
   independent, unofficial, and uses the name only to describe what it
   interoperates with.
+- **Package-index metadata**: `[project.urls]` (homepage, repository,
+  documentation, changelog, issues) and `classifiers`, neither of which existed,
+  leaving a bare index page with no search facets and no sidebar. The Python
+  classifiers are exactly the CI matrix, so a claimed version is a tested one,
+  and there is deliberately no `License ::` classifier — PEP 639
+  `license`/`license-files` are already in use and setuptools>=77 rejects the
+  pair. `keywords` gains `automation`.
 
 ### Changed
 - **README is now the package landing page**, and is written as one. The status

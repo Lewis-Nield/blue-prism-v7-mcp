@@ -12,7 +12,24 @@ requires-python = ">=3.11"
 license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE"]
 authors = [{ name = "Lewis Nield" }]
-keywords = ["blue-prism", "mcp", "model-context-protocol", "rpa", "v7"]
+keywords = ["automation", "blue-prism", "mcp", "model-context-protocol", "rpa", "v7"]
+
+# Search facets for the package index. The Python versions are exactly the CI
+# matrix — claiming support here means it is tested, not hoped. No `License ::`
+# classifier: PEP 639 `license`/`license-files` above are the modern spelling and
+# setuptools>=77 rejects the pair.
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: System :: Monitoring",
+    "Typing :: Typed",
+]
 
 # Base install is deliberately light: just the MCP runtime and an HTTP client.
 # PII scrubbing (Presidio + spaCy, ~1GB model) is an OPTIONAL extra so teams
@@ -48,6 +65,15 @@ dev = [
     # gate. See CONTRIBUTING.md. Pinned because the config schema is version-tied.
     "mutmut==3.6.0",
 ]
+
+[project.urls]
+# The sidebar on the package page. Documentation points at DEPLOYMENT.md rather
+# than the README, since the README is already the page body.
+Homepage = "https://github.com/Lewis-Nield/blue-prism-v7-mcp"
+Repository = "https://github.com/Lewis-Nield/blue-prism-v7-mcp"
+Documentation = "https://github.com/Lewis-Nield/blue-prism-v7-mcp/blob/main/DEPLOYMENT.md"
+Changelog = "https://github.com/Lewis-Nield/blue-prism-v7-mcp/blob/main/CHANGELOG.md"
+Issues = "https://github.com/Lewis-Nield/blue-prism-v7-mcp/issues"
 
 [project.scripts]
 # Console entrypoint: builds the server from the environment and runs the
