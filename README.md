@@ -10,11 +10,18 @@ processes — with optional, governance-gated control actions.
 No direct database reads. Personal data in exception messages and session logs
 is scrubbed at the tool boundary (optional Presidio backend).
 
+> **Independent project.** This is an unofficial, community-built server. It is
+> not affiliated with, endorsed by, or sponsored by SS&C Blue Prism. "Blue
+> Prism" is a trademark of SS&C Technologies Holdings, Inc., used here only to
+> describe what this software interoperates with.
+
 ## Status
 
-**Current release: v0.16.0** — see [CHANGELOG.md](CHANGELOG.md) for the full
-release history. The **v0.1.0 foundation** was built in eight phases against
-the plan in [DESIGN.md](DESIGN.md):
+**Current release: v0.18.0** — see
+[CHANGELOG.md](https://github.com/Lewis-Nield/blue-prism-v7-mcp/blob/main/CHANGELOG.md)
+for the full release history. The **v0.1.0 foundation** was built in eight
+phases against the plan in
+[DESIGN.md](https://github.com/Lewis-Nield/blue-prism-v7-mcp/blob/main/DESIGN.md):
 
 - [x] Phase 0 — Scaffold
 - [x] Phase 1 — Decouple the client into `BPClient`
@@ -26,7 +33,8 @@ the plan in [DESIGN.md](DESIGN.md):
 - [x] Phase 7 — Validate (stdio handshake, end-to-end, coverage gate)
 
 Development continues as themed minor releases on top of that foundation — see
-[CHANGELOG.md](CHANGELOG.md) for the release history.
+[CHANGELOG.md](https://github.com/Lewis-Nield/blue-prism-v7-mcp/blob/main/CHANGELOG.md)
+for the release history.
 
 ## Why v7 Enterprise
 
@@ -49,9 +57,10 @@ python -m spacy download en_core_web_sm   # if using [pii] (lg/_trf: better reca
 ## Run
 
 The `blue-prism-v7-mcp` console script speaks the MCP stdio transport — point any
-MCP client at it (see [DEPLOYMENT.md](DEPLOYMENT.md) for a Claude Desktop
-config example and the full rollout guide). To try the entire tool surface
-with no estate and no credentials:
+MCP client at it (see
+[DEPLOYMENT.md](https://github.com/Lewis-Nield/blue-prism-v7-mcp/blob/main/DEPLOYMENT.md)
+for a Claude Desktop config example and the full rollout guide). To try the
+entire tool surface with no estate and no credentials:
 
 ```bash
 BP_DATA_SOURCE=mock blue-prism-v7-mcp   # lean fixtures — what the unit tests assert against
@@ -72,9 +81,11 @@ degraded surface.
 
 ## Configuration
 
-Per-deployment, via environment ([.env.example](.env.example) is the annotated
-template; [DEPLOYMENT.md](DEPLOYMENT.md) covers service-account permissions and
-day-one verification):
+Per-deployment, via environment
+([.env.example](https://github.com/Lewis-Nield/blue-prism-v7-mcp/blob/main/.env.example)
+is the annotated template;
+[DEPLOYMENT.md](https://github.com/Lewis-Nield/blue-prism-v7-mcp/blob/main/DEPLOYMENT.md)
+covers service-account permissions and day-one verification):
 
 | Variable | Purpose |
 |----------|---------|
@@ -129,4 +140,9 @@ is just one adapter over the same engine (`tools.common.to_envelope`).
 
 ## Licence
 
-[Apache-2.0](LICENSE).
+[Apache-2.0](https://github.com/Lewis-Nield/blue-prism-v7-mcp/blob/main/LICENSE).
+
+The licence grants no trademark rights (Apache-2.0 §6). "Blue Prism" is a
+trademark of SS&C Technologies Holdings, Inc.; this project is independent of
+and unaffiliated with SS&C Blue Prism, and uses the name only to describe the
+product it interoperates with.

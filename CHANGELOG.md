@@ -21,8 +21,48 @@ additive endpoint is a minor bump.
   working tree, since reading the working tree would pass on precisely the
   mistake it exists to catch. `uv.lock` is hand-edited rather than regenerated,
   because `uv lock` churns 200+ lines and drops the spaCy model pin.
+- **Trademark notice** in `README.md` (near the top and again under Licence) and
+  in `NOTICE`. "Blue Prism" is an SS&C mark and it sits in the package name, the
+  repository name, and the description, while Apache-2.0 §6 grants no trademark
+  rights — so the project has to say plainly, where a reader lands, that it is
+  independent, unofficial, and uses the name only to describe what it
+  interoperates with.
+- **Package-index metadata**: `[project.urls]` (homepage, repository,
+  documentation, changelog, issues) and `classifiers`, neither of which existed,
+  leaving a bare index page with no search facets and no sidebar. The Python
+  classifiers are exactly the CI matrix, so a claimed version is a tested one,
+  and there is deliberately no `License ::` classifier — PEP 639
+  `license`/`license-files` are already in use and setuptools>=77 rejects the
+  pair. `keywords` gains `automation`.
+- **`.github/dependabot.yml`** — weekly `pip` and `github-actions` updates. The
+  runtime deps are ranges, so this mostly watches the exact dev pins and the
+  action pins; the latter is what makes pinning actions by SHA sustainable,
+  since a pinned SHA never updates itself.
+- **A non-blocking `pip-audit` CI step**, running against the versions actually
+  resolved on each matrix leg. Dependabot reads manifests; nothing else in the
+  pipeline looked at what a fresh install would really pull. Non-blocking on
+  purpose — an advisory against a transitive dependency is information, not a
+  reason a release cannot be cut.
 
 ### Changed
+- **The audit log is created owner-only (0600)**, and the mode is re-applied on
+  every startup. It was created with `touch()`, i.e. 0666 masked by the umask —
+  typically world-readable, on a file carrying queue, process, session and
+  resource names, actor identity, and the item metadata SECURITY.md itself calls
+  audit-visible free text. The chmod is unconditional rather than create-only
+  because `touch(mode=...)` applies its mode only when it creates the file,
+  which would have left every already-deployed log exactly as it found it.
+  SECURITY.md records the override path for a deployer who wants it wider.
+- **CI declares `permissions: contents: read`** and pins its actions by commit
+  SHA rather than by mutable tag (`actions/checkout` v7.0.1,
+  `actions/setup-python` v7.0.0). Both matter the moment the repository is
+  public and a fork's pull request can trigger the workflow.
+- **README is now the package landing page**, and is written as one. The status
+  line said `v0.16.0` two releases after the fact; it now reads `v0.18.0`
+  (`scripts/release.py` owns that line from here). All seven relative document
+  links are absolute `https://github.com/...` URLs, because a package index does
+  not rewrite relative links against the repository — every one of them would
+  have rendered as a 404 for anyone reading the description away from GitHub.
 - The CI coverage gate now measures `scripts/` alongside the package. A bug in
   the release automation lands a wrong version or a misplaced tag, which is the
   class of mistake it was written to prevent, so it is held to the same 100%

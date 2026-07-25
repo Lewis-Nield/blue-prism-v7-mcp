@@ -1,0 +1,18 @@
+version: 2
+
+updates:
+  # Runtime dependencies are ranges, so this mostly watches the exact dev pins
+  # (ruff, mypy, pytest, mutmut) — the ones deliberately frozen so a new release
+  # cannot break every open branch overnight. Weekly, because a security bump
+  # arrives via alerts rather than by waiting for this schedule.
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+
+  # The reason CI pins actions by SHA is only sustainable with this: a pinned
+  # SHA never updates itself, and an unmaintained pin is its own risk.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
