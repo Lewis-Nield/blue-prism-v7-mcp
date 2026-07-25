@@ -168,12 +168,22 @@ class AuditLog:
     per write so a long-running server never holds a stale handle; the
     constructor touches the file so an unwritable path fails at startup,
     not on the first action.
+
+    The file is owner-only (0600). It carries queue, process, session and
+    resource names plus actor identity and item metadata — free text this
+    project's own SECURITY.md calls audit-visible — so on a shared host it must
+    not be world-readable. A deployer who genuinely wants it wider can re-chmod
+    after startup or point `BP_AUDIT_LOG_PATH` at a directory they control.
     """
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.touch()
+        # `touch(mode=...)` applies its mode only when it CREATES the file, so
+        # alone it would leave every already-deployed 0644 audit log as it
+        # found it. The chmod is unconditional for that reason.
+        self.path.touch(mode=0o600)
+        self.path.chmod(0o600)
 
     def record(
         self,

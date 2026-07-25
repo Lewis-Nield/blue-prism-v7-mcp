@@ -92,8 +92,12 @@ The server governs what crosses its own boundary; the deployment owns the rest:
 - Run it as a **dedicated service account** with the least Blue Prism
   permissions that cover the tools you want exposed (tables in
   [DEPLOYMENT.md](DEPLOYMENT.md)) — never an interactive user's credentials.
-- Protect the environment (or `.env` file) holding the client secret, and the
-  audit log file; the server only appends — rotation and retention are yours.
+- Protect the environment (or `.env` file) holding the client secret. The
+  server creates the audit log **owner-only (0600)** and re-applies that mode on
+  every startup, including to a file an earlier version left world-readable — so
+  a deliberately wider mode will not survive a restart. If you need one, re-chmod
+  after startup or point `BP_AUDIT_LOG_PATH` at a directory whose permissions you
+  control. The server only appends: rotation and retention are yours.
 - Work the **day-one verification checklist** in
   [DEPLOYMENT.md](DEPLOYMENT.md) before allowing `dry_run=false` on a new
   estate.

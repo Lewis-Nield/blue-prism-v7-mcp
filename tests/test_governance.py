@@ -178,6 +178,22 @@ class TestAuditLog:
         audit.record("t", {}, status="dry_run")
         assert len(read_audit(audit)) == 1
 
+    def test_new_audit_file_is_owner_only(self, tmp_path):
+        audit = AuditLog(tmp_path / "audit.jsonl")
+        assert audit.path.stat().st_mode & 0o777 == 0o600
+
+    def test_pre_existing_world_readable_file_is_tightened(self, tmp_path):
+        # The branch `touch(mode=...)` alone cannot reach: touch applies its mode
+        # only on creation, so every already-deployed 0644 log would stay 0644.
+        existing = tmp_path / "audit.jsonl"
+        existing.write_text('{"ts": "old"}\n', encoding="utf-8")
+        existing.chmod(0o644)
+
+        audit = AuditLog(existing)
+
+        assert audit.path.stat().st_mode & 0o777 == 0o600
+        assert audit.path.read_text(encoding="utf-8") == '{"ts": "old"}\n'  # append-only
+
     def test_unwritable_path_fails_at_construction_not_first_action(self, tmp_path):
         blocker = tmp_path / "not-a-dir"
         blocker.write_text("")

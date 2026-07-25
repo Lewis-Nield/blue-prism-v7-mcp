@@ -34,8 +34,29 @@ additive endpoint is a minor bump.
   and there is deliberately no `License ::` classifier — PEP 639
   `license`/`license-files` are already in use and setuptools>=77 rejects the
   pair. `keywords` gains `automation`.
+- **`.github/dependabot.yml`** — weekly `pip` and `github-actions` updates. The
+  runtime deps are ranges, so this mostly watches the exact dev pins and the
+  action pins; the latter is what makes pinning actions by SHA sustainable,
+  since a pinned SHA never updates itself.
+- **A non-blocking `pip-audit` CI step**, running against the versions actually
+  resolved on each matrix leg. Dependabot reads manifests; nothing else in the
+  pipeline looked at what a fresh install would really pull. Non-blocking on
+  purpose — an advisory against a transitive dependency is information, not a
+  reason a release cannot be cut.
 
 ### Changed
+- **The audit log is created owner-only (0600)**, and the mode is re-applied on
+  every startup. It was created with `touch()`, i.e. 0666 masked by the umask —
+  typically world-readable, on a file carrying queue, process, session and
+  resource names, actor identity, and the item metadata SECURITY.md itself calls
+  audit-visible free text. The chmod is unconditional rather than create-only
+  because `touch(mode=...)` applies its mode only when it creates the file,
+  which would have left every already-deployed log exactly as it found it.
+  SECURITY.md records the override path for a deployer who wants it wider.
+- **CI declares `permissions: contents: read`** and pins its actions by commit
+  SHA rather than by mutable tag (`actions/checkout` v7.0.1,
+  `actions/setup-python` v7.0.0). Both matter the moment the repository is
+  public and a fork's pull request can trigger the workflow.
 - **README is now the package landing page**, and is written as one. The status
   line said `v0.16.0` two releases after the fact; it now reads `v0.18.0`
   (`scripts/release.py` owns that line from here). All seven relative document
