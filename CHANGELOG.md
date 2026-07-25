@@ -21,8 +21,20 @@ additive endpoint is a minor bump.
   working tree, since reading the working tree would pass on precisely the
   mistake it exists to catch. `uv.lock` is hand-edited rather than regenerated,
   because `uv lock` churns 200+ lines and drops the spaCy model pin.
+- **Trademark notice** in `README.md` (near the top and again under Licence) and
+  in `NOTICE`. "Blue Prism" is an SS&C mark and it sits in the package name, the
+  repository name, and the description, while Apache-2.0 §6 grants no trademark
+  rights — so the project has to say plainly, where a reader lands, that it is
+  independent, unofficial, and uses the name only to describe what it
+  interoperates with.
 
 ### Changed
+- **README is now the package landing page**, and is written as one. The status
+  line said `v0.16.0` two releases after the fact; it now reads `v0.18.0`
+  (`scripts/release.py` owns that line from here). All seven relative document
+  links are absolute `https://github.com/...` URLs, because a package index does
+  not rewrite relative links against the repository — every one of them would
+  have rendered as a 404 for anyone reading the description away from GitHub.
 - The CI coverage gate now measures `scripts/` alongside the package. A bug in
   the release automation lands a wrong version or a misplaced tag, which is the
   class of mistake it was written to prevent, so it is held to the same 100%
