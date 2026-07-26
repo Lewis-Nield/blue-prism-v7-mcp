@@ -7,6 +7,8 @@ additive endpoint is a minor bump.
 
 ## [Unreleased]
 
+## [0.19.0] — 2026-07-26
+
 ### Added
 - **A Verification status section in the README, and `docs/VERIFICATION.md`.**
   Nothing in the repository said that this has never been run against a live
@@ -33,7 +35,8 @@ additive endpoint is a minor bump.
   its own writes. `publish` reads the version from `HEAD` rather than the
   working tree, since reading the working tree would pass on precisely the
   mistake it exists to catch. `uv.lock` is hand-edited rather than regenerated,
-  because `uv lock` churns 200+ lines and drops the spaCy model pin.
+  because a version bump should touch one line and `uv lock` re-resolves the
+  whole graph.
 - **Trademark notice** in `README.md` (near the top and again under Licence) and
   in `NOTICE`. "Blue Prism" is an SS&C mark and it sits in the package name, the
   repository name, and the description, while Apache-2.0 §6 grants no trademark
@@ -51,6 +54,26 @@ additive endpoint is a minor bump.
   runtime deps are ranges, so this mostly watches the exact dev pins and the
   action pins; the latter is what makes pinning actions by SHA sustainable,
   since a pinned SHA never updates itself.
+- **`.github/workflows/release.yml`** — publishes to PyPI from a pushed `v*` tag
+  using Trusted Publishing (OIDC), so there is no long-lived API token stored as
+  a repository secret. `scripts/release.py` owns the repository side of the tail
+  and this workflow owns the index side; the tag that script pushes is what
+  triggers it. The build job fails unless the tag matches the version read back
+  out of the **built wheel's metadata** rather than out of `pyproject.toml` —
+  the build is what gets uploaded, so the build is what has to agree with the
+  tag, and a source-file check would pass on exactly the mismatch this exists to
+  catch. A `workflow_dispatch` trigger selects the index so the first real
+  publish is never the first run; because the environment name forms part of the
+  OIDC claim, TestPyPI requires its own `testpypi` environment rather than
+  reusing `pypi`.
+- **A `lockfile` CI job** running `uv lock --check`. The test job installs with
+  pip and never reads `uv.lock`, so a fully green matrix said nothing about
+  whether the lock still matched `pyproject.toml` — and Dependabot only edits
+  manifests, so every dev-pin bump left the lock a little further behind. It is
+  its own job rather than a fourth step on each matrix leg because the lockfile
+  is not interpreter-specific. `uv` is deliberately unpinned there: a newer `uv`
+  re-resolving and failing the check is worth knowing about, and unlike the
+  formatting gate a failure blocks nothing that a single `uv lock` cannot clear.
 - **A non-blocking `pip-audit` CI step**, running against the versions actually
   resolved on each matrix leg. Dependabot reads manifests; nothing else in the
   pipeline looked at what a fresh install would really pull. Non-blocking on
@@ -76,6 +99,15 @@ additive endpoint is a minor bump.
   links are absolute `https://github.com/...` URLs, because a package index does
   not rewrite relative links against the repository — every one of them would
   have rendered as a 404 for anyone reading the description away from GitHub.
+- **`uv.lock` re-resolved against the current dev pins.** Five Dependabot bumps
+  had landed without it, so `uv lock --check` failed outright: the lock still
+  resolved pytest 8.3.5 and pytest-cov 6.1.1 against a manifest pinning 9.1.1
+  and 7.1.0, and carried no entry at all for mypy or types-requests. Anyone
+  following the documented `uv sync --all-extras --frozen` was getting a dev
+  toolchain that no longer matched. No runtime dependency moved. One practical
+  consequence for contributors: mypy now resolves through the lock and installs
+  as `.venv/bin/mypy`, so running the type gate no longer needs a throwaway
+  environment.
 - The CI coverage gate now measures `scripts/` alongside the package. A bug in
   the release automation lands a wrong version or a misplaced tag, which is the
   class of mistake it was written to prevent, so it is held to the same 100%
@@ -715,7 +747,8 @@ First runnable release — the foundation, built in eight phases (see
 - FastMCP stdio server, a first-class mock run mode, console entrypoint, and
   deployment / day-one verification docs.
 
-[Unreleased]: https://github.com/Lewis-Nield/blue-prism-v7-mcp/compare/v0.18.0...HEAD
+[Unreleased]: https://github.com/Lewis-Nield/blue-prism-v7-mcp/compare/v0.19.0...HEAD
+[0.19.0]: https://github.com/Lewis-Nield/blue-prism-v7-mcp/compare/v0.18.0...v0.19.0
 [0.18.0]: https://github.com/Lewis-Nield/blue-prism-v7-mcp/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/Lewis-Nield/blue-prism-v7-mcp/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/Lewis-Nield/blue-prism-v7-mcp/compare/v0.15.0...v0.16.0
