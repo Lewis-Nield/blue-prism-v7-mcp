@@ -12,6 +12,35 @@ permissions:
   contents: read
 
 jobs:
+  # The lockfile is not interpreter-specific, so this is its own job rather than
+  # a fourth step on every matrix leg.
+  #
+  # Why it exists: the test job installs with pip and never reads uv.lock, so a
+  # fully green matrix says nothing about whether the lock still matches
+  # pyproject.toml. Dependabot compounds it — it edits manifests only, so every
+  # dev-tool bump it lands leaves the lock behind. That is exactly how the lock
+  # came to resolve pytest 8.3.5 against a pyproject pinning 9.1.1, with no entry
+  # at all for mypy, while CI stayed green throughout.
+  #
+  # uv is deliberately NOT pinned here. A newer uv re-resolving the lock and
+  # failing this check is real information — it means the lock needs
+  # regenerating — and unlike the ruff format gate, a failure here blocks
+  # nothing a contributor cannot fix with a single `uv lock`.
+  lockfile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+
+      - name: Check uv.lock is in sync with pyproject.toml
+        run: |
+          python -m pip install --upgrade pip
+          pip install uv
+          uv lock --check
+
   test:
     runs-on: ubuntu-latest
     strategy:
