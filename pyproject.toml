@@ -59,7 +59,7 @@ dev = [
     "ruff==0.15.20",
     # Same reasoning: a stricter mypy or fresher requests stubs must land as a
     # deliberate bump, not a surprise CI failure.
-    "mypy==2.1.0",
+    "mypy==2.3.0",
     "types-requests==2.33.0.20260518",
     # Mutation testing — a periodic "are my tests real?" audit, not a per-commit
     # gate. See CONTRIBUTING.md. Pinned because the config schema is version-tied.
