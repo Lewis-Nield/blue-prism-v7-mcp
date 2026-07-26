@@ -53,7 +53,7 @@ pii = [
 ]
 dev = [
     "pytest==9.1.1",
-    "pytest-cov==6.1.1",
+    "pytest-cov==7.1.0",
     # Pinned exact now that ruff format --check gates CI: a new ruff's
     # formatter-style changes must not break every open branch overnight.
     "ruff==0.15.20",
