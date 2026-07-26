@@ -9,6 +9,17 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    ignore:
+      # `build-system.requires` is a floor, not a pin: `setuptools>=77` states the
+      # oldest version that can build this package (77 is where PEP 639 licence
+      # metadata landed), and raising it only narrows who can build from the sdist.
+      # Dependabot reads it as a dependency to keep current, so it opens a PR on
+      # every setuptools release — and when GHSA-h35f-9h28-mq5c landed it raised the
+      # floor rather than the version actually installed. Ignoring it costs only the
+      # automatic PR: the alert still shows in the security tab, and the fix belongs
+      # in `uv.lock` (`uv lock --upgrade-package setuptools`), which is where the
+      # resolved version lives.
+      - dependency-name: setuptools
 
   # The reason CI pins actions by SHA is only sustainable with this: a pinned
   # SHA never updates itself, and an unmaintained pin is its own risk.
