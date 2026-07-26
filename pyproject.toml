@@ -1,6 +1,6 @@
 [build-system]
 # >=77 for PEP 639 licence metadata (SPDX `license` expression + license-files).
-requires = ["setuptools>=77", "wheel"]
+requires = ["setuptools>=83.0.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
