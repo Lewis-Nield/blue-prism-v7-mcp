@@ -8,6 +8,19 @@ additive endpoint is a minor bump.
 ## [Unreleased]
 
 ### Added
+- **A Verification status section in the README, and `docs/VERIFICATION.md`.**
+  Nothing in the repository said that this has never been run against a live
+  estate — true, material, and something a reader would otherwise reasonably
+  assume the other way from "built against the 7.5.1 specification". The README
+  now states it plainly and grades it by tier: a wrong read assumption surfaces
+  as an error, while the control surface writes to a real estate, which is why
+  it ships disabled behind a capability gate, an audit, and a dry-run default.
+  `docs/VERIFICATION.md` is the fill-in report that closes the gap — 20 items
+  compiled from every "needs day-one verification" note accumulated since the
+  design, each with the exact call that settles it, ordered reads-first so the
+  half that touches nothing can be run on its own. It records the graduation
+  rule too: v1.0.0 ships when every item is confirmed or has a shipped
+  workaround. Linked from DEPLOYMENT.md, SECURITY.md and DESIGN.md.
 - **`scripts/release.py`** — the release tail (version bump → CHANGELOG roll →
   tag → GitHub release) as a stdlib-only script with `prepare` and `publish`
   subcommands, both supporting `--dry-run`. The tail is five files that have to

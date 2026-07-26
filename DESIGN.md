@@ -393,6 +393,12 @@ spec with no inner shape, so whether it arrives as the raw typed value or a
 sibling `dataType` and works either way, but the exact value shape wants a live
 check.
 
+Every item accumulated here — plus the read-side filter encodings, which fail
+silently because the API ignores an unrecognised parameter rather than rejecting
+it — is compiled into [docs/VERIFICATION.md](docs/VERIFICATION.md) as a fill-in
+report. v1.0.0 ships when every item there is confirmed or has a shipped
+workaround; that is the whole content of the v1.0.0 milestone.
+
 ---
 
 ## Architecture (layers, bottom-up)
