@@ -60,7 +60,7 @@ dev = [
     # Same reasoning: a stricter mypy or fresher requests stubs must land as a
     # deliberate bump, not a surprise CI failure.
     "mypy==2.3.0",
-    "types-requests==2.33.0.20260518",
+    "types-requests==2.33.0.20260712",
     # Mutation testing — a periodic "are my tests real?" audit, not a per-commit
     # gate. See CONTRIBUTING.md. Pinned because the config schema is version-tied.
     "mutmut==3.6.0",
@@ -113,15 +113,25 @@ warn_unused_ignores = true
 
 [tool.ruff]
 line-length = 100
+# Markdown is outside ruff's remit here. Its default file set grew to include
+# *.md, which puts the formatter in charge of the Python blocks in README.md —
+# including the column-aligned comments in the embedded-use example, which are
+# aligned because a reader scans them, not because a formatter left them there.
+extend-exclude = ["*.md"]
 
 [tool.ruff.lint]
-# extend-select keeps ruff's curated defaults (E4/E7/E9 + F) and ADDS flake8-
-# bugbear (B) — static catches for a class of latent bugs (mutable default args,
-# calls in defaults, except-without-bind, …) that don't show on the happy path.
-# Using extend-select rather than select avoids pulling in the *full* E group
-# (e.g. E501 line-length), which ruff's defaults deliberately leave to the
-# formatter. See CONTRIBUTING.md.
-extend-select = ["B"]
+# E4/E7/E9 + F is the set ruff itself selects by default; B (flake8-bugbear) is
+# the deliberate addition — static catches for a class of latent bugs (mutable
+# default args, calls in defaults, except-without-bind, …) that don't show on
+# the happy path. The full E group stays out: E501 line-length is the
+# formatter's job. See CONTRIBUTING.md.
+#
+# Listed explicitly rather than inherited via extend-select. Inheriting means a
+# ruff release can redefine the standard this repo is held to — 0.16.0 widened
+# its defaults by roughly fourteen rule families and turned every open branch
+# red overnight. Adopting a rule is a decision with a diff attached; it belongs
+# in a commit that argues for it, not in a version bump.
+select = ["E4", "E7", "E9", "F", "B"]
 
 [tool.mutmut]
 # Mutate the package only (not tests). mutmut copies the source into a mutants/
