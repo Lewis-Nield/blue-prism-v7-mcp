@@ -17,7 +17,7 @@ is scrubbed at the tool boundary (optional Presidio backend).
 
 ## Status
 
-**Current release: v0.18.0** — see
+**Current release: v0.19.0** — see
 [CHANGELOG.md](https://github.com/Lewis-Nield/blue-prism-v7-mcp/blob/main/CHANGELOG.md)
 for the full release history. The **v0.1.0 foundation** was built in eight
 phases against the plan in
