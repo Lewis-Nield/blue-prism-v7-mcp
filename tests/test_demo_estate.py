@@ -96,6 +96,21 @@ class TestDemoEstateWorkerSessionCoherence:
         stale_elapsed_minutes = (now - stale_start).total_seconds() / 60
         assert stale_elapsed_minutes > 10 * stale_baseline
 
+    def test_licence_usage_matches_the_estate_it_describes(self):
+        # A7: concurrentSessionsUsed/runtimeResourcesUsed must be derived from
+        # the fixture, not hand-picked, or a downstream utilisation-against-
+        # licence reading traces to nothing.
+        client = demo_estate()
+        limits = client.get_current_limits_and_usage()
+        running_sessions = sum(1 for s in client._sessions if s["status"] == "Running")
+        non_offline_workers = sum(1 for r in client._resources if r["databaseStatus"] != "Offline")
+        assert limits["concurrentSessionsUsed"] == running_sessions
+        assert limits["runtimeResourcesUsed"] == non_offline_workers
+        # Headroom against the authored limits is deliberate — a demo with no
+        # slack left looks broken, not busy.
+        assert limits["concurrentSessionsUsed"] < limits["concurrentSessionsLimit"]
+        assert limits["runtimeResourcesUsed"] < limits["runtimeResourcesLimit"]
+
 
 class TestDemoEstateQueueItemBacking:
     """A5: every queue's declared counts must equal what a drill-in actually
