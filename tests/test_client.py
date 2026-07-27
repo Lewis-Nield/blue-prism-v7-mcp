@@ -2569,6 +2569,86 @@ class TestQueueDrainingSessions:
         session = client.get_session(sid)
         assert session["status"] == "Stopped"
 
+    def test_item_reads_settle_the_drain_themselves(self):
+        # An item read must not lag a count read: a consumer that polls items
+        # without ever calling get_queues() still sees the drain, and the two
+        # reads agree whichever order they are made in.
+        now, advance = self._clock("2026-08-01T09:00:00Z")
+        client = self._client(now)
+        client.start_process("p1", "r1")
+
+        advance(seconds=6)
+        items = {i["id"]: i for i in client.get_queue_items("q1")}  # items read FIRST
+        assert items["item-1"]["state"] == "Completed"
+        assert items["item-2"]["state"] == "Locked"
+
+        queue = client.get_queue("q1")
+        assert queue["completedItemCount"] == 1
+        assert queue["pendingItemCount"] == 1
+        assert client.get_queue_item("item-1")["state"] == "Completed"
+        composition = client.get_queue_compositions(["q1"])[0]
+        assert composition["completed"] == 1
+        assert composition["locked"] == 1
+
+    def test_stop_keeps_the_work_the_session_had_already_done(self):
+        # Stopping without an intervening read must not rewind the queue: the
+        # ticks worked before the stop stand, and only the item still held is
+        # handed back to Pending.
+        now, advance = self._clock("2026-08-01T09:00:00Z")
+        client = self._client(now)
+        result = client.start_process("p1", "r1")
+
+        advance(seconds=6)  # one tick worked, item-2 now held
+        client.stop_session(result["sessionId"])
+
+        items = {i["id"]: i for i in client.get_queue_items("q1")}
+        assert items["item-1"]["state"] == "Completed"
+        assert items["item-2"]["state"] == "Pending"
+
+        queue = client.get_queue("q1")
+        assert queue["completedItemCount"] == 1
+        assert queue["pendingItemCount"] == 2
+        assert queue["lockedItemCount"] == 0
+        assert queue["totalItemCount"] == 3
+
+    def test_sub_tick_remainder_carries_into_the_next_pass(self):
+        # Reading on a cadence that is not a multiple of the tick must not
+        # shed work: three 4s reads span 12s, which is two full 5s ticks.
+        now, advance = self._clock("2026-08-01T09:00:00Z")
+        client = self._client(now)
+        client.start_process("p1", "r1")
+
+        for _ in range(3):
+            advance(seconds=4)
+            client.get_queues()
+
+        queue = client.get_queue("q1")
+        assert queue["completedItemCount"] == 2
+        assert queue["lockedItemCount"] == 1
+
+    def test_drained_items_are_stamped_one_tick_apart(self):
+        # A batch settled in one pass reads as a run of completions spaced by
+        # the tick, not as every item completing at the same instant.
+        now, advance = self._clock("2026-08-01T09:00:00Z")
+        client = self._client(now)
+        client.start_process("p1", "r1")
+
+        advance(seconds=11)
+        items = {i["id"]: i for i in client.get_queue_items("q1")}
+        assert items["item-1"]["completedDate"] == "2026-08-01T09:00:05Z"
+        assert items["item-2"]["completedDate"] == "2026-08-01T09:00:10Z"
+        assert items["item-3"]["lockedDate"] == "2026-08-01T09:00:10Z"
+
+    def test_session_end_time_is_the_last_completion_not_the_read(self):
+        now, advance = self._clock("2026-08-01T09:00:00Z")
+        client = self._client(now, item_count=2)
+        result = client.start_process("p1", "r1")
+
+        advance(seconds=300)  # long after the two items were worked
+        session = client.get_session(result["sessionId"])
+        assert session["status"] == "Completed"
+        assert session["endTime"] == "2026-08-01T09:00:10Z"
+
     def test_no_matching_queue_starts_a_plain_session(self):
         now, _advance = self._clock("2026-08-01T09:00:00Z")
         client = self._client(now)

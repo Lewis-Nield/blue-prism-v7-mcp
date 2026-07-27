@@ -1040,6 +1040,12 @@ class MockBPClient:
         next Pending item after each — not one per settle call, so a
         consumer's own read cadence can't pace the drain slower than the tick.
         Ends the session itself once its queue has nothing left Pending.
+
+        Each item is stamped at its own tick boundary rather than at ``now``,
+        and the next lock inherits that stamp: the sub-tick remainder carries
+        into the following pass (so a read cadence that is not a multiple of
+        the tick doesn't shed work), and a drained batch reads as a run of
+        completions spaced one tick apart rather than as one spike.
         """
         item_id = self._session_locks.get(session_id)
         item = self._find_item_by_id(item_id) if item_id else None
@@ -1054,23 +1060,24 @@ class MockBPClient:
         )
         ticks = int((now - locked_at) / self._drain_tick)
         resource_name = session.get("resourceName", "")
-        for _ in range(ticks):
+        for tick in range(1, ticks + 1):
+            completed_at = locked_at + self._drain_tick * tick
             item["state"] = "Completed"
-            item["completedDate"] = self._fmt(now)
+            item["completedDate"] = self._fmt(completed_at)
             item["workTimeInSeconds"] = self._parse_hms(
                 queue_row.get("averageWorkTime", "00:01:00")
             )
             item["attemptWorkTimeInSeconds"] = item["workTimeInSeconds"]
-            item["lastUpdated"] = self._fmt(now)
+            item["lastUpdated"] = self._fmt(completed_at)
             queue_row["lockedItemCount"] = max(0, queue_row.get("lockedItemCount", 0) - 1)
             queue_row["completedItemCount"] = queue_row.get("completedItemCount", 0) + 1
             self._recount_queue(queue_row)
 
             next_item = self._oldest_pending_item(queue_row["id"])
             if next_item is None:
-                self._complete_session_run(session_id, session, now)
+                self._complete_session_run(session_id, session, completed_at)
                 return
-            self._lock_item(next_item, queue_row, session_id, resource_name, now)
+            self._lock_item(next_item, queue_row, session_id, resource_name, completed_at)
             item = next_item
 
     def _settle(self) -> None:
@@ -1129,6 +1136,7 @@ class MockBPClient:
         # Strict like the live endpoint: id only (names resolve at the tool
         # layer), and an unknown id raises rather than returning None — the
         # live client surfaces a 404 HTTPError here.
+        self._settle()
         for queue in self._queues:
             if queue.get("id") == queue_id:
                 return dict(queue)
@@ -1190,6 +1198,11 @@ class MockBPClient:
         sort_by: str | None = None,
         max_records: int | None = None,
     ) -> list[dict]:
+        # Settle first, like every other read: a draining session moves items
+        # between states, so item reads must not lag the counts get_queues()
+        # returns (a consumer reading items before queues would otherwise see
+        # a backlog its own next call reports as cleared).
+        self._settle()
         items = [i for i in self._queue_items if i.get("queue") == queue_id]
         if state:
             items = [i for i in items if i.get("state") == state]
@@ -1219,6 +1232,7 @@ class MockBPClient:
         # (`slaDateTime`) where the NoData list/attempt rows spell it
         # `slaDatetime` (the API's own typo) — rename on the way out so the
         # single-item shape matches the live schema exactly.
+        self._settle()
         for item in self._queue_items:
             if item.get("id") == item_id:
                 row = {k: v for k, v in item.items() if k != "queue"}
@@ -1340,6 +1354,7 @@ class MockBPClient:
         # Mirror the live aggregate: one WorkQueueComposition per requested id
         # that exists, carrying the per-state counts (deferred is the datum the
         # WorkQueueSummary row lacks). Unknown ids are skipped, like the live API.
+        self._settle()
         rows = []
         for queue in self._queues:
             qid = queue.get("id")
@@ -1463,6 +1478,10 @@ class MockBPClient:
     def start_process(
         self, process_id: str, resource_id: str, parameters: dict | None = None
     ) -> dict:
+        # Settle before mutating: the queue this process works may already be
+        # draining under another session, and the item this one locks must be
+        # chosen against the estate as of now, not as of the last read.
+        self._settle()
         self._session_counter += 1
         session_id = f"e8a9d7c2-5f10-4b3e-bd64-{self._session_counter:012d}"
         if parameters:
@@ -1512,6 +1531,10 @@ class MockBPClient:
         return {"sessionId": session_id, "status": "Running"}
 
     def stop_session(self, session_id: str) -> dict:
+        # Settle before mutating, or a stop issued without an intervening read
+        # would discard every tick the session had already worked and hand its
+        # item back to Pending — rewinding the queue to its pre-start state.
+        self._settle()
         session = self._find_session(session_id)
         if session is not None:
             was_live = session.get("status") in ("Running", "Stopping", "Warning")
