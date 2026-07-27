@@ -253,3 +253,53 @@ class TestDemoEstateQueueItemCoherence:
         breached = client.get_queue_items(_QUEUE_INVOICES, state="Pending", within_sla=False)
         assert breached
         assert len(breached) < sum(1 for i in pending if i["queue"] == _QUEUE_INVOICES)
+
+
+class TestDemoEstateScheduleTrigger:
+    """A9: triggering a schedule must not just log itself — it should start
+    its tasks' sessions exactly as a manual start_process would, so the
+    "stalled queue" (Payments, deliberately holding no in-flight lock — see
+    _DEMO_QUEUE_LIVE_LOCKS) actually starts draining once the schedule that
+    works it fires.
+    """
+
+    def test_triggering_the_nightly_payment_run_starts_its_tasks(self):
+        client = demo_estate()
+        payments_before = next(q for q in client.get_queues() if q["name"] == "Payments")
+        assert payments_before["lockedItemCount"] == 0
+
+        resources_before = {r["name"]: r["activeSessionCount"] for r in client.get_resources()}
+
+        def _payment_runs(resource_name):
+            return [
+                s
+                for s in client.get_sessions()
+                if s["status"] == "Running"
+                and s["resourceName"] == resource_name
+                and s["processName"] == "Payment Run"
+            ]
+
+        f02_before = len(_payment_runs("BOT-F02"))
+        f03_before = len(_payment_runs("BOT-F03"))
+
+        client.trigger_schedule("Nightly Payment Run")
+
+        # Build BACS File and Dispatch Payments both fire on BOT-F02; Alert
+        # On-Call fires on BOT-F03 — all at once, no chaining, on top of
+        # whatever in-flight runs the estate already held on those bots.
+        assert len(_payment_runs("BOT-F02")) == f02_before + 2
+        assert len(_payment_runs("BOT-F03")) == f03_before + 1
+
+        resources = {r["name"]: r for r in client.get_resources()}
+        assert resources["BOT-F02"]["displayStatus"] == "Working"
+        assert resources["BOT-F02"]["activeSessionCount"] == resources_before["BOT-F02"] + 2
+
+        payments_after = next(q for q in client.get_queues() if q["name"] == "Payments")
+        assert payments_after["lockedItemCount"] == 3
+        assert payments_after["pendingItemCount"] == payments_before["pendingItemCount"] - 3
+        assert payments_after["totalItemCount"] == payments_before["totalItemCount"]
+
+        # The schedule's own log still settles exactly as before A9.
+        last = client.get_last_schedule_run(2)
+        assert last is not None
+        assert last["status"] == "running"

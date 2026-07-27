@@ -1674,7 +1674,34 @@ class MockBPClient:
         }
         self._schedule_logs.setdefault(sid, []).append(log_row)
         self._live_schedule_log_ids.add(next_id)
+        self._start_schedule_task_sessions(sid)
         return {"schedule": schedule_id, "status": "Triggered"}
+
+    def _start_schedule_task_sessions(self, schedule_id: str) -> None:
+        """Start a session for every task session under a triggered schedule.
+
+        Fires every task's sessions at once — no onSuccessTaskId chaining,
+        delayAfterEnd or failFastOnError, which is scheduler semantics beyond
+        what a demo fixture needs. Runs each through start_process itself, so
+        a triggered schedule occupies workers and locks queue items exactly
+        as a manual start does.
+        """
+        for task in self._schedule_tasks.get(schedule_id, []):
+            for task_session in self._task_sessions.get(str(task["id"]), []):
+                process_id = next(
+                    (
+                        p["processId"]
+                        for p in self._processes
+                        if p["processName"] == task_session["processName"]
+                    ),
+                    None,
+                )
+                resource_id = next(
+                    (r["id"] for r in self._resources if r["name"] == task_session["resourceName"]),
+                    None,
+                )
+                if process_id is not None and resource_id is not None:
+                    self.start_process(process_id, resource_id)
 
     def create_queue_items(self, queue_id: str, items: list[dict]) -> dict:
         queue = next((q for q in self._queues if q["id"] == queue_id), None)
