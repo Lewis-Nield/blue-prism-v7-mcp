@@ -2183,6 +2183,23 @@ class TestWriteFidelityJourneys:
         log = client.get_session_log(sid)
         assert log[0]["stageType"] == "End"
 
+    def test_a_completed_flat_session_contributes_minutes_to_its_workers_utilization(self):
+        # A8: resource_utilization must respond to an action, not sit as a
+        # static seed no run can move.
+        now, advance = self._clock("2026-08-01T09:00:00Z")
+        client = MockBPClient(now_fn=now, settle_after=__import__("datetime").timedelta(minutes=5))
+        client.start_process(
+            "7c0e4f2b-93d1-4b66-a2af-000000000201", "5d2c8e0a-71b4-4a8e-9f30-000000000001"
+        )
+
+        advance(minutes=6)
+        client.get_sessions()  # triggers _settle, completing the run
+
+        rows = client.get_resource_utilization("2026-08-01")
+        row = next(r for r in rows if r["digitalWorkerName"] == "BOT-01")
+        assert row["utilizationDate"] == "2026-08-01"
+        assert row["usages"][9] == 6
+
     def test_seeded_fixtures_untouched_by_settle(self):
         now, advance = self._clock()
         client = MockBPClient(now_fn=now, settle_after=__import__("datetime").timedelta(minutes=5))
@@ -2648,6 +2665,19 @@ class TestQueueDrainingSessions:
         session = client.get_session(result["sessionId"])
         assert session["status"] == "Completed"
         assert session["endTime"] == "2026-08-01T09:00:10Z"
+
+    def test_each_drained_item_contributes_minutes_to_the_workers_utilization(self):
+        # A8: a queue-bound drain must move the duty-cycle reading too, one
+        # item at a time — not just a flat session's own elapsed time.
+        now, advance = self._clock("2026-08-01T09:00:00Z")
+        client = self._client(now, item_count=2)
+        client.start_process("p1", "r1")
+
+        advance(seconds=11)  # both items drain, one tick apart
+        rows = client.get_resource_utilization("2026-08-01")
+        row = next(r for r in rows if r["digitalWorkerName"] == "BOT-X")
+        assert row["utilizationDate"] == "2026-08-01"
+        assert row["usages"][9] == 2  # 1 minute per item (averageWorkTime 00:00:10)
 
     def test_no_matching_queue_starts_a_plain_session(self):
         now, _advance = self._clock("2026-08-01T09:00:00Z")
