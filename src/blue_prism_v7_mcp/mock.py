@@ -811,6 +811,7 @@ class MockBPClient:
         resource_utilization: list[dict] | None = None,
         now_fn: Callable[[], datetime] | None = None,
         settle_after: timedelta = timedelta(minutes=5),
+        drain_tick: timedelta = timedelta(seconds=5),
     ) -> None:
         self._resources = (
             resources if resources is not None else [dict(r) for r in _DEFAULT_RESOURCES]
@@ -899,8 +900,15 @@ class MockBPClient:
         self._session_parameters: dict[str, dict] = {}
         self._now: Callable[[], datetime] = now_fn or (lambda: datetime.now(timezone.utc))
         self._settle_after = settle_after
+        self._drain_tick = drain_tick
         self._live_run_ids: set[str] = set()
         self._live_schedule_log_ids: set[int] = set()
+        # sessionId -> the queue item id it currently holds locked. A session
+        # enters this dict when start_process finds a queue whose items match
+        # its process (see _lock_next_pending_item) and leaves it either when
+        # its queue empties (_drain_session_queue) or it is stopped mid-drain
+        # (stop_session), which hands the held item back to Pending.
+        self._session_locks: dict[str, str] = {}
 
     def clear_cache(self) -> None:
         """No-op — the mock has no cache, but keeps the interface identical."""
@@ -943,39 +951,152 @@ class MockBPClient:
             + queue_row.get("exceptionedItemCount", 0)
         )
 
+    def _parse_hms(self, value: str) -> int:
+        hours, minutes, seconds = (int(part) for part in value.split(":"))
+        return hours * 3600 + minutes * 60 + seconds
+
+    def _find_item_by_id(self, item_id: str) -> dict | None:
+        for item in self._queue_items:
+            if item.get("id") == item_id:
+                return item
+        return None
+
+    def _find_queue(self, queue_id: str) -> dict | None:
+        return next((q for q in self._queues if q["id"] == queue_id), None)
+
+    def _oldest_pending_item(self, queue_id: str) -> dict | None:
+        pending = [
+            i
+            for i in self._queue_items
+            if i.get("queue") == queue_id and i.get("state") == "Pending"
+        ]
+        if not pending:
+            return None
+        return min(pending, key=lambda i: i.get("loadedDate") or "")
+
+    def _lock_item(
+        self, item: dict, queue_row: dict, session_id: str, resource_name: str, now: datetime
+    ) -> None:
+        item["state"] = "Locked"
+        item["lockedDate"] = self._fmt(now)
+        item["resource"] = resource_name
+        item["sessionId"] = session_id
+        item["lastUpdated"] = self._fmt(now)
+        queue_row["pendingItemCount"] = max(0, queue_row.get("pendingItemCount", 0) - 1)
+        queue_row["lockedItemCount"] = queue_row.get("lockedItemCount", 0) + 1
+        self._recount_queue(queue_row)
+        self._session_locks[session_id] = item["id"]
+
+    def _lock_next_pending_item(
+        self, process_name: str, session_id: str, resource_name: str, now: datetime
+    ) -> None:
+        """Lock the oldest Pending item in the queue this process works.
+
+        Matches on queue items' processName == the started process's name —
+        the only generic link the fixture has. If several queues match, the
+        one with the most items wins. A process with no matching queue, or a
+        matching queue with nothing Pending, starts exactly as today.
+        """
+        item_counts: dict[str, int] = {}
+        for row in self._queue_items:
+            if row.get("processName") == process_name:
+                qid = row["queue"]
+                item_counts[qid] = item_counts.get(qid, 0) + 1
+        if not item_counts:
+            return
+        queue_id = max(item_counts, key=lambda qid: item_counts[qid])
+        queue_row = self._find_queue(queue_id)
+        if queue_row is None:
+            return
+        item = self._oldest_pending_item(queue_id)
+        if item is None:
+            return
+        self._lock_item(item, queue_row, session_id, resource_name, now)
+
+    def _complete_session_run(self, session_id: str, session: dict, now: datetime) -> None:
+        session["status"] = "Completed"
+        session["endTime"] = self._fmt(now)
+        self._release_worker(session.get("resourceId", ""), session.get("resourceName", ""))
+        self._limits_and_usage["concurrentSessionsUsed"] = max(
+            0, self._limits_and_usage.get("concurrentSessionsUsed", 1) - 1
+        )
+        log = self._session_logs.get(session_id)
+        if log is not None:
+            max_log = max((e["logNumber"] for e in log), default=0)
+            log.append(
+                {
+                    "logNumber": max_log + 1,
+                    "stageName": "End",
+                    "stageType": "End",
+                    "result": "",
+                    "resourceStartTime": self._fmt(now),
+                }
+            )
+        self._live_run_ids.discard(session_id)
+        self._session_locks.pop(session_id, None)
+
+    def _drain_session_queue(self, session_id: str, session: dict, now: datetime) -> None:
+        """Complete floor(elapsed / drain_tick) items in one pass, locking the
+        next Pending item after each — not one per settle call, so a
+        consumer's own read cadence can't pace the drain slower than the tick.
+        Ends the session itself once its queue has nothing left Pending.
+
+        Each item is stamped at its own tick boundary rather than at ``now``,
+        and the next lock inherits that stamp: the sub-tick remainder carries
+        into the following pass (so a read cadence that is not a multiple of
+        the tick doesn't shed work), and a drained batch reads as a run of
+        completions spaced one tick apart rather than as one spike.
+        """
+        item_id = self._session_locks.get(session_id)
+        item = self._find_item_by_id(item_id) if item_id else None
+        if item is None:
+            self._session_locks.pop(session_id, None)
+            return
+        queue_row = self._find_queue(item["queue"])
+        if queue_row is None:
+            return
+        locked_at = datetime.strptime(item["lockedDate"], "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc
+        )
+        ticks = int((now - locked_at) / self._drain_tick)
+        resource_name = session.get("resourceName", "")
+        for tick in range(1, ticks + 1):
+            completed_at = locked_at + self._drain_tick * tick
+            item["state"] = "Completed"
+            item["completedDate"] = self._fmt(completed_at)
+            item["workTimeInSeconds"] = self._parse_hms(
+                queue_row.get("averageWorkTime", "00:01:00")
+            )
+            item["attemptWorkTimeInSeconds"] = item["workTimeInSeconds"]
+            item["lastUpdated"] = self._fmt(completed_at)
+            queue_row["lockedItemCount"] = max(0, queue_row.get("lockedItemCount", 0) - 1)
+            queue_row["completedItemCount"] = queue_row.get("completedItemCount", 0) + 1
+            self._recount_queue(queue_row)
+
+            next_item = self._oldest_pending_item(queue_row["id"])
+            if next_item is None:
+                self._complete_session_run(session_id, session, completed_at)
+                return
+            self._lock_item(next_item, queue_row, session_id, resource_name, completed_at)
+            item = next_item
+
     def _settle(self) -> None:
         now = self._now()
-        settled_runs: set[str] = set()
         for sid in list(self._live_run_ids):
             session = self._find_session(sid)
             if session is None:
                 self._live_run_ids.discard(sid)
+                self._session_locks.pop(sid, None)
+                continue
+            if sid in self._session_locks:
+                self._drain_session_queue(sid, session, now)
                 continue
             start = datetime.strptime(session["startTime"], "%Y-%m-%dT%H:%M:%SZ").replace(
                 tzinfo=timezone.utc
             )
             if now - start < self._settle_after:
                 continue
-            session["status"] = "Completed"
-            session["endTime"] = self._fmt(now)
-            self._release_worker(session.get("resourceId", ""), session.get("resourceName", ""))
-            self._limits_and_usage["concurrentSessionsUsed"] = max(
-                0, self._limits_and_usage.get("concurrentSessionsUsed", 1) - 1
-            )
-            log = self._session_logs.get(sid)
-            if log is not None:
-                max_log = max((e["logNumber"] for e in log), default=0)
-                log.append(
-                    {
-                        "logNumber": max_log + 1,
-                        "stageName": "End",
-                        "stageType": "End",
-                        "result": "",
-                        "resourceStartTime": self._fmt(now),
-                    }
-                )
-            settled_runs.add(sid)
-        self._live_run_ids -= settled_runs
+            self._complete_session_run(sid, session, now)
 
         settled_logs: set[int] = set()
         for log_id in list(self._live_schedule_log_ids):
@@ -1015,6 +1136,7 @@ class MockBPClient:
         # Strict like the live endpoint: id only (names resolve at the tool
         # layer), and an unknown id raises rather than returning None — the
         # live client surfaces a 404 HTTPError here.
+        self._settle()
         for queue in self._queues:
             if queue.get("id") == queue_id:
                 return dict(queue)
@@ -1076,6 +1198,11 @@ class MockBPClient:
         sort_by: str | None = None,
         max_records: int | None = None,
     ) -> list[dict]:
+        # Settle first, like every other read: a draining session moves items
+        # between states, so item reads must not lag the counts get_queues()
+        # returns (a consumer reading items before queues would otherwise see
+        # a backlog its own next call reports as cleared).
+        self._settle()
         items = [i for i in self._queue_items if i.get("queue") == queue_id]
         if state:
             items = [i for i in items if i.get("state") == state]
@@ -1105,6 +1232,7 @@ class MockBPClient:
         # (`slaDateTime`) where the NoData list/attempt rows spell it
         # `slaDatetime` (the API's own typo) — rename on the way out so the
         # single-item shape matches the live schema exactly.
+        self._settle()
         for item in self._queue_items:
             if item.get("id") == item_id:
                 row = {k: v for k, v in item.items() if k != "queue"}
@@ -1226,6 +1354,7 @@ class MockBPClient:
         # Mirror the live aggregate: one WorkQueueComposition per requested id
         # that exists, carrying the per-state counts (deferred is the datum the
         # WorkQueueSummary row lacks). Unknown ids are skipped, like the live API.
+        self._settle()
         rows = []
         for queue in self._queues:
             qid = queue.get("id")
@@ -1349,6 +1478,10 @@ class MockBPClient:
     def start_process(
         self, process_id: str, resource_id: str, parameters: dict | None = None
     ) -> dict:
+        # Settle before mutating: the queue this process works may already be
+        # draining under another session, and the item this one locks must be
+        # chosen against the estate as of now, not as of the last read.
+        self._settle()
         self._session_counter += 1
         session_id = f"e8a9d7c2-5f10-4b3e-bd64-{self._session_counter:012d}"
         if parameters:
@@ -1381,6 +1514,7 @@ class MockBPClient:
             }
         )
         self._occupy_worker(resource_id, resource_name)
+        self._lock_next_pending_item(process_name, session_id, resource_name, now)
         self._limits_and_usage["concurrentSessionsUsed"] = (
             self._limits_and_usage.get("concurrentSessionsUsed", 0) + 1
         )
@@ -1397,6 +1531,10 @@ class MockBPClient:
         return {"sessionId": session_id, "status": "Running"}
 
     def stop_session(self, session_id: str) -> dict:
+        # Settle before mutating, or a stop issued without an intervening read
+        # would discard every tick the session had already worked and hand its
+        # item back to Pending — rewinding the queue to its pre-start state.
+        self._settle()
         session = self._find_session(session_id)
         if session is not None:
             was_live = session.get("status") in ("Running", "Stopping", "Warning")
@@ -1408,6 +1546,22 @@ class MockBPClient:
                     0, self._limits_and_usage.get("concurrentSessionsUsed", 1) - 1
                 )
             self._live_run_ids.discard(session_id)
+            held_item_id = self._session_locks.pop(session_id, None)
+            if held_item_id is not None:
+                held_item = self._find_item_by_id(held_item_id)
+                if held_item is not None:
+                    held_item["state"] = "Pending"
+                    held_item["lockedDate"] = None
+                    held_item["resource"] = None
+                    held_item["sessionId"] = None
+                    held_item["lastUpdated"] = self._fmt(self._now())
+                    queue_row = self._find_queue(held_item["queue"])
+                    if queue_row is not None:
+                        queue_row["lockedItemCount"] = max(
+                            0, queue_row.get("lockedItemCount", 0) - 1
+                        )
+                        queue_row["pendingItemCount"] = queue_row.get("pendingItemCount", 0) + 1
+                        self._recount_queue(queue_row)
             log = self._session_logs.get(session_id)
             if log is not None:
                 max_log = max((e["logNumber"] for e in log), default=0)

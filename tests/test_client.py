@@ -2373,6 +2373,344 @@ class TestWriteFidelityJourneys:
         client._occupy_worker("no-such-id", "no-such-name")
 
 
+class TestQueueDrainingSessions:
+    """A6/A6b: a session locks one queue item at a time and drains its queue,
+    rather than completing on a flat settle_after with the queue untouched."""
+
+    @staticmethod
+    def _clock(start_iso):
+        from datetime import datetime, timedelta, timezone
+
+        current = [datetime.strptime(start_iso, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)]
+
+        def now():
+            return current[0]
+
+        def advance(seconds=0):
+            current[0] += timedelta(seconds=seconds)
+
+        return now, advance
+
+    @staticmethod
+    def _item(item_id, key_value, loaded_iso):
+        return {
+            "queue": "q1",
+            "id": item_id,
+            "priority": 1,
+            "ident": int(item_id[-1]),
+            "state": "Pending",
+            "keyValue": key_value,
+            "status": "",
+            "tags": [],
+            "attemptNumber": 1,
+            "loadedDate": loaded_iso,
+            "deferredDate": None,
+            "lockedDate": None,
+            "lastUpdated": loaded_iso,
+            "workTimeInSeconds": 0,
+            "attemptWorkTimeInSeconds": 0,
+            "exceptionReason": None,
+            "resource": None,
+            "sessionId": None,
+            "sla": 60,
+            "slaDatetime": None,
+            "processName": "Widget Run",
+            "isSuggested": False,
+        }
+
+    def _client(self, now, item_count=3, drain_tick_seconds=5):
+        from datetime import timedelta
+
+        items = [
+            self._item(f"item-{n}", f"KEY-{n}", _ts(item_count - n))
+            for n in range(1, item_count + 1)
+        ]
+        queue = {
+            "id": "q1",
+            "name": "Widgets",
+            "keyField": "Item Key",
+            "status": "Running",
+            "isEncrypted": False,
+            "maxAttempts": 3,
+            "pendingItemCount": item_count,
+            "completedItemCount": 0,
+            "lockedItemCount": 0,
+            "exceptionedItemCount": 0,
+            "totalItemCount": item_count,
+            "averageWorkTime": "00:00:10",
+            "groupName": "Test",
+        }
+        process = {"processId": "p1", "processName": "Widget Run"}
+        resource = {
+            "id": "r1",
+            "name": "BOT-X",
+            "poolName": "Test Pool",
+            "groupName": "Test",
+            "attributes": [],
+            "activeSessionCount": 0,
+            "warningSessionCount": 0,
+            "pendingSessionCount": 0,
+            "databaseStatus": "Ready",
+            "displayStatus": "Idle",
+            "resourceType": "Enterprise",
+        }
+        return MockBPClient(
+            resources=[resource],
+            queues=[queue],
+            processes=[process],
+            sessions=[],
+            queue_items=items,
+            now_fn=now,
+            drain_tick=timedelta(seconds=drain_tick_seconds),
+        )
+
+    def test_start_process_locks_the_oldest_pending_item(self):
+        now, _advance = self._clock("2026-08-01T09:00:00Z")
+        client = self._client(now)
+        result = client.start_process("p1", "r1")
+        sid = result["sessionId"]
+
+        locked = next(i for i in client.get_queue_items("q1") if i["id"] == "item-1")
+        assert locked["state"] == "Locked"
+        assert locked["sessionId"] == sid
+        assert locked["resource"] == "BOT-X"
+
+        queue = next(q for q in client.get_queues() if q["id"] == "q1")
+        assert queue["pendingItemCount"] == 2
+        assert queue["lockedItemCount"] == 1
+        assert queue["totalItemCount"] == 3
+
+        bot = next(r for r in client.get_resources() if r["id"] == "r1")
+        assert bot["displayStatus"] == "Working"
+
+    def test_ticks_complete_items_and_lock_the_next_one(self):
+        now, advance = self._clock("2026-08-01T09:00:00Z")
+        client = self._client(now)
+        result = client.start_process("p1", "r1")
+        sid = result["sessionId"]
+
+        advance(seconds=6)  # one drain_tick (5s) elapsed
+        queue = next(q for q in client.get_queues() if q["id"] == "q1")  # triggers _settle
+        items = {i["id"]: i for i in client.get_queue_items("q1")}
+        assert items["item-1"]["state"] == "Completed"
+        assert items["item-1"]["workTimeInSeconds"] == 10
+        assert items["item-2"]["state"] == "Locked"
+        assert items["item-2"]["sessionId"] == sid
+
+        assert queue["completedItemCount"] == 1
+        assert queue["lockedItemCount"] == 1
+        assert queue["pendingItemCount"] == 1
+
+        session = client.get_session(sid)
+        assert session["status"] == "Running"
+
+    def test_multiple_ticks_settle_in_one_pass(self):
+        # A consumer's own read cadence must not pace the drain slower than
+        # the tick — two ticks' worth of elapsed time completes two items in
+        # a single _settle() call, not one per call.
+        now, advance = self._clock("2026-08-01T09:00:00Z")
+        client = self._client(now)
+        client.start_process("p1", "r1")
+
+        advance(seconds=11)  # two full 5s ticks
+        queue = next(q for q in client.get_queues() if q["id"] == "q1")  # triggers _settle
+        items = {i["id"]: i for i in client.get_queue_items("q1")}
+        assert items["item-1"]["state"] == "Completed"
+        assert items["item-2"]["state"] == "Completed"
+        assert items["item-3"]["state"] == "Locked"
+
+        assert queue["completedItemCount"] == 2
+        assert queue["lockedItemCount"] == 1
+        assert queue["pendingItemCount"] == 0
+
+    def test_session_ends_itself_once_the_queue_is_empty(self):
+        now, advance = self._clock("2026-08-01T09:00:00Z")
+        client = self._client(now, item_count=2)
+        usage_before = client.get_current_limits_and_usage()["concurrentSessionsUsed"]
+        result = client.start_process("p1", "r1")
+        sid = result["sessionId"]
+
+        advance(seconds=11)  # both items drain
+        session = client.get_session(sid)
+        assert session["status"] == "Completed"
+        assert session["endTime"] is not None
+
+        queue = next(q for q in client.get_queues() if q["id"] == "q1")
+        assert queue["pendingItemCount"] == 0
+        assert queue["lockedItemCount"] == 0
+        assert queue["completedItemCount"] == 2
+
+        bot = next(r for r in client.get_resources() if r["id"] == "r1")
+        assert bot["displayStatus"] == "Idle"
+        assert bot["activeSessionCount"] == 0
+        usage = client.get_current_limits_and_usage()
+        assert usage["concurrentSessionsUsed"] == usage_before
+
+    def test_stop_session_mid_drain_returns_the_held_item_to_pending(self):
+        now, advance = self._clock("2026-08-01T09:00:00Z")
+        client = self._client(now)
+        result = client.start_process("p1", "r1")
+        sid = result["sessionId"]
+
+        advance(seconds=2)  # short of a tick — item-1 stays locked
+        client.stop_session(sid)
+
+        item = next(i for i in client.get_queue_items("q1") if i["id"] == "item-1")
+        assert item["state"] == "Pending"
+        assert item["lockedDate"] is None
+        assert item["resource"] is None
+        assert item["sessionId"] is None
+
+        queue = client.get_queue("q1")
+        assert queue["pendingItemCount"] == 3
+        assert queue["lockedItemCount"] == 0
+        assert queue["totalItemCount"] == 3
+
+        session = client.get_session(sid)
+        assert session["status"] == "Stopped"
+
+    def test_item_reads_settle_the_drain_themselves(self):
+        # An item read must not lag a count read: a consumer that polls items
+        # without ever calling get_queues() still sees the drain, and the two
+        # reads agree whichever order they are made in.
+        now, advance = self._clock("2026-08-01T09:00:00Z")
+        client = self._client(now)
+        client.start_process("p1", "r1")
+
+        advance(seconds=6)
+        items = {i["id"]: i for i in client.get_queue_items("q1")}  # items read FIRST
+        assert items["item-1"]["state"] == "Completed"
+        assert items["item-2"]["state"] == "Locked"
+
+        queue = client.get_queue("q1")
+        assert queue["completedItemCount"] == 1
+        assert queue["pendingItemCount"] == 1
+        assert client.get_queue_item("item-1")["state"] == "Completed"
+        composition = client.get_queue_compositions(["q1"])[0]
+        assert composition["completed"] == 1
+        assert composition["locked"] == 1
+
+    def test_stop_keeps_the_work_the_session_had_already_done(self):
+        # Stopping without an intervening read must not rewind the queue: the
+        # ticks worked before the stop stand, and only the item still held is
+        # handed back to Pending.
+        now, advance = self._clock("2026-08-01T09:00:00Z")
+        client = self._client(now)
+        result = client.start_process("p1", "r1")
+
+        advance(seconds=6)  # one tick worked, item-2 now held
+        client.stop_session(result["sessionId"])
+
+        items = {i["id"]: i for i in client.get_queue_items("q1")}
+        assert items["item-1"]["state"] == "Completed"
+        assert items["item-2"]["state"] == "Pending"
+
+        queue = client.get_queue("q1")
+        assert queue["completedItemCount"] == 1
+        assert queue["pendingItemCount"] == 2
+        assert queue["lockedItemCount"] == 0
+        assert queue["totalItemCount"] == 3
+
+    def test_sub_tick_remainder_carries_into_the_next_pass(self):
+        # Reading on a cadence that is not a multiple of the tick must not
+        # shed work: three 4s reads span 12s, which is two full 5s ticks.
+        now, advance = self._clock("2026-08-01T09:00:00Z")
+        client = self._client(now)
+        client.start_process("p1", "r1")
+
+        for _ in range(3):
+            advance(seconds=4)
+            client.get_queues()
+
+        queue = client.get_queue("q1")
+        assert queue["completedItemCount"] == 2
+        assert queue["lockedItemCount"] == 1
+
+    def test_drained_items_are_stamped_one_tick_apart(self):
+        # A batch settled in one pass reads as a run of completions spaced by
+        # the tick, not as every item completing at the same instant.
+        now, advance = self._clock("2026-08-01T09:00:00Z")
+        client = self._client(now)
+        client.start_process("p1", "r1")
+
+        advance(seconds=11)
+        items = {i["id"]: i for i in client.get_queue_items("q1")}
+        assert items["item-1"]["completedDate"] == "2026-08-01T09:00:05Z"
+        assert items["item-2"]["completedDate"] == "2026-08-01T09:00:10Z"
+        assert items["item-3"]["lockedDate"] == "2026-08-01T09:00:10Z"
+
+    def test_session_end_time_is_the_last_completion_not_the_read(self):
+        now, advance = self._clock("2026-08-01T09:00:00Z")
+        client = self._client(now, item_count=2)
+        result = client.start_process("p1", "r1")
+
+        advance(seconds=300)  # long after the two items were worked
+        session = client.get_session(result["sessionId"])
+        assert session["status"] == "Completed"
+        assert session["endTime"] == "2026-08-01T09:00:10Z"
+
+    def test_no_matching_queue_starts_a_plain_session(self):
+        now, _advance = self._clock("2026-08-01T09:00:00Z")
+        client = self._client(now)
+        result = client.start_process("does-not-exist", "r1")
+        sid = result["sessionId"]
+
+        assert sid not in client._session_locks
+        queue = client.get_queue("q1")
+        assert queue["lockedItemCount"] == 0
+        assert queue["pendingItemCount"] == 3
+
+        session = client.get_session(sid)
+        assert session["status"] == "Running"
+
+    def test_items_naming_an_absent_queue_start_a_plain_session(self):
+        # A fixture whose items point at a queue row that isn't there must not
+        # take the drain path — the session falls back to flat settle_after.
+        now, advance = self._clock("2026-08-01T09:00:00Z")
+        client = self._client(now)
+        for item in client._queue_items:
+            item["queue"] = "q-gone"
+        result = client.start_process("p1", "r1")
+        sid = result["sessionId"]
+        assert sid not in client._session_locks
+
+        advance(seconds=60)  # a drain would have finished; settle_after has not
+        assert client.get_session(sid)["status"] == "Running"
+
+        advance(seconds=300)
+        assert client.get_session(sid)["status"] == "Completed"
+
+    def test_a_held_item_that_disappears_drops_the_lock(self):
+        # Defensive: if the held item is gone from the fixture the session
+        # can't drain, so it releases the lock and reverts to settle_after
+        # rather than carrying a dangling reference.
+        now, advance = self._clock("2026-08-01T09:00:00Z")
+        client = self._client(now)
+        result = client.start_process("p1", "r1")
+        sid = result["sessionId"]
+        client._queue_items = [i for i in client._queue_items if i["id"] != "item-1"]
+
+        advance(seconds=60)
+        assert client.get_session(sid)["status"] == "Running"
+        assert sid not in client._session_locks
+
+        advance(seconds=300)
+        assert client.get_session(sid)["status"] == "Completed"
+
+    def test_a_queue_that_disappears_mid_drain_stalls_the_session(self):
+        # Defensive: losing the queue row mid-drain must not raise. The
+        # session keeps its lock and simply stops progressing.
+        now, advance = self._clock("2026-08-01T09:00:00Z")
+        client = self._client(now)
+        result = client.start_process("p1", "r1")
+        sid = result["sessionId"]
+        client._queues = []
+
+        advance(seconds=60)
+        assert client.get_session(sid)["status"] == "Running"
+        assert client._session_locks[sid] == "item-1"
+
+
 # --- Phase 12: transport governance -------------------------------------------
 
 
