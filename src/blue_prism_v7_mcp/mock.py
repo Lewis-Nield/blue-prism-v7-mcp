@@ -892,7 +892,12 @@ class MockBPClient:
         self._resource_utilization = (
             resource_utilization
             if resource_utilization is not None
-            else [dict(r) for r in _DEFAULT_RESOURCE_UTILIZATION]
+            # "usages" is a list, so a plain dict(r) would leave every fresh
+            # client sharing the module-level default's list object — harmless
+            # until _contribute_utilization started mutating it in place,
+            # which would then leak one client's worked minutes into every
+            # other client (and test) built from the same untouched default.
+            else [{**r, "usages": list(r["usages"])} for r in _DEFAULT_RESOURCE_UTILIZATION]
         )
         self._session_counter = 0
         # Start-up parameters applied per session id (kept out of the session
@@ -1013,10 +1018,61 @@ class MockBPClient:
             return
         self._lock_item(item, queue_row, session_id, resource_name, now)
 
+    def _contribute_utilization(
+        self, resource_id: str, resource_name: str, minutes: int, when: datetime
+    ) -> None:
+        """Add worked minutes to a worker's utilization row for `when`'s day.
+
+        Without this, resource_utilization is a static seed no action can move.
+        Matched on resourceId OR digitalWorkerName, same tolerance as the
+        resource/session join elsewhere in this fixture. Creates the day's row
+        if the worker has none yet (e.g. an offline worker started for the
+        first time), rather than silently dropping the contribution. Callers
+        only invoke this with minutes > 0.
+        """
+        date_str = when.date().isoformat()
+        row = next(
+            (
+                r
+                for r in self._resource_utilization
+                if (
+                    r.get("resourceId") == resource_id
+                    or r.get("digitalWorkerName") == resource_name
+                )
+                and r.get("utilizationDate") == date_str
+            ),
+            None,
+        )
+        if row is None:
+            row = {
+                "resourceId": resource_id,
+                "digitalWorkerName": resource_name,
+                "utilizationDate": date_str,
+                "usages": [0] * 24,
+            }
+            self._resource_utilization.append(row)
+        hour = when.hour
+        row["usages"][hour] = min(60, row["usages"][hour] + minutes)
+
     def _complete_session_run(self, session_id: str, session: dict, now: datetime) -> None:
         session["status"] = "Completed"
         session["endTime"] = self._fmt(now)
         self._release_worker(session.get("resourceId", ""), session.get("resourceName", ""))
+        if session_id not in self._session_locks:
+            # Queue-bound completions already contributed per item drained
+            # below — only a flat (queue-less) run's own elapsed time lands
+            # here, or it would be double-counted.
+            start = datetime.strptime(session["startTime"], "%Y-%m-%dT%H:%M:%SZ").replace(
+                tzinfo=timezone.utc
+            )
+            elapsed_minutes = max(0, int((now - start).total_seconds() // 60))
+            if elapsed_minutes:
+                self._contribute_utilization(
+                    session.get("resourceId", ""),
+                    session.get("resourceName", ""),
+                    elapsed_minutes,
+                    now,
+                )
         self._limits_and_usage["concurrentSessionsUsed"] = max(
             0, self._limits_and_usage.get("concurrentSessionsUsed", 1) - 1
         )
@@ -1059,6 +1115,7 @@ class MockBPClient:
             tzinfo=timezone.utc
         )
         ticks = int((now - locked_at) / self._drain_tick)
+        resource_id = session.get("resourceId", "")
         resource_name = session.get("resourceName", "")
         for tick in range(1, ticks + 1):
             completed_at = locked_at + self._drain_tick * tick
@@ -1072,6 +1129,10 @@ class MockBPClient:
             queue_row["lockedItemCount"] = max(0, queue_row.get("lockedItemCount", 0) - 1)
             queue_row["completedItemCount"] = queue_row.get("completedItemCount", 0) + 1
             self._recount_queue(queue_row)
+            # At least a minute per item, even a sub-minute averageWorkTime —
+            # otherwise a fast queue's drain would never register at all.
+            item_minutes = max(1, round(item["workTimeInSeconds"] / 60))
+            self._contribute_utilization(resource_id, resource_name, item_minutes, completed_at)
 
             next_item = self._oldest_pending_item(queue_row["id"])
             if next_item is None:
@@ -1390,7 +1451,11 @@ class MockBPClient:
 
     def get_resource_utilization(self, start_date: str) -> list[dict]:
         # Mirrors the live endpoint's one param: rows from start_date onward,
-        # no end bound (the tool layer filters down to its window).
+        # no end bound (the tool layer filters down to its window). Settles
+        # first like every other read: a completing session contributes
+        # minutes to today's row (see _contribute_utilization), so this must
+        # not lag what get_queues()/get_sessions() already report as done.
+        self._settle()
         return [
             dict(r)
             for r in self._resource_utilization
@@ -3110,17 +3175,23 @@ def demo_estate() -> MockBPClient:
     deferred_by_queue = dict(_DEMO_DEFERRED_BY_QUEUE)
 
     # A week of per-worker heat-map so resource_utilization has a real spread
-    # to aggregate: F01/F02 run a full 9-5 most days (saturated), O01 a lighter
-    # shift, and H02/O03 (the offline pair) report no rows at all — the "no
-    # data for an offline worker" case the estate roll-up must still average
-    # correctly across.
+    # to aggregate, one row per worker (all eight — a missing read is never a
+    # fabricated 0%, but an absent one looks broken in a demo, so the offline
+    # pair get real rows that just happen to be zero-filled): F01/F02/F03 run
+    # a full 9-5 most days (saturated), H01/O01/O02 a lighter shift, and
+    # H02/O03 (the offline pair) are zero throughout every day.
     resource_utilization = [
         row
         for days_ago in range(7)
         for row in (
             _heat_row(_D_BOT_F01, "BOT-F01", days_ago, _shift_usages(range(8, 17))),
             _heat_row(_D_BOT_F02, "BOT-F02", days_ago, _shift_usages(range(8, 17), 50)),
+            _heat_row(_D_BOT_F03, "BOT-F03", days_ago, _shift_usages(range(8, 17), 45)),
+            _heat_row(_D_BOT_H01, "BOT-H01", days_ago, _shift_usages(range(9, 13), 30)),
+            _heat_row(_D_BOT_H02, "BOT-H02", days_ago, _shift_usages(range(0, 0))),
             _heat_row(_D_BOT_O01, "BOT-O01", days_ago, _shift_usages(range(9, 13), 35)),
+            _heat_row(_D_BOT_O02, "BOT-O02", days_ago, _shift_usages(range(9, 12), 25)),
+            _heat_row(_D_BOT_O03, "BOT-O03", days_ago, _shift_usages(range(0, 0))),
         )
     ]
 

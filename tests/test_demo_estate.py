@@ -13,6 +13,7 @@ from blue_prism_v7_mcp.mock import (
     _DEMO_DEFERRED_BY_QUEUE,
     _DEMO_HISTORY_BASE_MINUTES,
     _QUEUE_INVOICES,
+    _date,
     demo_estate,
 )
 
@@ -110,6 +111,32 @@ class TestDemoEstateWorkerSessionCoherence:
         # slack left looks broken, not busy.
         assert limits["concurrentSessionsUsed"] < limits["concurrentSessionsLimit"]
         assert limits["runtimeResourcesUsed"] < limits["runtimeResourcesLimit"]
+
+    def test_every_worker_has_a_utilization_row_every_day(self):
+        # A8: a missing read is never a fabricated 0%, but an absent worker
+        # looks broken in a demo — every one of the eight gets a real row.
+        client = demo_estate()
+        rows = client.get_resource_utilization(_date(6))
+        names = {r["name"] for r in client._resources}
+        for name in names:
+            worker_rows = [r for r in rows if r["digitalWorkerName"] == name]
+            assert len(worker_rows) == 7, f"{name} has {len(worker_rows)} rows, expected 7"
+
+    def test_offline_workers_read_zero_not_absent(self):
+        client = demo_estate()
+        rows = client.get_resource_utilization(_date(6))
+        for name in ("BOT-H02", "BOT-O03"):
+            worker_rows = [r for r in rows if r["digitalWorkerName"] == name]
+            assert worker_rows
+            for row in worker_rows:
+                assert sum(row["usages"]) == 0
+
+    def test_working_bots_have_nonzero_utilization(self):
+        client = demo_estate()
+        rows = client.get_resource_utilization(_date(6))
+        for name in ("BOT-F01", "BOT-F02", "BOT-F03", "BOT-H01", "BOT-O01", "BOT-O02"):
+            worker_rows = [r for r in rows if r["digitalWorkerName"] == name]
+            assert any(sum(row["usages"]) > 0 for row in worker_rows), name
 
 
 class TestDemoEstateQueueItemBacking:
