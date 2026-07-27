@@ -7,6 +7,8 @@ additive endpoint is a minor bump.
 
 ## [Unreleased]
 
+## [0.20.0] — 2026-07-27
+
 Demo-estate coherence: the bundled demo estate now behaves like an estate rather
 than a set of numbers that happen to sit next to each other. Every figure it
 reports traces to something in the fixture, and every governed write visibly
@@ -863,7 +865,8 @@ First runnable release — the foundation, built in eight phases (see
 - FastMCP stdio server, a first-class mock run mode, console entrypoint, and
   deployment / day-one verification docs.
 
-[Unreleased]: https://github.com/Lewis-Nield/blue-prism-v7-mcp/compare/v0.19.0...HEAD
+[Unreleased]: https://github.com/Lewis-Nield/blue-prism-v7-mcp/compare/v0.20.0...HEAD
+[0.20.0]: https://github.com/Lewis-Nield/blue-prism-v7-mcp/compare/v0.19.0...v0.20.0
 [0.19.0]: https://github.com/Lewis-Nield/blue-prism-v7-mcp/compare/v0.18.0...v0.19.0
 [0.18.0]: https://github.com/Lewis-Nield/blue-prism-v7-mcp/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/Lewis-Nield/blue-prism-v7-mcp/compare/v0.16.0...v0.17.0
