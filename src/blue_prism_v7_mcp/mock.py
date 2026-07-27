@@ -2309,7 +2309,10 @@ def demo_estate() -> MockBPClient:
     in-flight session count. Every in-flight run's age is deliberate against
     its process's _DEMO_HISTORY_BASE_MINUTES; any run intended to read stale
     says so in a comment. BOT-F02's 5-day Invoice Processing run (session #12
-    below) is the deliberate silently-stuck case and must stay.
+    below) is the deliberate silently-stuck case and must stay. Licence usage
+    (limits_and_usage, below) is derived from this same resources/sessions
+    data rather than hand-picked, so it can't drift from what the estate
+    actually holds.
     """
     resources = [
         _worker(_D_BOT_F01, "BOT-F01", "Finance Pool", "Finance", "Working", active=1),
@@ -3121,13 +3124,21 @@ def demo_estate() -> MockBPClient:
         )
     ]
 
+    # Derived from the fixture itself rather than hand-picked, so the licence
+    # reading can't drift from what the estate actually holds: a session
+    # counts here the moment it's Running, regardless of whether its worker's
+    # own displayStatus agrees (BOT-F02's stuck run still holds a licence
+    # slot in real BP even though the resource reads Idle).
+    concurrent_sessions_used = sum(1 for s in sessions if s["status"] == "Running")
+    runtime_resources_used = sum(1 for r in resources if r["databaseStatus"] != "Offline")
+
     limits_and_usage = {
         "publishedProcessesLimit": None,
         "publishedProcessesUsed": 5,
         "concurrentSessionsLimit": 10,
-        "concurrentSessionsUsed": 4,
+        "concurrentSessionsUsed": concurrent_sessions_used,
         "runtimeResourcesLimit": 8,
-        "runtimeResourcesUsed": 5,
+        "runtimeResourcesUsed": runtime_resources_used,
         "processAlertMachinesLimit": None,
         "processAlertMachinesUsed": 0,
     }
