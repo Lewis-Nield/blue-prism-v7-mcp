@@ -1789,7 +1789,18 @@ def _demo_history() -> list[dict]:
 
 
 def demo_estate() -> MockBPClient:
-    """A populated, relative-dated MockBPClient for end-to-end evaluation."""
+    """A populated, relative-dated MockBPClient for end-to-end evaluation.
+
+    Invariant this fixture must satisfy (see tests/test_demo_estate.py): every
+    worker with displayStatus == "Working" or activeSessionCount > 0 has at
+    least one matching in-flight (status == "Running") session — matched on
+    resourceId OR resourceName, since consumers join on both and v7 does not
+    guarantee the two agree — and activeSessionCount equals that worker's
+    in-flight session count. Every in-flight run's age is deliberate against
+    its process's _DEMO_HISTORY_BASE_MINUTES; any run intended to read stale
+    says so in a comment. BOT-F02's 5-day Invoice Processing run (session #12
+    below) is the deliberate silently-stuck case and must stay.
+    """
     resources = [
         _worker(_D_BOT_F01, "BOT-F01", "Finance Pool", "Finance", "Working", active=1),
         _worker(_D_BOT_F02, "BOT-F02", "Finance Pool", "Finance", "Idle"),
@@ -2066,6 +2077,8 @@ def demo_estate() -> MockBPClient:
             _recent(60),
             None,
         ),
+        # Five minutes into an 8min-baseline process: healthy, unlike the old
+        # 90-minutes-in seed that read as 9x its own baseline.
         _session(
             "e8a9d7c2-5f10-4b3e-bd64-0000000d0308",
             8,
@@ -2074,7 +2087,22 @@ def demo_estate() -> MockBPClient:
             _D_BOT_O01,
             "BOT-O01",
             "Running",
-            _recent(90),
+            _recent(5),
+            None,
+        ),
+        # BOT-F01 reads displayStatus Working with activeSessionCount 1 — it
+        # needs a matching in-flight session or a resource/session join reports
+        # a status/session mismatch. Four minutes against Invoice Processing's
+        # ~12min baseline reads healthy.
+        _session(
+            "e8a9d7c2-5f10-4b3e-bd64-0000000d0313",
+            13,
+            _PROC_INVOICES,
+            "Invoice Processing",
+            _D_BOT_F01,
+            "BOT-F01",
+            "Running",
+            _recent(4),
             None,
         ),
         # The degrading Payment Run: two recent terminations.
