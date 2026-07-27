@@ -9,7 +9,12 @@ silently drift out of self-consistency again.
 
 from datetime import datetime, timezone
 
-from blue_prism_v7_mcp.mock import _DEMO_HISTORY_BASE_MINUTES, demo_estate
+from blue_prism_v7_mcp.mock import (
+    _DEMO_DEFERRED_BY_QUEUE,
+    _DEMO_HISTORY_BASE_MINUTES,
+    _QUEUE_INVOICES,
+    demo_estate,
+)
 
 
 def _in_flight_sessions_for(resource, sessions):
@@ -90,3 +95,119 @@ class TestDemoEstateWorkerSessionCoherence:
         )
         stale_elapsed_minutes = (now - stale_start).total_seconds() / 60
         assert stale_elapsed_minutes > 10 * stale_baseline
+
+
+class TestDemoEstateQueueItemBacking:
+    """A5: every queue's declared counts must equal what a drill-in actually
+    returns — the fixture no longer just asserts thousands while the item
+    list holds a handful.
+    """
+
+    def test_queue_summary_counts_equal_item_counts_by_state(self):
+        client = demo_estate()
+        for queue in client._queues:
+            items = [i for i in client._queue_items if i["queue"] == queue["id"]]
+            by_state = {"Pending": 0, "Completed": 0, "Locked": 0, "Exceptioned": 0}
+            for item in items:
+                if item["state"] in by_state:
+                    by_state[item["state"]] += 1
+            assert queue["pendingItemCount"] == by_state["Pending"], queue["name"]
+            assert queue["completedItemCount"] == by_state["Completed"], queue["name"]
+            assert queue["lockedItemCount"] == by_state["Locked"], queue["name"]
+            assert queue["exceptionedItemCount"] == by_state["Exceptioned"], queue["name"]
+            assert queue["totalItemCount"] == sum(by_state.values()), queue["name"]
+
+    def test_payments_pending_read_returns_the_full_declared_backlog(self):
+        client = demo_estate()
+        payments = next(q for q in client._queues if q["name"] == "Payments")
+        rows = client.get_queue_items(payments["id"], state="Pending")
+        assert len(rows) == payments["pendingItemCount"] == 64
+
+    def test_every_declared_queue_has_a_nonempty_item_set(self):
+        # A queue with a nonzero declared count must have that many rows, not
+        # just the visible hand-written head — every queue in this estate
+        # declares at least one state with items. totalItemCount excludes
+        # Deferred rows (see the class docstring above), so compare against
+        # the four counted states only.
+        client = demo_estate()
+        for queue in client._queues:
+            items = [
+                i
+                for i in client._queue_items
+                if i["queue"] == queue["id"] and i["state"] != "Deferred"
+            ]
+            assert len(items) == queue["totalItemCount"], queue["name"]
+            assert items, f"{queue['name']} has no backing items at all"
+
+    def test_deferred_items_match_deferred_by_queue_and_sit_outside_the_four_counts(self):
+        client = demo_estate()
+        for queue_id, expected in _DEMO_DEFERRED_BY_QUEUE.items():
+            deferred = [
+                i
+                for i in client._queue_items
+                if i["queue"] == queue_id and i["state"] == "Deferred"
+            ]
+            assert len(deferred) == expected == client._deferred_by_queue[queue_id]
+            queue = next(q for q in client._queues if q["id"] == queue_id)
+            # totalItemCount is pending+completed+locked+exceptioned only —
+            # deferred items must not have inflated it.
+            assert queue["totalItemCount"] == (
+                queue["pendingItemCount"]
+                + queue["completedItemCount"]
+                + queue["lockedItemCount"]
+                + queue["exceptionedItemCount"]
+            )
+
+    def test_generated_idents_are_unique_estate_wide(self):
+        # `ident` is the item table's own identity in v7 — unique across every
+        # queue, not per queue. Hand-picked per-queue ranges overlap as soon as
+        # a count grows, so the generator draws one estate-wide sequence and
+        # this asserts it.
+        client = demo_estate()
+        idents = [i["ident"] for i in client._queue_items]
+        assert len(idents) == len(set(idents))
+        key_values = [i["keyValue"] for i in client._queue_items]
+        assert len(key_values) == len(set(key_values))
+
+
+class TestDemoEstateQueueItemCoherence:
+    """A locked item is one a running session holds right now, and an item's
+    SLA deadline is a fact about its own load time — neither may be asserted
+    independently of the estate around it.
+    """
+
+    def test_every_locked_item_is_held_by_a_live_session(self):
+        client = demo_estate()
+        locked = [i for i in client._queue_items if i["state"] == "Locked"]
+        assert locked, "the estate should hold at least one in-progress item"
+        for item in locked:
+            session = next(
+                (s for s in client._sessions if s["sessionId"] == item["sessionId"]), None
+            )
+            assert session is not None, item["keyValue"]
+            assert session["status"] == "Running", item["keyValue"]
+            assert session["resourceName"] == item["resource"], item["keyValue"]
+            assert session["processName"] == item["processName"], item["keyValue"]
+            # The lock is taken during the run, never before it started.
+            assert item["lockedDate"] >= session["startTime"], item["keyValue"]
+
+    def test_item_sla_deadlines_follow_from_their_own_load_times(self):
+        client = demo_estate()
+        for item in client._queue_items:
+            # The hand-written narrative items carry their own deliberate
+            # deadlines; the generated bulk must be internally consistent.
+            if not item["id"].startswith("a1c4d8e0") or not item["sla"]:
+                continue
+            loaded = datetime.strptime(item["loadedDate"], "%Y-%m-%dT%H:%M:%SZ")
+            deadline = datetime.strptime(item["slaDatetime"], "%Y-%m-%dT%H:%M:%SZ")
+            assert round((deadline - loaded).total_seconds() / 60) == item["sla"], item["keyValue"]
+
+    def test_the_pending_backlog_has_real_breaches_without_being_wholly_late(self):
+        # The A5 wall in the other direction: an SLA drill-in that returns
+        # nothing is as useless as an item read that returns one row — but a
+        # backlog where everything is late is not an estate anyone would demo.
+        client = demo_estate()
+        pending = [i for i in client._queue_items if i["state"] == "Pending"]
+        breached = client.get_queue_items(_QUEUE_INVOICES, state="Pending", within_sla=False)
+        assert breached
+        assert len(breached) < sum(1 for i in pending if i["queue"] == _QUEUE_INVOICES)

@@ -1593,6 +1593,362 @@ _D_QUEUE_COMPLIANCE = "9b6f3a1c-2e45-4d07-8c11-0000000d0107"
 _D_QUEUE_MAILROOM = "9b6f3a1c-2e45-4d07-8c11-0000000d0108"
 _D_QUEUE_CLOSURES = "9b6f3a1c-2e45-4d07-8c11-0000000d0109"
 
+# The demo estate's six hand-written queue items (four on Invoices, two on
+# Payments — see demo_estate()) carry the deliberate narrative: PAY-5001's
+# SLA breach and session link, the Invoices exceptions. Every queue's summary
+# still needs to declare a real backlog, so _demo_queue_items() below tops
+# each queue up to these per-state counts. This table already excludes what
+# the hand-written items contribute — e.g. Invoices declares 120/812/47
+# pending/completed/exceptioned, of which the hand-written items are 1/1/2,
+# so the generator's own share is 119/811/45. Payments' two hand-written
+# items are 1 pending/1 exceptioned (no completed of its own), so its share
+# of the declared 64/540/18 is 63/540/17. Locked is NOT a top-up count — a
+# locked item means a session is working it right now, so those rows come
+# from _DEMO_QUEUE_LIVE_LOCKS below instead.
+_DEMO_QUEUE_TOPUP_COUNTS: dict[str, tuple[int, int, int]] = {
+    _QUEUE_INVOICES: (119, 811, 45),
+    _D_QUEUE_PAYMENTS: (63, 540, 17),
+    _QUEUE_ONBOARDING: (35, 214, 4),
+    _D_QUEUE_PAYROLL: (4, 320, 0),
+    _D_QUEUE_EXPENSES: (9, 410, 0),
+    _D_QUEUE_VENDOR: (2, 95, 0),
+    _D_QUEUE_COMPLIANCE: (0, 150, 0),
+    _D_QUEUE_MAILROOM: (7, 260, 0),
+    _D_QUEUE_CLOSURES: (1, 73, 0),
+}
+
+# queue id -> the locked items this estate can truthfully hold: one per
+# in-flight session against that queue's process, since a Locked item is one
+# a running session holds *now*. Generating locked rows freely instead would
+# reintroduce exactly the incoherence this estate keeps closing — an item
+# locked weeks ago by a bot that has no session at all, which reads as a
+# stuck lock nobody meant to seed. Each entry is
+# (resource name, session id, that session's start), and the item's lock is
+# taken a minute into the run.
+#
+# Payments deliberately holds none: its narrative is a Running queue with a
+# heavy backlog and NOTHING in progress. Every other queue has no in-flight
+# session against its process, so it holds none either.
+_DEMO_QUEUE_LIVE_LOCKS: dict[str, list[tuple[str, str, str]]] = {
+    _QUEUE_INVOICES: [
+        # BOT-F01's healthy four-minute run (session #13).
+        ("BOT-F01", "e8a9d7c2-5f10-4b3e-bd64-0000000d0313", _recent(4)),
+        # BOT-F02's silently stuck five-day run (session #12) — its item has
+        # been locked just as long, which is what makes a stuck lock visible
+        # from the queue side as well as the session side.
+        ("BOT-F02", "e8a9d7c2-5f10-4b3e-bd64-0000000d0312", _ts(5, "16:00:00")),
+    ],
+}
+
+# Deferred items sit outside the four counts above (WorkQueueSummary has no
+# deferred field of its own — see get_queues' separate deferred lookup).
+# Shared between _demo_queue_items() (which generates matching rows) and
+# demo_estate()'s deferred_by_queue kwarg, so the two can't drift apart.
+_DEMO_DEFERRED_BY_QUEUE: dict[str, int] = {_QUEUE_INVOICES: 6, _D_QUEUE_PAYMENTS: 2}
+
+# queue id -> (keyValue prefix, processName, resource pool to draw
+# completed/exceptioned items from). processName tracks a real startable
+# process where this estate has one (Invoices, Payments, Onboarding, Payroll,
+# Compliance) — the link A6 will later use to lock a queue item when a session
+# starts. The remaining queues have no process in this estate; they still get a
+# plausible processName label, they simply never drain via A6.
+_DEMO_QUEUE_ITEM_SHAPE: dict[str, tuple[str, str, list[str]]] = {
+    _QUEUE_INVOICES: ("INV", "Invoice Processing", ["BOT-F01", "BOT-F02", "BOT-F03"]),
+    _D_QUEUE_PAYMENTS: ("PAY", "Payment Run", ["BOT-F01", "BOT-F02", "BOT-F03"]),
+    _QUEUE_ONBOARDING: ("CUST", "Customer Onboarding", ["BOT-O01", "BOT-O02"]),
+    _D_QUEUE_PAYROLL: ("PR", "Payroll Run", ["BOT-H01"]),
+    _D_QUEUE_EXPENSES: ("EXP", "Expense Processing", ["BOT-F01", "BOT-F02", "BOT-F03"]),
+    _D_QUEUE_VENDOR: ("VEN", "Vendor Setup", ["BOT-O01", "BOT-O02"]),
+    _D_QUEUE_COMPLIANCE: ("CMP", "Compliance Screening", ["BOT-O02"]),
+    _D_QUEUE_MAILROOM: ("MAIL", "Mailroom Triage", ["BOT-O01", "BOT-O02"]),
+    _D_QUEUE_CLOSURES: ("CLOS", "Account Closure", ["BOT-O01", "BOT-O02"]),
+}
+
+# Generated idents come off one running counter from this base, rather than a
+# per-queue range: `ident` is unique estate-wide in v7 (it is the item table's
+# own identity), and hand-picked per-queue ranges silently start overlapping
+# the moment a count in _DEMO_QUEUE_TOPUP_COUNTS grows. The base clears the
+# hand-written items' idents (2001-2004, 5001-5002) and create_queue_items'
+# own len()+9000 allocation. test_demo_estate asserts the uniqueness.
+_DEMO_GENERATED_IDENT_BASE = 100_000
+
+_DEMO_ITEM_EXCEPTION_REASONS = [
+    "Validation failed against business rules",
+    "Required field missing from source record",
+    "Downstream system returned an error",
+    "Duplicate record detected",
+]
+
+# How many days of generated queue-item history to spread across — matches
+# the 90-day lookback a consumer's drill-in reads (QUEUE_ITEMS_LOOKBACK_DAYS),
+# so a read at any range in that window finds populated rows.
+_DEMO_QUEUE_ITEM_LOOKBACK_DAYS = 90
+
+
+def _demo_item_age_minutes(i: int) -> int:
+    """A deterministic age in minutes for the i-th generated item.
+
+    Spread across _DEMO_QUEUE_ITEM_LOOKBACK_DAYS and weighted toward recent
+    (the exponent compresses the day spread toward zero) so a drill-in at any
+    lookback finds rows, with more of them recent. A pure function of the
+    index — no RNG — so reads are reproducible run to run.
+    """
+    days_ago = int(_DEMO_QUEUE_ITEM_LOOKBACK_DAYS * ((i % 97) / 97) ** 1.6)
+    minutes_of_day = (i * 17) % (24 * 60)
+    return days_ago * 24 * 60 + minutes_of_day
+
+
+def _demo_pending_age_minutes(i: int, sla_minutes: int) -> int:
+    """How long the i-th generated pending item has been waiting.
+
+    A fraction of the item's own SLA rather than a slice of the 90-day
+    history spread: a pending item is current backlog, not archive, and its
+    slaDatetime is loadedDate + sla — so loading the backlog months ago would
+    declare all of it breached. Three in twenty wait past their deadline, so
+    a `within_sla=false` drill-in returns real rows without the queue reading
+    as wholly late. Pure in the index, like _demo_item_age_minutes.
+    """
+    return sla_minutes * (i % 20) // 16
+
+
+def _minutes_since(timestamp: str) -> int:
+    """Whole minutes from an ISO ``...Z`` timestamp to the captured now."""
+    moment = datetime.strptime(timestamp, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    return int((_NOW - moment).total_seconds() // 60)
+
+
+def _demo_item(
+    queue_id: str,
+    item_id: str,
+    ident: int,
+    key_value: str,
+    state: str,
+    process_name: str,
+    resource: str | None,
+    *,
+    age_minutes: int,
+    priority: int = 1,
+    attempt: int = 1,
+    sla_minutes: int = 60,
+    work_seconds: int = 60,
+    exception_reason: str | None = None,
+    session_id: str | None = None,
+) -> dict:
+    """One generated WorkQueueItemNoData row, shaped for its state.
+
+    A pure function of its arguments — the caller supplies the deterministic
+    spread (age, priority, attempt) so this stays a simple state-to-fields
+    mapping. Every row's ``slaDatetime`` is its own load time plus its ``sla``
+    (so the deadline an item carries always agrees with the two fields it is
+    computed from), and Locked/Completed/Exceptioned items pass through a lock
+    phase before their terminal date — the same shape the hand-written
+    foreground items already follow.
+    """
+    loaded = _recent(age_minutes)
+    row: dict = {
+        "queue": queue_id,
+        "id": item_id,
+        "priority": priority,
+        "ident": ident,
+        "state": state,
+        "keyValue": key_value,
+        "status": "",
+        "tags": [],
+        "attemptNumber": attempt,
+        "loadedDate": loaded,
+        "deferredDate": None,
+        "lockedDate": None,
+        "lastUpdated": loaded,
+        "workTimeInSeconds": 0,
+        "attemptWorkTimeInSeconds": 0,
+        "exceptionReason": None,
+        "resource": None,
+        "sessionId": None,
+        "sla": sla_minutes,
+        "slaDatetime": _recent(age_minutes - sla_minutes),
+        "processName": process_name,
+        "isSuggested": False,
+    }
+    if state == "Pending":
+        # slaDatetime stays loadedDate + sla (set above): whether a waiting
+        # item has breached is then a fact about how long it has waited, not a
+        # flag set independently of its own dates. The caller keeps most of
+        # the pending backlog inside its SLA — see _demo_queue_items().
+        return row
+    if state == "Deferred":
+        # A deferred item was Pending before being deferred a few days out —
+        # mirrors defer_queue_item's own semantics (deferredDate is the
+        # re-processing date, everything else about the item is unchanged).
+        defer_days = 2 + (ident % 4)
+        row["deferredDate"] = _recent(-defer_days * 24 * 60)
+        return row
+    lock_age = max(age_minutes - 5, 0)
+    row["lockedDate"] = _recent(lock_age)
+    row["resource"] = resource
+    row["sessionId"] = session_id
+    row["lastUpdated"] = row["lockedDate"]
+    if state == "Locked":
+        return row
+    work_age = max(lock_age - max(1, work_seconds // 60), 0)
+    row["workTimeInSeconds"] = work_seconds
+    row["attemptWorkTimeInSeconds"] = work_seconds
+    if state == "Completed":
+        row["completedDate"] = _recent(work_age)
+        row["lastUpdated"] = row["completedDate"]
+    elif state == "Exceptioned":
+        row["exceptionedDate"] = _recent(work_age)
+        row["lastUpdated"] = row["exceptionedDate"]
+        row["exceptionReason"] = exception_reason
+    return row
+
+
+def _demo_queue_items() -> list[dict]:
+    """Deterministic top-up items for every demo queue.
+
+    Tops up each queue to _DEMO_QUEUE_TOPUP_COUNTS' per-state counts (on top
+    of the hand-written foreground items), plus the session-backed Locked rows
+    from _DEMO_QUEUE_LIVE_LOCKS and Deferred rows matching
+    _DEMO_DEFERRED_BY_QUEUE — exactly as _demo_history() tops up the twelve
+    foreground sessions. A pure function of a running index, no RNG, so
+    get_queue_items() is reproducible run to run and tests can assert shape.
+    """
+    items: list[dict] = []
+    counter = 0
+
+    def next_ident() -> int:
+        # One estate-wide sequence, like the live item table's own identity.
+        return _DEMO_GENERATED_IDENT_BASE + counter
+
+    for queue_id, (pending, completed, exceptioned) in _DEMO_QUEUE_TOPUP_COUNTS.items():
+        prefix, process_name, resources = _DEMO_QUEUE_ITEM_SHAPE[queue_id]
+        for state, count in (
+            ("Completed", completed),
+            ("Exceptioned", exceptioned),
+            ("Pending", pending),
+        ):
+            for _ in range(count):
+                counter += 1
+                ident = next_ident()
+                sla_minutes = 30 + (counter % 6) * 15
+                items.append(
+                    _demo_item(
+                        queue_id,
+                        f"a1c4d8e0-6b2f-4a9c-8d31-{counter:012d}",
+                        ident,
+                        f"{prefix}-{ident}",
+                        state,
+                        process_name,
+                        resources[counter % len(resources)],
+                        age_minutes=(
+                            _demo_pending_age_minutes(counter, sla_minutes)
+                            if state == "Pending"
+                            else _demo_item_age_minutes(counter)
+                        ),
+                        priority=(counter % 3) + 1,
+                        attempt=2 if state == "Exceptioned" and counter % 5 == 0 else 1,
+                        sla_minutes=sla_minutes,
+                        work_seconds=30 + (counter * 11) % 180,
+                        exception_reason=(
+                            _DEMO_ITEM_EXCEPTION_REASONS[
+                                counter % len(_DEMO_ITEM_EXCEPTION_REASONS)
+                            ]
+                            if state == "Exceptioned"
+                            else None
+                        ),
+                    )
+                )
+    for queue_id, locks in _DEMO_QUEUE_LIVE_LOCKS.items():
+        prefix, process_name, _resources = _DEMO_QUEUE_ITEM_SHAPE[queue_id]
+        for resource, session_id, session_start in locks:
+            counter += 1
+            ident = next_ident()
+            # Locked a minute into its session's run, loaded five minutes
+            # before that: the lock belongs to a session that is still going,
+            # so it can never read as held by an idle bot.
+            lock_minutes = max(_minutes_since(session_start) - 1, 0)
+            items.append(
+                _demo_item(
+                    queue_id,
+                    f"a1c4d8e0-6b2f-4a9c-8d31-{counter:012d}",
+                    ident,
+                    f"{prefix}-{ident}",
+                    "Locked",
+                    process_name,
+                    resource,
+                    age_minutes=lock_minutes + 5,
+                    priority=(counter % 3) + 1,
+                    sla_minutes=30 + (counter % 6) * 15,
+                    session_id=session_id,
+                )
+            )
+    for queue_id, deferred_count in _DEMO_DEFERRED_BY_QUEUE.items():
+        prefix, process_name, _resources = _DEMO_QUEUE_ITEM_SHAPE[queue_id]
+        for _ in range(deferred_count):
+            counter += 1
+            ident = next_ident()
+            items.append(
+                _demo_item(
+                    queue_id,
+                    f"a1c4d8e0-6b2f-4a9c-8d31-{counter:012d}",
+                    ident,
+                    f"{prefix}-{ident}",
+                    "Deferred",
+                    process_name,
+                    None,
+                    age_minutes=_demo_item_age_minutes(counter),
+                    priority=(counter % 3) + 1,
+                    sla_minutes=45,
+                )
+            )
+    return items
+
+
+def _queue_counts_from_items(queue_id: str, items: list[dict]) -> tuple[int, int, int, int]:
+    """(pending, completed, locked, exceptioned) counts for queue_id, derived
+    from the item rows themselves rather than hand-carried alongside them —
+    so a queue's declared summary can never drift from what a drill-in
+    actually returns. Deferred items sit outside these four states.
+    """
+    pending = completed = locked = exceptioned = 0
+    for item in items:
+        if item.get("queue") != queue_id:
+            continue
+        state = item.get("state")
+        if state == "Pending":
+            pending += 1
+        elif state == "Completed":
+            completed += 1
+        elif state == "Locked":
+            locked += 1
+        elif state == "Exceptioned":
+            exceptioned += 1
+    return pending, completed, locked, exceptioned
+
+
+def _demo_queue(
+    queue_id: str,
+    name: str,
+    group: str,
+    status: str,
+    items: list[dict],
+    average: str,
+    key_field: str = "Item Key",
+) -> dict:
+    """A demo-estate queue row whose four counts are derived from items."""
+    pending, completed, locked, exceptioned = _queue_counts_from_items(queue_id, items)
+    return _queue(
+        queue_id,
+        name,
+        group,
+        status,
+        pending=pending,
+        completed=completed,
+        locked=locked,
+        exceptioned=exceptioned,
+        average=average,
+        key_field=key_field,
+    )
+
 
 def _worker(
     resource_id: str,
@@ -1840,116 +2196,252 @@ def demo_estate() -> MockBPClient:
         },
     ]
 
+    # Six hand-written items carry the deliberate narrative — PAY-5001's SLA
+    # breach and session link, the Invoices exceptions — referencing this
+    # estate's own workers rather than falling back to the lean fixtures'.
+    # _demo_queue_items() tops every queue up to its declared backlog on top
+    # of these, so a drill-in at any queue returns real rows, not just the
+    # visible head. queues (below) derives its four per-state counts from
+    # this combined list, so a summary can never drift from what a read
+    # actually returns.
+    queue_items: list[dict] = [
+        {
+            "queue": _QUEUE_INVOICES,
+            "id": "f3b2a190-8c47-4e2d-9b55-0000000d0401",
+            "priority": 1,
+            "ident": 2001,
+            "state": "Completed",
+            "keyValue": "INV-2001",
+            "status": "",
+            "tags": [],
+            "attemptNumber": 1,
+            "loadedDate": _recent(345),
+            "deferredDate": None,
+            "lockedDate": _recent(342),
+            "lastUpdated": _recent(340),
+            "completedDate": _recent(340),
+            "workTimeInSeconds": 92,
+            "attemptWorkTimeInSeconds": 92,
+            "exceptionReason": None,
+            "resource": "BOT-F01",
+            "sessionId": "e8a9d7c2-5f10-4b3e-bd64-0000000d0301",
+            "sla": 60,
+            "slaDatetime": _recent(300),
+            "processName": "Invoice Processing",
+            "isSuggested": False,
+        },
+        {
+            "queue": _QUEUE_INVOICES,
+            "id": "f3b2a190-8c47-4e2d-9b55-0000000d0402",
+            "priority": 1,
+            "ident": 2002,
+            "state": "Exceptioned",
+            "keyValue": "INV-2002",
+            "status": "",
+            "tags": ["supplier-query"],
+            "attemptNumber": 2,
+            "loadedDate": _recent(185),
+            "deferredDate": None,
+            "lockedDate": _recent(182),
+            "lastUpdated": _recent(180),
+            "exceptionedDate": _recent(180),
+            "workTimeInSeconds": 45,
+            "attemptWorkTimeInSeconds": 45,
+            "exceptionReason": "Invoice total did not match purchase order",
+            "resource": "BOT-F01",
+            "sessionId": "e8a9d7c2-5f10-4b3e-bd64-0000000d0302",
+            "sla": 45,
+            "slaDatetime": _recent(150),  # breached
+            "processName": "Invoice Processing",
+            "isSuggested": False,
+        },
+        {
+            "queue": _QUEUE_INVOICES,
+            "id": "f3b2a190-8c47-4e2d-9b55-0000000d0403",
+            "priority": 1,
+            "ident": 2003,
+            "state": "Exceptioned",
+            "keyValue": "INV-2003",
+            "status": "",
+            "tags": [],
+            "attemptNumber": 1,
+            "loadedDate": _recent(125),
+            "deferredDate": None,
+            "lockedDate": _recent(122),
+            "lastUpdated": _recent(120),
+            "exceptionedDate": _recent(120),
+            "workTimeInSeconds": 38,
+            "attemptWorkTimeInSeconds": 38,
+            "exceptionReason": "Supplier not found in ledger",
+            "resource": "BOT-F03",
+            "sessionId": "e8a9d7c2-5f10-4b3e-bd64-0000000d0307",
+            "sla": 30,
+            "slaDatetime": _recent(90),  # breached
+            "processName": "Invoice Processing",
+            "isSuggested": False,
+        },
+        {
+            "queue": _QUEUE_INVOICES,
+            "id": "f3b2a190-8c47-4e2d-9b55-0000000d0404",
+            "priority": 2,
+            "ident": 2004,
+            "state": "Pending",
+            "keyValue": "INV-2004",
+            "status": "",
+            "tags": [],
+            "attemptNumber": 1,
+            "loadedDate": _recent(65),
+            "deferredDate": None,
+            "lockedDate": None,
+            "lastUpdated": _recent(60),
+            "workTimeInSeconds": 0,
+            "attemptWorkTimeInSeconds": 0,
+            "exceptionReason": None,
+            "resource": None,
+            "sessionId": None,
+            "sla": 90,
+            "slaDatetime": _recent(-120),  # still ahead
+            "processName": "Invoice Processing",
+            "isSuggested": False,
+        },
+        {
+            "queue": _D_QUEUE_PAYMENTS,
+            "id": "f3b2a190-8c47-4e2d-9b55-0000000d0405",
+            "priority": 1,
+            "ident": 5001,
+            "state": "Exceptioned",
+            "keyValue": "PAY-5001",
+            "status": "",
+            "tags": [],
+            "attemptNumber": 1,
+            "loadedDate": _recent(215),
+            "deferredDate": None,
+            "lockedDate": _recent(212),
+            "lastUpdated": _recent(210),
+            "exceptionedDate": _recent(210),
+            "workTimeInSeconds": 30,
+            "attemptWorkTimeInSeconds": 30,
+            "exceptionReason": "BACS gateway timed out",
+            "resource": "BOT-F02",
+            "sessionId": "e8a9d7c2-5f10-4b3e-bd64-0000000d0309",
+            "sla": 20,
+            "slaDatetime": _recent(180),  # breached
+            "processName": "Payment Run",
+            "isSuggested": False,
+        },
+        {
+            "queue": _D_QUEUE_PAYMENTS,
+            "id": "f3b2a190-8c47-4e2d-9b55-0000000d0406",
+            "priority": 1,
+            "ident": 5002,
+            "state": "Pending",
+            "keyValue": "PAY-5002",
+            "status": "",
+            "tags": [],
+            "attemptNumber": 1,
+            "loadedDate": _recent(50),
+            "deferredDate": None,
+            "lockedDate": None,
+            "lastUpdated": _recent(45),
+            "workTimeInSeconds": 0,
+            "attemptWorkTimeInSeconds": 0,
+            "exceptionReason": None,
+            "resource": None,
+            "sessionId": None,
+            "sla": 60,
+            "slaDatetime": _recent(-15),  # still ahead
+            "processName": "Payment Run",
+            "isSuggested": False,
+        },
+        *_demo_queue_items(),
+    ]
+
+    # Every queue's four counts below are derived from queue_items itself
+    # (not hand-carried alongside it) — so a drill-in always returns exactly
+    # what the summary declares.
     queues = [
         # Loaded but flowing: a deep backlog actively being drained (items
         # locked, a resource working them). Routine load, not a problem — the
         # severity scorer must read this as ok however deep the backlog.
-        _queue(
+        _demo_queue(
             _QUEUE_INVOICES,
             "Invoices",
             "Finance",
             "Running",
-            pending=120,
-            completed=812,
-            locked=3,
-            exceptioned=47,
+            queue_items,
             average="00:02:10",
             key_field="Invoice Number",
         ),
         # Stalled: a Running queue holding a heavy backlog with NOTHING in
         # progress (no items locked) — no resource is draining it. The genuine
         # stuck case the scorer flags critical, distinct from Invoices' flow.
-        _queue(
+        _demo_queue(
             _D_QUEUE_PAYMENTS,
             "Payments",
             "Finance",
             "Running",
-            pending=64,
-            completed=540,
-            locked=0,
-            exceptioned=18,
+            queue_items,
             average="00:01:48",
             key_field="Payment Ref",
         ),
         # Paused: work held, a small backlog waiting.
-        _queue(
+        _demo_queue(
             _QUEUE_ONBOARDING,
             "Onboarding",
             "Operations",
             "Paused",
-            pending=35,
-            completed=214,
-            locked=0,
-            exceptioned=4,
+            queue_items,
             average="00:03:02",
             key_field="Customer Id",
         ),
         # The healthy bulk — no exceptions — so a console's collapsed-healthy
         # summary has a real count to fold away.
-        _queue(
+        _demo_queue(
             _D_QUEUE_PAYROLL,
             "Payroll",
             "HR",
             "Running",
-            pending=4,
-            completed=320,
-            locked=0,
-            exceptioned=0,
+            queue_items,
             average="00:04:20",
         ),
-        _queue(
+        _demo_queue(
             _D_QUEUE_EXPENSES,
             "Expenses",
             "Finance",
             "Running",
-            pending=9,
-            completed=410,
-            locked=1,
-            exceptioned=0,
+            queue_items,
             average="00:01:05",
         ),
-        _queue(
+        _demo_queue(
             _D_QUEUE_VENDOR,
             "Vendor Setup",
             "Operations",
             "Running",
-            pending=2,
-            completed=95,
-            locked=0,
-            exceptioned=0,
+            queue_items,
             average="00:05:40",
         ),
-        _queue(
+        _demo_queue(
             _D_QUEUE_COMPLIANCE,
             "Compliance Checks",
             "Operations",
             "Running",
-            pending=0,
-            completed=150,
-            locked=0,
-            exceptioned=0,
+            queue_items,
             average="00:02:30",
         ),
-        _queue(
+        _demo_queue(
             _D_QUEUE_MAILROOM,
             "Mailroom",
             "Operations",
             "Running",
-            pending=7,
-            completed=260,
-            locked=0,
-            exceptioned=0,
+            queue_items,
             average="00:00:45",
         ),
-        _queue(
+        _demo_queue(
             _D_QUEUE_CLOSURES,
             "Account Closures",
             "Operations",
             "Running",
-            pending=1,
-            completed=73,
-            locked=0,
-            exceptioned=0,
+            queue_items,
             average="00:06:10",
         ),
     ]
@@ -2402,162 +2894,6 @@ def demo_estate() -> MockBPClient:
         ],
     }
 
-    # A representative sample of drill-in items for the two attention queues —
-    # seeded explicitly (not left to fall back to the lean fixtures, whose items
-    # reference workers absent from this estate) so a drill-in stays consistent
-    # with the list reads. The queue summaries above carry the true totals; this
-    # is the visible head of the backlog, referencing this estate's own workers.
-    queue_items = [
-        {
-            "queue": _QUEUE_INVOICES,
-            "id": "f3b2a190-8c47-4e2d-9b55-0000000d0401",
-            "priority": 1,
-            "ident": 2001,
-            "state": "Completed",
-            "keyValue": "INV-2001",
-            "status": "",
-            "tags": [],
-            "attemptNumber": 1,
-            "loadedDate": _recent(345),
-            "deferredDate": None,
-            "lockedDate": _recent(342),
-            "lastUpdated": _recent(340),
-            "completedDate": _recent(340),
-            "workTimeInSeconds": 92,
-            "attemptWorkTimeInSeconds": 92,
-            "exceptionReason": None,
-            "resource": "BOT-F01",
-            "sessionId": "e8a9d7c2-5f10-4b3e-bd64-0000000d0301",
-            "sla": 60,
-            "slaDatetime": _recent(300),
-            "processName": "Invoice Processing",
-            "isSuggested": False,
-        },
-        {
-            "queue": _QUEUE_INVOICES,
-            "id": "f3b2a190-8c47-4e2d-9b55-0000000d0402",
-            "priority": 1,
-            "ident": 2002,
-            "state": "Exceptioned",
-            "keyValue": "INV-2002",
-            "status": "",
-            "tags": ["supplier-query"],
-            "attemptNumber": 2,
-            "loadedDate": _recent(185),
-            "deferredDate": None,
-            "lockedDate": _recent(182),
-            "lastUpdated": _recent(180),
-            "exceptionedDate": _recent(180),
-            "workTimeInSeconds": 45,
-            "attemptWorkTimeInSeconds": 45,
-            "exceptionReason": "Invoice total did not match purchase order",
-            "resource": "BOT-F01",
-            "sessionId": "e8a9d7c2-5f10-4b3e-bd64-0000000d0302",
-            "sla": 45,
-            "slaDatetime": _recent(150),  # breached
-            "processName": "Invoice Processing",
-            "isSuggested": False,
-        },
-        {
-            "queue": _QUEUE_INVOICES,
-            "id": "f3b2a190-8c47-4e2d-9b55-0000000d0403",
-            "priority": 1,
-            "ident": 2003,
-            "state": "Exceptioned",
-            "keyValue": "INV-2003",
-            "status": "",
-            "tags": [],
-            "attemptNumber": 1,
-            "loadedDate": _recent(125),
-            "deferredDate": None,
-            "lockedDate": _recent(122),
-            "lastUpdated": _recent(120),
-            "exceptionedDate": _recent(120),
-            "workTimeInSeconds": 38,
-            "attemptWorkTimeInSeconds": 38,
-            "exceptionReason": "Supplier not found in ledger",
-            "resource": "BOT-F03",
-            "sessionId": "e8a9d7c2-5f10-4b3e-bd64-0000000d0307",
-            "sla": 30,
-            "slaDatetime": _recent(90),  # breached
-            "processName": "Invoice Processing",
-            "isSuggested": False,
-        },
-        {
-            "queue": _QUEUE_INVOICES,
-            "id": "f3b2a190-8c47-4e2d-9b55-0000000d0404",
-            "priority": 2,
-            "ident": 2004,
-            "state": "Pending",
-            "keyValue": "INV-2004",
-            "status": "",
-            "tags": [],
-            "attemptNumber": 1,
-            "loadedDate": _recent(65),
-            "deferredDate": None,
-            "lockedDate": None,
-            "lastUpdated": _recent(60),
-            "workTimeInSeconds": 0,
-            "attemptWorkTimeInSeconds": 0,
-            "exceptionReason": None,
-            "resource": None,
-            "sessionId": None,
-            "sla": 90,
-            "slaDatetime": _recent(-120),  # still ahead
-            "processName": "Invoice Processing",
-            "isSuggested": False,
-        },
-        {
-            "queue": _D_QUEUE_PAYMENTS,
-            "id": "f3b2a190-8c47-4e2d-9b55-0000000d0405",
-            "priority": 1,
-            "ident": 5001,
-            "state": "Exceptioned",
-            "keyValue": "PAY-5001",
-            "status": "",
-            "tags": [],
-            "attemptNumber": 1,
-            "loadedDate": _recent(215),
-            "deferredDate": None,
-            "lockedDate": _recent(212),
-            "lastUpdated": _recent(210),
-            "exceptionedDate": _recent(210),
-            "workTimeInSeconds": 30,
-            "attemptWorkTimeInSeconds": 30,
-            "exceptionReason": "BACS gateway timed out",
-            "resource": "BOT-F02",
-            "sessionId": "e8a9d7c2-5f10-4b3e-bd64-0000000d0309",
-            "sla": 20,
-            "slaDatetime": _recent(180),  # breached
-            "processName": "Payment Run",
-            "isSuggested": False,
-        },
-        {
-            "queue": _D_QUEUE_PAYMENTS,
-            "id": "f3b2a190-8c47-4e2d-9b55-0000000d0406",
-            "priority": 1,
-            "ident": 5002,
-            "state": "Pending",
-            "keyValue": "PAY-5002",
-            "status": "",
-            "tags": [],
-            "attemptNumber": 1,
-            "loadedDate": _recent(50),
-            "deferredDate": None,
-            "lockedDate": None,
-            "lastUpdated": _recent(45),
-            "workTimeInSeconds": 0,
-            "attemptWorkTimeInSeconds": 0,
-            "exceptionReason": None,
-            "resource": None,
-            "sessionId": None,
-            "sla": 60,
-            "slaDatetime": _recent(-15),  # still ahead
-            "processName": "Payment Run",
-            "isSuggested": False,
-        },
-    ]
-
     # Stage logs for a couple of notable sessions so the session-log viewer has
     # content: a clean completed run and the headline terminated one (its
     # Exception stage surfaces in the errors-only filter).
@@ -2612,7 +2948,9 @@ def demo_estate() -> MockBPClient:
         ],
     }
 
-    deferred_by_queue = {_QUEUE_INVOICES: 6, _D_QUEUE_PAYMENTS: 2}
+    # Shares _DEMO_DEFERRED_BY_QUEUE with _demo_queue_items() (above), which
+    # generates the matching Deferred item rows — the two can't drift apart.
+    deferred_by_queue = dict(_DEMO_DEFERRED_BY_QUEUE)
 
     # A week of per-worker heat-map so resource_utilization has a real spread
     # to aggregate: F01/F02 run a full 9-5 most days (saturated), O01 a lighter
