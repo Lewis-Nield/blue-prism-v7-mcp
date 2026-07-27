@@ -7,6 +7,122 @@ additive endpoint is a minor bump.
 
 ## [Unreleased]
 
+Demo-estate coherence: the bundled demo estate now behaves like an estate rather
+than a set of numbers that happen to sit next to each other. Every figure it
+reports traces to something in the fixture, and every governed write visibly
+moves the figures downstream of it.
+
+The trigger was an investigation that chased "the worker statuses don't make
+sense" through a consuming console's scoring rules and found the rules correct in
+every case — the fixture was contradicting itself, and the console was faithfully
+reporting the contradiction. A mock whose numbers cannot move is not a cheaper
+estate; it is a different thing wearing the same interface, and it silently
+invalidates every act-then-observe loop built against it.
+
+**This release touches `mock.py` only.** The live-estate code path is byte-for-byte
+unchanged, so an upgrade cannot alter what the server does against a real Blue
+Prism instance. It is a minor rather than a patch bump because the demo estate is
+a published part of the artifact: almost every number it returns is different, and
+`MockBPClient` gains a constructor keyword.
+
+### Added
+- **`MockBPClient(drain_tick=...)`** — how long one queue item takes to work while
+  a session drains its queue, defaulting to 5 seconds. Draining the 64-item
+  Payments backlog at that queue's declared 1:48 average work time is about two
+  hours of wall clock: true to life, useless to demonstrate. The tick compresses
+  *when* things happen while leaving *what* happens honest, and it is a parameter
+  rather than a constant so tests can pin it.
+- **~3,200 real queue items behind the demo queues.** The summaries declared
+  thousands while six items existed in total, so any drill-in returned almost
+  nothing at any lookback — the window was never the cause. A deterministic
+  generator (a pure function of an index, no RNG, so reads reproduce run to run)
+  tops up to each queue's declared counts, and those counts are now derived from
+  the items rather than hand-written. The six original hand-written items stay as
+  the foreground, because they carry the deliberate narrative: the SLA-breached
+  PAY-5001, the exception rows, and the item linked to a terminated session.
+  `Deferred` items are generated to match the deferred map, which was another
+  free-standing number.
+- **A utilization row for every worker, every day.** Only three of the eight had
+  one. A worker that reports no data is a case the roll-up must handle, and it
+  still is — but in a demo an absent worker reads as broken, so the two offline
+  bots now get real rows that are simply zero-filled.
+
+### Changed
+- **A worker's status now agrees with its sessions.** BOT-F01 read `Working` with
+  `activeSessionCount: 1` while every one of its sessions was finished, so a
+  consumer joining the two correctly reported a worker working on nothing. The
+  invariant is written into `demo_estate()`'s docstring and pinned by tests, so it
+  cannot drift back silently: every busy worker holds a matching in-flight
+  session, `activeSessionCount` equals that count, and any run meant to read stale
+  says so. BOT-F02's five-day stuck run is the one deliberate exception and stays.
+- **A session drains its queue instead of waiting out a timer.** Starting a
+  queue-backed process locks that queue's oldest pending item; each tick completes
+  it and locks the next; the session ends by itself when nothing is left pending.
+  This is what makes a "stalled queue" signal — a running queue with a backlog and
+  nothing locked — able to clear, which previously no operator action could
+  achieve. Stopping mid-drain returns the held item to `Pending` with the counts
+  restored. Queue-less sessions keep the old timer behaviour untouched.
+- **Licence usage is derived from the estate it describes.** `concurrentSessionsUsed`
+  and `runtimeResourcesUsed` were hand-picked literals; the latter had already
+  drifted, claiming 5 against 6 non-offline workers.
+- **Utilization responds to work done.** Completed sessions and drained items
+  contribute worked minutes to the heat map, so the duty cycle moves when the
+  estate does instead of standing as a static seed.
+- **Triggering a schedule starts its tasks' sessions**, occupying their workers
+  and locking their queue items exactly as a manual start does — so the whole
+  chain, from trigger through worker and queue to the duty cycle, is observable
+  from one governed action. Deliberately no `onSuccessTaskId` chaining,
+  `delayAfterEnd` or `failFastOnError`: that is scheduler semantics well beyond
+  what a fixture needs, and it would pull product opinion into a generic layer.
+- **A future `start_time` on `trigger_schedule` now defers the run** rather than
+  starting it immediately. The tool documents the parameter as running the
+  schedule once *at* that time; the sessions started the instant the call was
+  made. The pending start is held and fired once the clock reaches it, so the
+  path stays coherent instead of going inert.
+- **`stop_schedule` stops what its trigger started.** It terminated the log row
+  and left the sessions running, their workers occupied, their items locked and
+  their licences consumed. It now stops exactly the sessions that run started,
+  leaving pre-existing in-flight runs on the same workers untouched, and cancels a
+  deferred trigger that has not fired.
+- **Dependabot no longer opens a PR for every setuptools release.**
+  `build-system.requires` is a floor, not a pin — raising it only narrows who can
+  build from the sdist, and when a setuptools advisory landed it raised the floor
+  rather than the version actually installed. The alert still shows in the
+  security tab and the fix still belongs in `uv.lock`, which is where the resolved
+  version lives.
+
+### Fixed
+- **Reads that skipped settling returned order-dependent nonsense.** Only
+  `get_queues()` settled, which was harmless while item states were
+  time-invariant and incoherent the moment they were not: an items-first read
+  showed one set of counts and the very next queue read showed another. Every
+  queue read settles now, as does `get_resource_utilization`.
+- **Writes that skipped settling rewound the estate.** `stop_session` mutated
+  without settling, so a stop with no intervening read discarded every tick the
+  session had worked and handed its item back to `Pending` — start, advance two
+  hours, stop, and the queue was exactly as it had been before starting.
+- **A drain paced itself to the reader rather than to the tick.** Each pass
+  re-stamped the next lock at the read time, so a polling cadence that was not a
+  multiple of the tick silently shed work, and a drained batch collapsed onto a
+  single instant. Items are now stamped at their own tick boundary and the next
+  lock inherits that stamp, so the remainder carries and completions read as a run
+  spaced one tick apart.
+- **The utilization seed was shared between clients.** Its `usages` list was
+  shallow-copied, so every `MockBPClient` built from the default held the same
+  list object — invisible until contributions began mutating it in place, at which
+  point one client's worked minutes would have leaked into every other client and
+  test built from the same untouched default.
+- **`get_resource_utilization` handed callers its live lists.** The same aliasing
+  one boundary further out: rows were shallow-copied, so an already-returned
+  snapshot silently changed under whoever held it as later work contributed
+  minutes, and a caller writing into its own copy wrote straight back into the
+  fixture.
+- **A long session's utilization was truncated into a single hour.** A whole run's
+  elapsed time went into one bucket, where the 60-minute clamp discarded the rest:
+  a three-hour run read as thirty minutes, and how much survived depended on when
+  the caller happened to read. Elapsed time is now spread across the hours it
+  actually spans, day rollover included.
+
 ## [0.19.0] — 2026-07-26
 
 ### Added
