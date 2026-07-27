@@ -2663,6 +2663,53 @@ class TestQueueDrainingSessions:
         session = client.get_session(sid)
         assert session["status"] == "Running"
 
+    def test_items_naming_an_absent_queue_start_a_plain_session(self):
+        # A fixture whose items point at a queue row that isn't there must not
+        # take the drain path — the session falls back to flat settle_after.
+        now, advance = self._clock("2026-08-01T09:00:00Z")
+        client = self._client(now)
+        for item in client._queue_items:
+            item["queue"] = "q-gone"
+        result = client.start_process("p1", "r1")
+        sid = result["sessionId"]
+        assert sid not in client._session_locks
+
+        advance(seconds=60)  # a drain would have finished; settle_after has not
+        assert client.get_session(sid)["status"] == "Running"
+
+        advance(seconds=300)
+        assert client.get_session(sid)["status"] == "Completed"
+
+    def test_a_held_item_that_disappears_drops_the_lock(self):
+        # Defensive: if the held item is gone from the fixture the session
+        # can't drain, so it releases the lock and reverts to settle_after
+        # rather than carrying a dangling reference.
+        now, advance = self._clock("2026-08-01T09:00:00Z")
+        client = self._client(now)
+        result = client.start_process("p1", "r1")
+        sid = result["sessionId"]
+        client._queue_items = [i for i in client._queue_items if i["id"] != "item-1"]
+
+        advance(seconds=60)
+        assert client.get_session(sid)["status"] == "Running"
+        assert sid not in client._session_locks
+
+        advance(seconds=300)
+        assert client.get_session(sid)["status"] == "Completed"
+
+    def test_a_queue_that_disappears_mid_drain_stalls_the_session(self):
+        # Defensive: losing the queue row mid-drain must not raise. The
+        # session keeps its lock and simply stops progressing.
+        now, advance = self._clock("2026-08-01T09:00:00Z")
+        client = self._client(now)
+        result = client.start_process("p1", "r1")
+        sid = result["sessionId"]
+        client._queues = []
+
+        advance(seconds=60)
+        assert client.get_session(sid)["status"] == "Running"
+        assert client._session_locks[sid] == "item-1"
+
 
 # --- Phase 12: transport governance -------------------------------------------
 
