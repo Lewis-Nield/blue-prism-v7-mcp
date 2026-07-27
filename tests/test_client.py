@@ -2200,6 +2200,71 @@ class TestWriteFidelityJourneys:
         assert row["utilizationDate"] == "2026-08-01"
         assert row["usages"][9] == 6
 
+    def test_a_long_flat_session_spreads_its_minutes_across_every_hour_it_spans(self):
+        # A run outliving one hour bucket must have each hour's own share of
+        # its elapsed time recorded, not have the whole span dumped into a
+        # single hour where the 60-minute clamp then throws the remainder
+        # away — the result must not depend on how long the caller waited
+        # before reading, only on how long the session actually ran.
+        now, advance = self._clock("2026-08-01T09:00:00Z")
+        client = MockBPClient(now_fn=now, settle_after=__import__("datetime").timedelta(minutes=5))
+        client.start_process(
+            "7c0e4f2b-93d1-4b66-a2af-000000000201", "5d2c8e0a-71b4-4a8e-9f30-000000000001"
+        )
+
+        advance(minutes=180)
+        client.get_sessions()  # triggers _settle, completing the run
+
+        rows = client.get_resource_utilization("2026-08-01")
+        row = next(r for r in rows if r["digitalWorkerName"] == "BOT-01")
+        assert row["usages"][9] == 60
+        assert row["usages"][10] == 60
+        assert row["usages"][11] == 60
+        assert sum(row["usages"]) == 180
+
+    def test_get_resource_utilization_returns_an_independent_snapshot(self):
+        # A row returned here must not be the fixture's own live "usages"
+        # list — otherwise a later contribution mutates an already-returned
+        # snapshot out from under whoever holds it, and a caller writing into
+        # its own copy would corrupt the fixture right back. Uses demo_estate
+        # rather than the lean fixture: it already seeds a today's heat-map
+        # row for BOT-H01 (hour 19 idle), so the first read needs no prior
+        # contribution to find a row to snapshot.
+        from datetime import datetime, timedelta, timezone
+
+        current = [datetime(2026, 7, 27, 19, 0, tzinfo=timezone.utc)]
+        client = demo_estate()
+        client._now = lambda: current[0]
+        proc = next(p for p in client._processes if p["processName"] == "Invoice Processing")
+        res = next(r for r in client._resources if r["name"] == "BOT-H01")
+        client.start_process(proc["processId"], res["id"])
+
+        snap = client.get_resource_utilization("2026-07-27")
+        row = next(r for r in snap if r["digitalWorkerName"] == "BOT-H01")
+        assert row["usages"][19] == 0
+
+        current[0] += timedelta(minutes=45)
+        client.get_queues()  # triggers _settle, which contributes minutes as the run proceeds
+
+        # The stale snapshot's row must not have silently moved underneath us.
+        assert row["usages"][19] == 0
+
+        live = next(
+            r
+            for r in client.get_resource_utilization("2026-07-27")
+            if r["digitalWorkerName"] == "BOT-H01"
+        )
+        assert live["usages"][19] > 0
+
+        # And the fixture survives a caller mutating its own copy.
+        live["usages"][19] = 999
+        fresh = next(
+            r
+            for r in client.get_resource_utilization("2026-07-27")
+            if r["digitalWorkerName"] == "BOT-H01"
+        )
+        assert fresh["usages"][19] != 999
+
     def test_seeded_fixtures_untouched_by_settle(self):
         now, advance = self._clock()
         client = MockBPClient(now_fn=now, settle_after=__import__("datetime").timedelta(minutes=5))
@@ -2364,6 +2429,57 @@ class TestWriteFidelityJourneys:
         last = client.get_last_schedule_run(1)
         assert last["status"] == "terminated"
         assert last["duration"] == "00:00:00"
+
+    def test_trigger_schedule_with_a_future_start_time_defers_starting_its_sessions(self):
+        # Fix for A9's regression: a start_time in the future must defer the
+        # schedule's tasks, not start them the instant the trigger call is
+        # made — trigger_schedule's own docs promise a one-off run AT that
+        # time, not right now regardless of when the caller asked for.
+        now, advance = self._clock()
+        timedelta = __import__("datetime").timedelta
+        client = MockBPClient(now_fn=now, settle_after=timedelta(minutes=5))
+        usage_before = client.get_current_limits_and_usage()["concurrentSessionsUsed"]
+        future_minutes = 24 * 60
+        future = (now() + timedelta(minutes=future_minutes)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        client.trigger_schedule("Daily Invoice Run", start_time=future)
+
+        bot = next(r for r in client.get_resources() if r["name"] == "BOT-01")
+        assert bot["displayStatus"] == "Idle"
+        assert client.get_current_limits_and_usage()["concurrentSessionsUsed"] == usage_before
+
+        # A read before the due time must not fire it early.
+        advance(minutes=30)
+        client.get_sessions()
+        bot = next(r for r in client.get_resources() if r["name"] == "BOT-01")
+        assert bot["displayStatus"] == "Idle"
+
+        # Once the clock reaches the due time, the next read fires it.
+        advance(minutes=future_minutes - 30)
+        client.get_sessions()
+        bot = next(r for r in client.get_resources() if r["name"] == "BOT-01")
+        assert bot["displayStatus"] == "Working"
+        assert client.get_current_limits_and_usage()["concurrentSessionsUsed"] == usage_before + 1
+
+    def test_stopping_a_schedule_cancels_a_not_yet_fired_future_trigger(self):
+        # stop_schedule must drop a deferred trigger outright — otherwise a
+        # caller who stops a future-dated run believing it cancelled would
+        # still see it start once the clock caught up to the original time.
+        now, advance = self._clock()
+        timedelta = __import__("datetime").timedelta
+        client = MockBPClient(now_fn=now, settle_after=timedelta(minutes=5))
+        future = (now() + timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        client.trigger_schedule("Daily Invoice Run", start_time=future)
+        assert client._pending_schedule_starts
+
+        client.stop_schedule("Daily Invoice Run")
+        assert not client._pending_schedule_starts
+
+        advance(minutes=24 * 60 + 1)
+        client.get_sessions()
+
+        bot = next(r for r in client.get_resources() if r["name"] == "BOT-01")
+        assert bot["displayStatus"] == "Idle"
 
     def test_settle_discards_orphaned_run_id(self):
         now, advance = self._clock()

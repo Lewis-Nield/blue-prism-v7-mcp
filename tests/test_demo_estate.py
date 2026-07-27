@@ -303,3 +303,58 @@ class TestDemoEstateScheduleTrigger:
         last = client.get_last_schedule_run(2)
         assert last is not None
         assert last["status"] == "running"
+
+    def test_triggering_a_schedule_with_a_future_start_time_defers_its_sessions(self):
+        # trigger_schedule documents a future start_time as "run it once at
+        # that time instead" — a trigger scheduled days out must not occupy
+        # workers this instant, only once the mock clock reaches that time.
+        client = demo_estate()
+        before = {r["name"]: r["activeSessionCount"] for r in client.get_resources()}
+
+        client.trigger_schedule("Nightly Payment Run", "2099-01-01T09:00:00Z")
+
+        after = {r["name"]: r["activeSessionCount"] for r in client.get_resources()}
+        assert after["BOT-F02"] == before["BOT-F02"]
+        assert after["BOT-F03"] == before["BOT-F03"]
+
+        payments = next(q for q in client.get_queues() if q["name"] == "Payments")
+        assert payments["lockedItemCount"] == 0
+
+        # The log row itself still exists, running, dated for the future.
+        last = client.get_last_schedule_run(2)
+        assert last is not None
+        assert last["startTime"] == "2099-01-01T09:00:00Z"
+        assert last["status"] == "running"
+
+    def test_stopping_a_triggered_schedule_stops_only_the_sessions_it_started(self):
+        # stop_schedule is documented as trigger_schedule's sibling: it must
+        # undo exactly what the trigger started, leaving the estate's own
+        # pre-seeded in-flight runs on the same workers untouched.
+        client = demo_estate()
+        client.trigger_schedule("Nightly Payment Run")
+
+        started = [
+            s
+            for s in client._sessions
+            if s["status"] == "Running" and s["resourceName"] in ("BOT-F02", "BOT-F03")
+        ]
+        assert len(started) == 5
+
+        client.stop_schedule("Nightly Payment Run")
+
+        still = [
+            s
+            for s in client._sessions
+            if s["status"] == "Running" and s["resourceName"] in ("BOT-F02", "BOT-F03")
+        ]
+        # Only the two pre-seeded in-flight runs remain: BOT-F02's silently
+        # stuck 5-day Invoice Processing session and BOT-F03's own Payment
+        # Run, both untouched by a stop meant for the trigger's own sessions.
+        assert len(still) == 2
+
+        resources = {r["name"]: r for r in client.get_resources()}
+        assert resources["BOT-F02"]["activeSessionCount"] == 0
+        assert resources["BOT-F03"]["activeSessionCount"] == 1
+
+        payments = next(q for q in client.get_queues() if q["name"] == "Payments")
+        assert payments["lockedItemCount"] == 0

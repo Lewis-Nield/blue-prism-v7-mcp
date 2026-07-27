@@ -914,6 +914,23 @@ class MockBPClient:
         # its queue empties (_drain_session_queue) or it is stopped mid-drain
         # (stop_session), which hands the held item back to Pending.
         self._session_locks: dict[str, str] = {}
+        # A future-dated trigger_schedule call defers its tasks' sessions
+        # rather than starting them immediately — each entry is (start-at
+        # datetime, schedule id string, the scheduleLogId of the run it
+        # belongs to). _settle() fires due entries at its end; stop_schedule
+        # drops a run's not-yet-fired entry outright to cancel it.
+        self._pending_schedule_starts: list[tuple[datetime, str, int]] = []
+        # scheduleLogId -> the session ids that run's trigger started, so
+        # stop_schedule can stop exactly those sessions and no others (the
+        # estate's own pre-seeded in-flight sessions on the same workers must
+        # survive a stop untouched).
+        self._schedule_run_sessions: dict[int, list[str]] = {}
+        # Re-entrancy guard: firing a pending schedule start calls
+        # start_process, which calls _settle() itself. Without this, that
+        # nested call would re-walk _live_run_ids and could complete the same
+        # session twice — double-decrementing concurrentSessionsUsed and
+        # double-contributing utilization.
+        self._settling = False
 
     def clear_cache(self) -> None:
         """No-op — the mock has no cache, but keeps the interface identical."""
@@ -1054,6 +1071,30 @@ class MockBPClient:
         hour = when.hour
         row["usages"][hour] = min(60, row["usages"][hour] + minutes)
 
+    def _contribute_utilization_span(
+        self, resource_id: str, resource_name: str, start: datetime, end: datetime
+    ) -> None:
+        """Spread an elapsed run's minutes across every hour bucket it covers.
+
+        A single _contribute_utilization(..., when=end) call for a run that
+        spans more than an hour would dump the whole elapsed span into one
+        bucket, where the min(60, ...) clamp then silently discards whatever
+        didn't fit — so a 3-hour run reads as 30 minutes worked, and how much
+        survives depends on when the caller happens to read. Walking the span
+        hour by hour instead means each bucket only ever receives the minutes
+        that actually fell within it, so the clamp is never reached by a
+        single well-formed run. Day rollover is handled for free — cursor's
+        date changes and _contribute_utilization keys on when.date().
+        """
+        cursor = start
+        while cursor < end:
+            hour_end = (cursor + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+            slice_end = min(hour_end, end)
+            minutes = int((slice_end - cursor).total_seconds() // 60)
+            if minutes:
+                self._contribute_utilization(resource_id, resource_name, minutes, cursor)
+            cursor = slice_end
+
     def _complete_session_run(self, session_id: str, session: dict, now: datetime) -> None:
         session["status"] = "Completed"
         session["endTime"] = self._fmt(now)
@@ -1061,18 +1102,16 @@ class MockBPClient:
         if session_id not in self._session_locks:
             # Queue-bound completions already contributed per item drained
             # below — only a flat (queue-less) run's own elapsed time lands
-            # here, or it would be double-counted.
+            # here, or it would be double-counted. Spread across the hours it
+            # actually spans (see _contribute_utilization_span) rather than
+            # dumping it all into the hour of `now` — a run outliving one
+            # hour bucket would otherwise have its remainder clamped away.
             start = datetime.strptime(session["startTime"], "%Y-%m-%dT%H:%M:%SZ").replace(
                 tzinfo=timezone.utc
             )
-            elapsed_minutes = max(0, int((now - start).total_seconds() // 60))
-            if elapsed_minutes:
-                self._contribute_utilization(
-                    session.get("resourceId", ""),
-                    session.get("resourceName", ""),
-                    elapsed_minutes,
-                    now,
-                )
+            self._contribute_utilization_span(
+                session.get("resourceId", ""), session.get("resourceName", ""), start, now
+            )
         self._limits_and_usage["concurrentSessionsUsed"] = max(
             0, self._limits_and_usage.get("concurrentSessionsUsed", 1) - 1
         )
@@ -1142,46 +1181,72 @@ class MockBPClient:
             item = next_item
 
     def _settle(self) -> None:
-        now = self._now()
-        for sid in list(self._live_run_ids):
-            session = self._find_session(sid)
-            if session is None:
-                self._live_run_ids.discard(sid)
-                self._session_locks.pop(sid, None)
-                continue
-            if sid in self._session_locks:
-                self._drain_session_queue(sid, session, now)
-                continue
-            start = datetime.strptime(session["startTime"], "%Y-%m-%dT%H:%M:%SZ").replace(
-                tzinfo=timezone.utc
-            )
-            if now - start < self._settle_after:
-                continue
-            self._complete_session_run(sid, session, now)
+        # A nested call — firing a due pending schedule start below calls
+        # start_process, which calls _settle() itself — must no-op rather
+        # than re-walk the session loop above it: without this guard the
+        # inner call would see the same just-started sessions their outer
+        # frame already handled this pass and could double-complete one,
+        # double-decrementing concurrentSessionsUsed and double-contributing
+        # utilization.
+        if self._settling:
+            return
+        self._settling = True
+        try:
+            now = self._now()
+            for sid in list(self._live_run_ids):
+                session = self._find_session(sid)
+                if session is None:
+                    self._live_run_ids.discard(sid)
+                    self._session_locks.pop(sid, None)
+                    continue
+                if sid in self._session_locks:
+                    self._drain_session_queue(sid, session, now)
+                    continue
+                start = datetime.strptime(session["startTime"], "%Y-%m-%dT%H:%M:%SZ").replace(
+                    tzinfo=timezone.utc
+                )
+                if now - start < self._settle_after:
+                    continue
+                self._complete_session_run(sid, session, now)
 
-        settled_logs: set[int] = set()
-        for log_id in list(self._live_schedule_log_ids):
-            log_row = None
-            for rows in self._schedule_logs.values():
-                for r in rows:
-                    if r.get("scheduleLogId") == log_id:
-                        log_row = r
+            settled_logs: set[int] = set()
+            for log_id in list(self._live_schedule_log_ids):
+                log_row = None
+                for rows in self._schedule_logs.values():
+                    for r in rows:
+                        if r.get("scheduleLogId") == log_id:
+                            log_row = r
+                            break
+                    if log_row is not None:
                         break
-                if log_row is not None:
-                    break
-            if log_row is None:
-                self._live_schedule_log_ids.discard(log_id)
-                continue
-            start = datetime.strptime(log_row["startTime"], "%Y-%m-%dT%H:%M:%SZ").replace(
-                tzinfo=timezone.utc
-            )
-            if now - start < self._settle_after:
-                continue
-            log_row["status"] = "completed"
-            log_row["endTime"] = self._fmt(now)
-            log_row["duration"] = self._duration(start, now)
-            settled_logs.add(log_id)
-        self._live_schedule_log_ids -= settled_logs
+                if log_row is None:
+                    self._live_schedule_log_ids.discard(log_id)
+                    continue
+                start = datetime.strptime(log_row["startTime"], "%Y-%m-%dT%H:%M:%SZ").replace(
+                    tzinfo=timezone.utc
+                )
+                if now - start < self._settle_after:
+                    continue
+                log_row["status"] = "completed"
+                log_row["endTime"] = self._fmt(now)
+                log_row["duration"] = self._duration(start, now)
+                settled_logs.add(log_id)
+            self._live_schedule_log_ids -= settled_logs
+
+            # Drain due deferred schedule starts last, so start_process's own
+            # settle-first guarantee still holds by the time these fire — the
+            # sessions/logs above are already current. Entries are popped
+            # before firing (not after) so the nested _settle a fired
+            # start_process triggers can't see and re-fire the same entry.
+            due = [entry for entry in self._pending_schedule_starts if entry[0] <= now]
+            if due:
+                self._pending_schedule_starts = [
+                    entry for entry in self._pending_schedule_starts if entry[0] > now
+                ]
+                for _start_at, sid, schedule_log_id in due:
+                    self._start_schedule_task_sessions(sid, schedule_log_id)
+        finally:
+            self._settling = False
 
     # --- Tier 1 reads -------------------------------------------------------
 
@@ -1455,9 +1520,16 @@ class MockBPClient:
         # first like every other read: a completing session contributes
         # minutes to today's row (see _contribute_utilization), so this must
         # not lag what get_queues()/get_sessions() already report as done.
+        # A plain dict(r) would still share the row's "usages" list object
+        # with the fixture — the same hazard __init__ already guards against
+        # at construction — so a returned snapshot would silently change
+        # under the caller as later runs contribute more minutes. A caller-
+        # supplied seed row without a "usages" key (a test stubbing a bare
+        # {"utilizationDate": ...}) has nothing to deep-copy, so it passes
+        # through as a plain shallow copy exactly as before.
         self._settle()
         return [
-            dict(r)
+            {**r, "usages": list(r["usages"])} if "usages" in r else dict(r)
             for r in self._resource_utilization
             if (r.get("utilizationDate") or "") >= start_date
         ]
@@ -1658,8 +1730,14 @@ class MockBPClient:
             if parsed.tzinfo is not None:
                 parsed = parsed.astimezone(timezone.utc)
             st = self._fmt(parsed)
+            # A naive parse (a date-only literal, or an offset-less one) has
+            # no timezone of its own; every other timestamp this fixture
+            # writes is UTC, so treat it as UTC here too rather than leaving
+            # it incomparable against the mock clock (always aware) below.
+            start_dt = parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
         else:
             st = self._fmt(now)
+            start_dt = now
         all_ids = [r["scheduleLogId"] for rows in self._schedule_logs.values() for r in rows]
         next_id = max(all_ids, default=0) + 1
         log_row = {
@@ -1674,18 +1752,29 @@ class MockBPClient:
         }
         self._schedule_logs.setdefault(sid, []).append(log_row)
         self._live_schedule_log_ids.add(next_id)
-        self._start_schedule_task_sessions(sid)
+        # A start_time in the future defers the tasks' sessions instead of
+        # starting them right now — trigger_schedule is documented as running
+        # the schedule once AT that time, not as a same-instant no-op. now or
+        # earlier (including no start_time at all) starts exactly as before.
+        # _settle() drains due entries once the mock clock reaches them.
+        if start_dt > now:
+            self._pending_schedule_starts.append((start_dt, sid, next_id))
+        else:
+            self._start_schedule_task_sessions(sid, next_id)
         return {"schedule": schedule_id, "status": "Triggered"}
 
-    def _start_schedule_task_sessions(self, schedule_id: str) -> None:
+    def _start_schedule_task_sessions(self, schedule_id: str, schedule_log_id: int) -> None:
         """Start a session for every task session under a triggered schedule.
 
         Fires every task's sessions at once — no onSuccessTaskId chaining,
         delayAfterEnd or failFastOnError, which is scheduler semantics beyond
         what a demo fixture needs. Runs each through start_process itself, so
         a triggered schedule occupies workers and locks queue items exactly
-        as a manual start does.
+        as a manual start does. Every session id started is recorded under
+        this run's scheduleLogId, so stop_schedule can later stop exactly
+        the sessions this trigger caused and no others.
         """
+        started: list[str] = []
         for task in self._schedule_tasks.get(schedule_id, []):
             for task_session in self._task_sessions.get(str(task["id"]), []):
                 process_id = next(
@@ -1701,7 +1790,10 @@ class MockBPClient:
                     None,
                 )
                 if process_id is not None and resource_id is not None:
-                    self.start_process(process_id, resource_id)
+                    result = self.start_process(process_id, resource_id)
+                    started.append(result["sessionId"])
+        if started:
+            self._schedule_run_sessions.setdefault(schedule_log_id, []).extend(started)
 
     def create_queue_items(self, queue_id: str, items: list[dict]) -> dict:
         queue = next((q for q in self._queues if q["id"] == queue_id), None)
@@ -1755,7 +1847,28 @@ class MockBPClient:
                     tzinfo=timezone.utc
                 )
                 row["duration"] = self._duration(start, now)
-                self._live_schedule_log_ids.discard(row["scheduleLogId"])
+                log_id = row["scheduleLogId"]
+                self._live_schedule_log_ids.discard(log_id)
+                # trigger_schedule's sibling: stop exactly the sessions this
+                # run started, reusing stop_session so worker release, the
+                # licence decrement and returning a held queue item to
+                # Pending all happen the same way a manual stop would. The
+                # estate's own pre-seeded in-flight sessions on the same
+                # workers are never in this list, so they survive untouched.
+                for session_id in self._schedule_run_sessions.pop(log_id, []):
+                    session = self._find_session(session_id)
+                    if session is not None and session.get("status") in (
+                        "Running",
+                        "Stopping",
+                        "Warning",
+                    ):
+                        self.stop_session(session_id)
+                # A future-dated trigger that hasn't fired yet is cancelled
+                # outright — otherwise stopping it now wouldn't stop anything
+                # (nothing has started) and it would still start later.
+                self._pending_schedule_starts = [
+                    entry for entry in self._pending_schedule_starts if entry[2] != log_id
+                ]
         return None
 
     # --- Lookup helpers -----------------------------------------------------
