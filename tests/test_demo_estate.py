@@ -9,7 +9,12 @@ silently drift out of self-consistency again.
 
 from datetime import datetime, timezone
 
-from blue_prism_v7_mcp.mock import _DEMO_DEFERRED_BY_QUEUE, _DEMO_HISTORY_BASE_MINUTES, demo_estate
+from blue_prism_v7_mcp.mock import (
+    _DEMO_DEFERRED_BY_QUEUE,
+    _DEMO_HISTORY_BASE_MINUTES,
+    _QUEUE_INVOICES,
+    demo_estate,
+)
 
 
 def _in_flight_sessions_for(resource, sessions):
@@ -152,3 +157,57 @@ class TestDemoEstateQueueItemBacking:
                 + queue["lockedItemCount"]
                 + queue["exceptionedItemCount"]
             )
+
+    def test_generated_idents_are_unique_estate_wide(self):
+        # `ident` is the item table's own identity in v7 — unique across every
+        # queue, not per queue. Hand-picked per-queue ranges overlap as soon as
+        # a count grows, so the generator draws one estate-wide sequence and
+        # this asserts it.
+        client = demo_estate()
+        idents = [i["ident"] for i in client._queue_items]
+        assert len(idents) == len(set(idents))
+        key_values = [i["keyValue"] for i in client._queue_items]
+        assert len(key_values) == len(set(key_values))
+
+
+class TestDemoEstateQueueItemCoherence:
+    """A locked item is one a running session holds right now, and an item's
+    SLA deadline is a fact about its own load time — neither may be asserted
+    independently of the estate around it.
+    """
+
+    def test_every_locked_item_is_held_by_a_live_session(self):
+        client = demo_estate()
+        locked = [i for i in client._queue_items if i["state"] == "Locked"]
+        assert locked, "the estate should hold at least one in-progress item"
+        for item in locked:
+            session = next(
+                (s for s in client._sessions if s["sessionId"] == item["sessionId"]), None
+            )
+            assert session is not None, item["keyValue"]
+            assert session["status"] == "Running", item["keyValue"]
+            assert session["resourceName"] == item["resource"], item["keyValue"]
+            assert session["processName"] == item["processName"], item["keyValue"]
+            # The lock is taken during the run, never before it started.
+            assert item["lockedDate"] >= session["startTime"], item["keyValue"]
+
+    def test_item_sla_deadlines_follow_from_their_own_load_times(self):
+        client = demo_estate()
+        for item in client._queue_items:
+            # The hand-written narrative items carry their own deliberate
+            # deadlines; the generated bulk must be internally consistent.
+            if not item["id"].startswith("a1c4d8e0") or not item["sla"]:
+                continue
+            loaded = datetime.strptime(item["loadedDate"], "%Y-%m-%dT%H:%M:%SZ")
+            deadline = datetime.strptime(item["slaDatetime"], "%Y-%m-%dT%H:%M:%SZ")
+            assert round((deadline - loaded).total_seconds() / 60) == item["sla"], item["keyValue"]
+
+    def test_the_pending_backlog_has_real_breaches_without_being_wholly_late(self):
+        # The A5 wall in the other direction: an SLA drill-in that returns
+        # nothing is as useless as an item read that returns one row — but a
+        # backlog where everything is late is not an estate anyone would demo.
+        client = demo_estate()
+        pending = [i for i in client._queue_items if i["state"] == "Pending"]
+        breached = client.get_queue_items(_QUEUE_INVOICES, state="Pending", within_sla=False)
+        assert breached
+        assert len(breached) < sum(1 for i in pending if i["queue"] == _QUEUE_INVOICES)

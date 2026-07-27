@@ -1598,21 +1598,46 @@ _D_QUEUE_CLOSURES = "9b6f3a1c-2e45-4d07-8c11-0000000d0109"
 # SLA breach and session link, the Invoices exceptions. Every queue's summary
 # still needs to declare a real backlog, so _demo_queue_items() below tops
 # each queue up to these per-state counts. This table already excludes what
-# the hand-written items contribute — e.g. Invoices declares 120/812/3/47
-# pending/completed/locked/exceptioned, of which the hand-written items are
-# 1/1/0/2, so the generator's own share is 119/811/3/45. Payments' two
-# hand-written items are 1 pending/1 exceptioned (no completed of its own),
-# so its share of the declared 64/540/0/18 is 63/540/0/17.
-_DEMO_QUEUE_TOPUP_COUNTS: dict[str, tuple[int, int, int, int]] = {
-    _QUEUE_INVOICES: (119, 811, 3, 45),
-    _D_QUEUE_PAYMENTS: (63, 540, 0, 17),
-    _QUEUE_ONBOARDING: (35, 214, 0, 4),
-    _D_QUEUE_PAYROLL: (4, 320, 0, 0),
-    _D_QUEUE_EXPENSES: (9, 410, 1, 0),
-    _D_QUEUE_VENDOR: (2, 95, 0, 0),
-    _D_QUEUE_COMPLIANCE: (0, 150, 0, 0),
-    _D_QUEUE_MAILROOM: (7, 260, 0, 0),
-    _D_QUEUE_CLOSURES: (1, 73, 0, 0),
+# the hand-written items contribute — e.g. Invoices declares 120/812/47
+# pending/completed/exceptioned, of which the hand-written items are 1/1/2,
+# so the generator's own share is 119/811/45. Payments' two hand-written
+# items are 1 pending/1 exceptioned (no completed of its own), so its share
+# of the declared 64/540/18 is 63/540/17. Locked is NOT a top-up count — a
+# locked item means a session is working it right now, so those rows come
+# from _DEMO_QUEUE_LIVE_LOCKS below instead.
+_DEMO_QUEUE_TOPUP_COUNTS: dict[str, tuple[int, int, int]] = {
+    _QUEUE_INVOICES: (119, 811, 45),
+    _D_QUEUE_PAYMENTS: (63, 540, 17),
+    _QUEUE_ONBOARDING: (35, 214, 4),
+    _D_QUEUE_PAYROLL: (4, 320, 0),
+    _D_QUEUE_EXPENSES: (9, 410, 0),
+    _D_QUEUE_VENDOR: (2, 95, 0),
+    _D_QUEUE_COMPLIANCE: (0, 150, 0),
+    _D_QUEUE_MAILROOM: (7, 260, 0),
+    _D_QUEUE_CLOSURES: (1, 73, 0),
+}
+
+# queue id -> the locked items this estate can truthfully hold: one per
+# in-flight session against that queue's process, since a Locked item is one
+# a running session holds *now*. Generating locked rows freely instead would
+# reintroduce exactly the incoherence this estate keeps closing — an item
+# locked weeks ago by a bot that has no session at all, which reads as a
+# stuck lock nobody meant to seed. Each entry is
+# (resource name, session id, that session's start), and the item's lock is
+# taken a minute into the run.
+#
+# Payments deliberately holds none: its narrative is a Running queue with a
+# heavy backlog and NOTHING in progress. Every other queue has no in-flight
+# session against its process, so it holds none either.
+_DEMO_QUEUE_LIVE_LOCKS: dict[str, list[tuple[str, str, str]]] = {
+    _QUEUE_INVOICES: [
+        # BOT-F01's healthy four-minute run (session #13).
+        ("BOT-F01", "e8a9d7c2-5f10-4b3e-bd64-0000000d0313", _recent(4)),
+        # BOT-F02's silently stuck five-day run (session #12) — its item has
+        # been locked just as long, which is what makes a stuck lock visible
+        # from the queue side as well as the session side.
+        ("BOT-F02", "e8a9d7c2-5f10-4b3e-bd64-0000000d0312", _ts(5, "16:00:00")),
+    ],
 }
 
 # Deferred items sit outside the four counts above (WorkQueueSummary has no
@@ -1621,23 +1646,31 @@ _DEMO_QUEUE_TOPUP_COUNTS: dict[str, tuple[int, int, int, int]] = {
 # demo_estate()'s deferred_by_queue kwarg, so the two can't drift apart.
 _DEMO_DEFERRED_BY_QUEUE: dict[str, int] = {_QUEUE_INVOICES: 6, _D_QUEUE_PAYMENTS: 2}
 
-# queue id -> (keyValue prefix, processName, ident range start, resource pool
-# to draw locked/completed/exceptioned items from). processName tracks a real
-# startable process where this estate has one (Invoices, Payments, Onboarding,
-# Payroll, Compliance) — the link A6 will later use to lock a queue item when
-# a session starts. The remaining queues have no process in this estate; they
-# still get a plausible processName label, they simply never drain via A6.
-_DEMO_QUEUE_ITEM_SHAPE: dict[str, tuple[str, str, int, list[str]]] = {
-    _QUEUE_INVOICES: ("INV", "Invoice Processing", 2100, ["BOT-F01", "BOT-F02", "BOT-F03"]),
-    _D_QUEUE_PAYMENTS: ("PAY", "Payment Run", 5100, ["BOT-F01", "BOT-F02", "BOT-F03"]),
-    _QUEUE_ONBOARDING: ("CUST", "Customer Onboarding", 6000, ["BOT-O01", "BOT-O02"]),
-    _D_QUEUE_PAYROLL: ("PR", "Payroll Run", 7000, ["BOT-H01"]),
-    _D_QUEUE_EXPENSES: ("EXP", "Expense Processing", 8000, ["BOT-F01", "BOT-F02", "BOT-F03"]),
-    _D_QUEUE_VENDOR: ("VEN", "Vendor Setup", 8500, ["BOT-O01", "BOT-O02"]),
-    _D_QUEUE_COMPLIANCE: ("CMP", "Compliance Screening", 8600, ["BOT-O02"]),
-    _D_QUEUE_MAILROOM: ("MAIL", "Mailroom Triage", 8700, ["BOT-O01", "BOT-O02"]),
-    _D_QUEUE_CLOSURES: ("CLOS", "Account Closure", 8800, ["BOT-O01", "BOT-O02"]),
+# queue id -> (keyValue prefix, processName, resource pool to draw
+# completed/exceptioned items from). processName tracks a real startable
+# process where this estate has one (Invoices, Payments, Onboarding, Payroll,
+# Compliance) — the link A6 will later use to lock a queue item when a session
+# starts. The remaining queues have no process in this estate; they still get a
+# plausible processName label, they simply never drain via A6.
+_DEMO_QUEUE_ITEM_SHAPE: dict[str, tuple[str, str, list[str]]] = {
+    _QUEUE_INVOICES: ("INV", "Invoice Processing", ["BOT-F01", "BOT-F02", "BOT-F03"]),
+    _D_QUEUE_PAYMENTS: ("PAY", "Payment Run", ["BOT-F01", "BOT-F02", "BOT-F03"]),
+    _QUEUE_ONBOARDING: ("CUST", "Customer Onboarding", ["BOT-O01", "BOT-O02"]),
+    _D_QUEUE_PAYROLL: ("PR", "Payroll Run", ["BOT-H01"]),
+    _D_QUEUE_EXPENSES: ("EXP", "Expense Processing", ["BOT-F01", "BOT-F02", "BOT-F03"]),
+    _D_QUEUE_VENDOR: ("VEN", "Vendor Setup", ["BOT-O01", "BOT-O02"]),
+    _D_QUEUE_COMPLIANCE: ("CMP", "Compliance Screening", ["BOT-O02"]),
+    _D_QUEUE_MAILROOM: ("MAIL", "Mailroom Triage", ["BOT-O01", "BOT-O02"]),
+    _D_QUEUE_CLOSURES: ("CLOS", "Account Closure", ["BOT-O01", "BOT-O02"]),
 }
+
+# Generated idents come off one running counter from this base, rather than a
+# per-queue range: `ident` is unique estate-wide in v7 (it is the item table's
+# own identity), and hand-picked per-queue ranges silently start overlapping
+# the moment a count in _DEMO_QUEUE_TOPUP_COUNTS grows. The base clears the
+# hand-written items' idents (2001-2004, 5001-5002) and create_queue_items'
+# own len()+9000 allocation. test_demo_estate asserts the uniqueness.
+_DEMO_GENERATED_IDENT_BASE = 100_000
 
 _DEMO_ITEM_EXCEPTION_REASONS = [
     "Validation failed against business rules",
@@ -1665,6 +1698,25 @@ def _demo_item_age_minutes(i: int) -> int:
     return days_ago * 24 * 60 + minutes_of_day
 
 
+def _demo_pending_age_minutes(i: int, sla_minutes: int) -> int:
+    """How long the i-th generated pending item has been waiting.
+
+    A fraction of the item's own SLA rather than a slice of the 90-day
+    history spread: a pending item is current backlog, not archive, and its
+    slaDatetime is loadedDate + sla — so loading the backlog months ago would
+    declare all of it breached. Three in twenty wait past their deadline, so
+    a `within_sla=false` drill-in returns real rows without the queue reading
+    as wholly late. Pure in the index, like _demo_item_age_minutes.
+    """
+    return sla_minutes * (i % 20) // 16
+
+
+def _minutes_since(timestamp: str) -> int:
+    """Whole minutes from an ISO ``...Z`` timestamp to the captured now."""
+    moment = datetime.strptime(timestamp, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    return int((_NOW - moment).total_seconds() // 60)
+
+
 def _demo_item(
     queue_id: str,
     item_id: str,
@@ -1680,14 +1732,17 @@ def _demo_item(
     sla_minutes: int = 60,
     work_seconds: int = 60,
     exception_reason: str | None = None,
+    session_id: str | None = None,
 ) -> dict:
     """One generated WorkQueueItemNoData row, shaped for its state.
 
     A pure function of its arguments — the caller supplies the deterministic
     spread (age, priority, attempt) so this stays a simple state-to-fields
-    mapping. Pending items never breach their own SLA and Locked/Completed/
-    Exceptioned items pass through a lock phase before their terminal date —
-    the same shape the hand-written foreground items already follow.
+    mapping. Every row's ``slaDatetime`` is its own load time plus its ``sla``
+    (so the deadline an item carries always agrees with the two fields it is
+    computed from), and Locked/Completed/Exceptioned items pass through a lock
+    phase before their terminal date — the same shape the hand-written
+    foreground items already follow.
     """
     loaded = _recent(age_minutes)
     row: dict = {
@@ -1715,10 +1770,10 @@ def _demo_item(
         "isSuggested": False,
     }
     if state == "Pending":
-        # Always ahead of its own deadline — breaches are the hand-written
-        # foreground's deliberate job (PAY-5001, the two Invoices exceptions),
-        # not the generated bulk's.
-        row["slaDatetime"] = _recent(-sla_minutes)
+        # slaDatetime stays loadedDate + sla (set above): whether a waiting
+        # item has breached is then a fact about how long it has waited, not a
+        # flag set independently of its own dates. The caller keeps most of
+        # the pending backlog inside its SLA — see _demo_queue_items().
         return row
     if state == "Deferred":
         # A deferred item was Pending before being deferred a few days out —
@@ -1730,6 +1785,7 @@ def _demo_item(
     lock_age = max(age_minutes - 5, 0)
     row["lockedDate"] = _recent(lock_age)
     row["resource"] = resource
+    row["sessionId"] = session_id
     row["lastUpdated"] = row["lockedDate"]
     if state == "Locked":
         return row
@@ -1750,25 +1806,30 @@ def _demo_queue_items() -> list[dict]:
     """Deterministic top-up items for every demo queue.
 
     Tops up each queue to _DEMO_QUEUE_TOPUP_COUNTS' per-state counts (on top
-    of the hand-written foreground items), plus Deferred rows matching
+    of the hand-written foreground items), plus the session-backed Locked rows
+    from _DEMO_QUEUE_LIVE_LOCKS and Deferred rows matching
     _DEMO_DEFERRED_BY_QUEUE — exactly as _demo_history() tops up the twelve
     foreground sessions. A pure function of a running index, no RNG, so
     get_queue_items() is reproducible run to run and tests can assert shape.
     """
     items: list[dict] = []
     counter = 0
-    for queue_id, (pending, completed, locked, exceptioned) in _DEMO_QUEUE_TOPUP_COUNTS.items():
-        prefix, process_name, ident_start, resources = _DEMO_QUEUE_ITEM_SHAPE[queue_id]
-        ident = ident_start
+
+    def next_ident() -> int:
+        # One estate-wide sequence, like the live item table's own identity.
+        return _DEMO_GENERATED_IDENT_BASE + counter
+
+    for queue_id, (pending, completed, exceptioned) in _DEMO_QUEUE_TOPUP_COUNTS.items():
+        prefix, process_name, resources = _DEMO_QUEUE_ITEM_SHAPE[queue_id]
         for state, count in (
             ("Completed", completed),
             ("Exceptioned", exceptioned),
-            ("Locked", locked),
             ("Pending", pending),
         ):
             for _ in range(count):
                 counter += 1
-                ident += 1
+                ident = next_ident()
+                sla_minutes = 30 + (counter % 6) * 15
                 items.append(
                     _demo_item(
                         queue_id,
@@ -1778,10 +1839,14 @@ def _demo_queue_items() -> list[dict]:
                         state,
                         process_name,
                         resources[counter % len(resources)],
-                        age_minutes=_demo_item_age_minutes(counter),
+                        age_minutes=(
+                            _demo_pending_age_minutes(counter, sla_minutes)
+                            if state == "Pending"
+                            else _demo_item_age_minutes(counter)
+                        ),
                         priority=(counter % 3) + 1,
                         attempt=2 if state == "Exceptioned" and counter % 5 == 0 else 1,
-                        sla_minutes=30 + (counter % 6) * 15,
+                        sla_minutes=sla_minutes,
                         work_seconds=30 + (counter * 11) % 180,
                         exception_reason=(
                             _DEMO_ITEM_EXCEPTION_REASONS[
@@ -1792,14 +1857,35 @@ def _demo_queue_items() -> list[dict]:
                         ),
                     )
                 )
+    for queue_id, locks in _DEMO_QUEUE_LIVE_LOCKS.items():
+        prefix, process_name, _resources = _DEMO_QUEUE_ITEM_SHAPE[queue_id]
+        for resource, session_id, session_start in locks:
+            counter += 1
+            ident = next_ident()
+            # Locked a minute into its session's run, loaded five minutes
+            # before that: the lock belongs to a session that is still going,
+            # so it can never read as held by an idle bot.
+            lock_minutes = max(_minutes_since(session_start) - 1, 0)
+            items.append(
+                _demo_item(
+                    queue_id,
+                    f"a1c4d8e0-6b2f-4a9c-8d31-{counter:012d}",
+                    ident,
+                    f"{prefix}-{ident}",
+                    "Locked",
+                    process_name,
+                    resource,
+                    age_minutes=lock_minutes + 5,
+                    priority=(counter % 3) + 1,
+                    sla_minutes=30 + (counter % 6) * 15,
+                    session_id=session_id,
+                )
+            )
     for queue_id, deferred_count in _DEMO_DEFERRED_BY_QUEUE.items():
-        prefix, process_name, ident_start, _resources = _DEMO_QUEUE_ITEM_SHAPE[queue_id]
-        # Well clear of the state-topup range above so a deferred item never
-        # shares an ident/keyValue with one of this queue's other rows.
-        ident = ident_start + 5000
+        prefix, process_name, _resources = _DEMO_QUEUE_ITEM_SHAPE[queue_id]
         for _ in range(deferred_count):
             counter += 1
-            ident += 1
+            ident = next_ident()
             items.append(
                 _demo_item(
                     queue_id,
