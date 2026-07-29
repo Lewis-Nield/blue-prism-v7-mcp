@@ -2230,16 +2230,22 @@ class TestWriteFidelityJourneys:
         # rather than the lean fixture: it already seeds a today's heat-map
         # row for BOT-H01 (hour 19 idle), so the first read needs no prior
         # contribution to find a row to snapshot.
+        # The clock is anchored to the fixture's own captured today rather than
+        # a literal date: demo_estate() is relative-dated, so a pinned date
+        # stops matching its heat-map rows the morning after it was written.
         from datetime import datetime, timedelta, timezone
 
-        current = [datetime(2026, 7, 27, 19, 0, tzinfo=timezone.utc)]
+        today = _date(0)
+        current = [
+            datetime.strptime(today, "%Y-%m-%d").replace(hour=19, tzinfo=timezone.utc),
+        ]
         client = demo_estate()
         client._now = lambda: current[0]
         proc = next(p for p in client._processes if p["processName"] == "Invoice Processing")
         res = next(r for r in client._resources if r["name"] == "BOT-H01")
         client.start_process(proc["processId"], res["id"])
 
-        snap = client.get_resource_utilization("2026-07-27")
+        snap = client.get_resource_utilization(today)
         row = next(r for r in snap if r["digitalWorkerName"] == "BOT-H01")
         assert row["usages"][19] == 0
 
@@ -2250,18 +2256,14 @@ class TestWriteFidelityJourneys:
         assert row["usages"][19] == 0
 
         live = next(
-            r
-            for r in client.get_resource_utilization("2026-07-27")
-            if r["digitalWorkerName"] == "BOT-H01"
+            r for r in client.get_resource_utilization(today) if r["digitalWorkerName"] == "BOT-H01"
         )
         assert live["usages"][19] > 0
 
         # And the fixture survives a caller mutating its own copy.
         live["usages"][19] = 999
         fresh = next(
-            r
-            for r in client.get_resource_utilization("2026-07-27")
-            if r["digitalWorkerName"] == "BOT-H01"
+            r for r in client.get_resource_utilization(today) if r["digitalWorkerName"] == "BOT-H01"
         )
         assert fresh["usages"][19] != 999
 

@@ -12,6 +12,8 @@ from datetime import datetime, timezone
 from blue_prism_v7_mcp.mock import (
     _DEMO_DEFERRED_BY_QUEUE,
     _DEMO_HISTORY_BASE_MINUTES,
+    _DEMO_HISTORY_PROCESSES,
+    _DEMO_QUEUE_ITEM_SHAPE,
     _QUEUE_INVOICES,
     _date,
     demo_estate,
@@ -253,6 +255,143 @@ class TestDemoEstateQueueItemCoherence:
         breached = client.get_queue_items(_QUEUE_INVOICES, state="Pending", within_sla=False)
         assert breached
         assert len(breached) < sum(1 for i in pending if i["queue"] == _QUEUE_INVOICES)
+
+
+class TestDemoEstateCatalogueCoherence:
+    """Nothing in this estate may name a process the catalogue does not hold.
+
+    Every assertion here is phrased as an invariant over demo_estate() rather
+    than against a fixed expected count. The orphan queues these close (four
+    queues stamping a processName on thousands of items with no process row,
+    no session and no schedule behind it) survived the previous coherence pass
+    precisely because the tests of the day asserted counts, and counts stay
+    true while the thing they count grows incoherent.
+    """
+
+    def test_every_queue_item_names_a_process_in_the_catalogue(self):
+        client = demo_estate()
+        catalogue = {p["processName"] for p in client.get_processes()}
+        named = {i["processName"] for i in client._queue_items if i.get("processName")}
+        assert named <= catalogue, f"queue items name absent processes: {sorted(named - catalogue)}"
+
+    def test_every_session_names_a_process_in_the_catalogue(self):
+        client = demo_estate()
+        catalogue = {p["processName"] for p in client.get_processes()}
+        named = {s["processName"] for s in client._sessions}
+        assert named <= catalogue, f"sessions name absent processes: {sorted(named - catalogue)}"
+
+    def test_every_queue_shape_names_a_real_process_and_real_workers(self):
+        # The shape table is what stamps a processName onto every generated
+        # item, so it is the single place an orphan queue can be introduced.
+        client = demo_estate()
+        catalogue = {p["processName"] for p in client.get_processes()}
+        workers = {r["name"] for r in client.get_resources()}
+        for queue_id, (_prefix, process_name, resources) in _DEMO_QUEUE_ITEM_SHAPE.items():
+            assert process_name in catalogue, f"{queue_id} works an absent process"
+            assert set(resources) <= workers, f"{queue_id} draws on absent workers"
+
+    def test_every_process_has_finished_runs_behind_it(self):
+        # A process with no run history has no duration baseline, so a console
+        # cannot say whether any in-flight run of it is healthy or stale.
+        client = demo_estate()
+        finished = {
+            s["processName"] for s in client._sessions if s["status"] in ("Completed", "Terminated")
+        }
+        for process in client.get_processes():
+            assert process["processName"] in finished, process["processName"]
+
+    def test_every_process_has_its_own_duration_baseline(self):
+        client = demo_estate()
+        for process in client.get_processes():
+            assert process["processName"] in _DEMO_HISTORY_BASE_MINUTES, process["processName"]
+        # Distinct baselines are the point of that table — one flat figure
+        # gives a per-process duration percentile nothing to take shape from.
+        baselines = [_DEMO_HISTORY_BASE_MINUTES[n] for n, _ in _history_names_and_ids()]
+        assert len(set(baselines)) == len(baselines)
+
+    def test_the_history_rotation_covers_the_whole_catalogue(self):
+        client = demo_estate()
+        catalogue = {p["processId"]: p["processName"] for p in client.get_processes()}
+        rotated = {process_id: name for process_id, name, _rid, _rname in _DEMO_HISTORY_PROCESSES}
+        assert rotated == catalogue
+
+    def test_licence_published_process_count_is_derived_from_the_catalogue(self):
+        client = demo_estate()
+        published = sum(1 for p in client.get_processes() if "Published" in p["attributes"])
+        assert client.get_current_limits_and_usage()["publishedProcessesUsed"] == published
+
+    def test_every_queue_has_a_configuration_naming_the_process_that_works_it(self):
+        client = demo_estate()
+        process_ids = {p["processName"]: p["processId"] for p in client.get_processes()}
+        configurations = {c["id"]: c for c in client.get_queue_configurations()}
+        for queue in client.get_queues():
+            configuration = configurations.get(queue["id"])
+            assert configuration is not None, f"{queue['name']} has no configuration"
+            _prefix, process_name, _resources = _DEMO_QUEUE_ITEM_SHAPE[queue["id"]]
+            assigned = configuration["activeWorkQueueConfiguration"]["assignedProcessId"]
+            assert assigned == process_ids[process_name], queue["name"]
+
+    def test_configuration_active_sessions_agree_with_the_queue_summary(self):
+        # A configuration claiming sessions on a queue whose summary reports
+        # nothing locked is the same class of dangling join as an orphan
+        # process name, one field further in.
+        client = demo_estate()
+        summaries = {q["id"]: q for q in client.get_queues()}
+        for configuration in client.get_queue_configurations():
+            active = configuration["activeQueueStats"]["activeSessions"]
+            assert active == summaries[configuration["id"]]["lockedItemCount"], configuration[
+                "name"
+            ]
+
+    def test_the_process_tree_holds_every_process_and_its_folder(self):
+        client = demo_estate()
+        nodes = client.get_process_groups()
+        items = {n["name"] for n in nodes if n["nodeType"] == "Item"}
+        folders = {n["name"] for n in nodes if n["nodeType"] == "Group"}
+        processes = client.get_processes()
+        assert {p["processName"] for p in processes} == items
+        assert {p["groupName"] for p in processes} <= folders
+
+    def test_every_scheduled_task_session_names_real_processes_and_workers(self):
+        client = demo_estate()
+        catalogue = {p["processName"] for p in client.get_processes()}
+        workers = {r["name"] for r in client.get_resources()}
+        for schedule in client.get_schedules():
+            for task in client.get_schedule_tasks(schedule["id"]):
+                for run in client.get_task_sessions(task["id"]):
+                    assert run["processName"] in catalogue, task["name"]
+                    assert run["resourceName"] in workers, task["name"]
+
+    def test_every_schedule_task_chain_resolves(self):
+        client = demo_estate()
+        for schedule in client.get_schedules():
+            tasks = client.get_schedule_tasks(schedule["id"])
+            assert schedule["tasksCount"] == len(tasks), schedule["name"]
+            by_id = {t["id"]: t for t in tasks}
+            assert schedule["initialTaskId"] in by_id, schedule["name"]
+            for task in tasks:
+                for link in ("onSuccessTaskId", "onFailureTaskId"):
+                    if task[link] is not None:
+                        assert task[link] in by_id, f"{schedule['name']}/{task['name']}"
+
+    def test_some_published_process_is_deliberately_left_unscheduled(self):
+        # Preserved incoherence, not an oversight: a real estate always runs
+        # some published processes by hand or off a queue trigger, and a
+        # uniform queue->process->schedule estate reads synthetic. Vendor
+        # Setup, Payroll Run and Customer Onboarding are the current three.
+        client = demo_estate()
+        scheduled = {
+            run["processName"]
+            for schedule in client.get_schedules()
+            for task in client.get_schedule_tasks(schedule["id"])
+            for run in client.get_task_sessions(task["id"])
+        }
+        catalogue = {p["processName"] for p in client.get_processes()}
+        assert catalogue - scheduled
+
+
+def _history_names_and_ids():
+    return [(name, process_id) for process_id, name, _rid, _rname in _DEMO_HISTORY_PROCESSES]
 
 
 class TestDemoEstateScheduleTrigger:
