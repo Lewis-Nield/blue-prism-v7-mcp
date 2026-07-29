@@ -7,7 +7,7 @@ no governed action can resolve. This guards the invariant so the fixture can't
 silently drift out of self-consistency again.
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from blue_prism_v7_mcp.mock import (
     _DEMO_DEFERRED_BY_QUEUE,
@@ -306,7 +306,7 @@ class TestDemoEstateCatalogueCoherence:
             assert process["processName"] in _DEMO_HISTORY_BASE_MINUTES, process["processName"]
         # Distinct baselines are the point of that table — one flat figure
         # gives a per-process duration percentile nothing to take shape from.
-        baselines = [_DEMO_HISTORY_BASE_MINUTES[n] for n, _ in _history_names_and_ids()]
+        baselines = [_DEMO_HISTORY_BASE_MINUTES[n] for n in _history_process_names()]
         assert len(set(baselines)) == len(baselines)
 
     def test_the_history_rotation_covers_the_whole_catalogue(self):
@@ -390,8 +390,64 @@ class TestDemoEstateCatalogueCoherence:
         assert catalogue - scheduled
 
 
-def _history_names_and_ids():
-    return [(name, process_id) for process_id, name, _rid, _rname in _DEMO_HISTORY_PROCESSES]
+def _history_process_names():
+    return [name for _process_id, name, _rid, _rname in _DEMO_HISTORY_PROCESSES]
+
+
+class TestDemoEstateConfigurationStaysLive:
+    """A configuration's stats describe the estate now, not at construction.
+
+    The identity half of a configuration (which process works this queue,
+    which group drains it) is fixed, but the activity half is a claim about
+    live state — and this estate settles. Frozen stats are the same dangling
+    join as an orphan process name arriving by a different route: the numbers
+    stay plausible while the queue they describe empties underneath them.
+    """
+
+    def _configuration(self, client, queue_name):
+        queue = next(q for q in client.get_queues() if q["name"] == queue_name)
+        configuration = next(c for c in client.get_queue_configurations() if c["id"] == queue["id"])
+        return queue, configuration
+
+    def test_stats_follow_a_session_from_start_through_drain(self):
+        client = demo_estate()
+        _queue, before = self._configuration(client, "Mailroom")
+        assert before["activeQueueStats"]["activeSessions"] == 0
+
+        process = next(p for p in client.get_processes() if p["processName"] == "Mailroom Triage")
+        worker = next(r for r in client.get_resources() if r["name"] == "BOT-O01")
+        client.start_process(process["processId"], worker["id"])
+
+        queue, started = self._configuration(client, "Mailroom")
+        assert started["activeQueueStats"]["activeSessions"] == queue["lockedItemCount"] == 1
+
+        # Far enough ahead that the run drains the queue and ends itself.
+        client._now = lambda: datetime.now(timezone.utc) + timedelta(hours=3)
+        drained, after = self._configuration(client, "Mailroom")
+        assert drained["pendingItemCount"] == 0
+        assert after["activeQueueStats"]["activeSessions"] == 0
+        assert after["activeQueueStats"]["timeRemaining"] == "00:00:00"
+
+    def test_active_sessions_track_the_summary_after_a_trigger(self):
+        # The same agreement the catalogue tests assert at construction, but
+        # after a schedule has moved the estate on.
+        client = demo_estate()
+        client.trigger_schedule("Nightly Payment Run")
+        summaries = {q["id"]: q for q in client.get_queues()}
+        for configuration in client.get_queue_configurations():
+            active = configuration["activeQueueStats"]["activeSessions"]
+            assert active == summaries[configuration["id"]]["lockedItemCount"], configuration[
+                "name"
+            ]
+
+    def test_a_returned_configuration_cannot_rewrite_the_fixture(self):
+        client = demo_estate()
+        row = client.get_queue_configurations()[0]
+        row["activeQueueStats"]["activeSessions"] = 999
+        row["activeWorkQueueConfiguration"]["assignedProcessId"] = "rewritten"
+        fresh = client.get_queue_configurations()[0]
+        assert fresh["activeQueueStats"]["activeSessions"] != 999
+        assert fresh["activeWorkQueueConfiguration"]["assignedProcessId"] != "rewritten"
 
 
 class TestDemoEstateScheduleTrigger:

@@ -57,6 +57,16 @@ signature and no envelope changes — only the fixture's own internal consistenc
   alongside it. Adding a process used to silently falsify it.
 
 ### Fixed
+- **A queue configuration's activity block is re-counted on every read**, not
+  frozen at construction. The derived stats are a claim about live state, and this
+  estate settles: a session started after the fixture was built locked an item,
+  drained the backlog and ended while the configuration went on reporting the
+  queue as it was — a fully drained queue still advertising a backlog and an ETA,
+  and `activeSessions: 0` beside `lockedItemCount: 1` the instant a run began.
+  `get_queue_configurations()` now settles first, like every other read.
+- **A returned configuration can no longer rewrite the fixture.** The read copied
+  the row but not its two nested blocks, so a caller normalising a stat in place
+  was mutating the estate's own configuration.
 - A demo-estate test pinned to the literal date `2026-07-27` went stale the
   following morning. It now anchors to the fixture's own captured today — the
   fixture is relative-dated, so a literal date in a test of it has a one-day

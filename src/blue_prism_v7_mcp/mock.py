@@ -805,6 +805,7 @@ class MockBPClient:
         deferred_by_queue: dict[str, int] | None = None,
         permissions: list[str] | None = None,
         queue_configurations: list[dict] | None = None,
+        queue_stats_fn: Callable[[MockBPClient, dict], dict] | None = None,
         resource_pools: list[dict] | None = None,
         environment_variables: list[dict] | None = None,
         process_groups: list[dict] | None = None,
@@ -874,6 +875,15 @@ class MockBPClient:
             if queue_configurations is not None
             else [dict(c) for c in _DEFAULT_QUEUE_CONFIGURATIONS]
         )
+        # Optional recompute for a configuration's activeQueueStats block.
+        # Authored fixtures hold still, but stats DERIVED from live estate
+        # state (see _demo_queue_stats) are only true at the moment they were
+        # counted: this estate settles, so a session started after
+        # construction locks an item, drains the backlog and retires itself
+        # while a frozen block goes on reporting the queue as it was. A hook
+        # rather than unconditional derivation, because the lean fixture's
+        # stats are authored and asserted as authored.
+        self._queue_stats_fn = queue_stats_fn
         self._resource_pools = (
             resource_pools
             if resource_pools is not None
@@ -974,8 +984,7 @@ class MockBPClient:
         )
 
     def _parse_hms(self, value: str) -> int:
-        hours, minutes, seconds = (int(part) for part in value.split(":"))
-        return hours * 3600 + minutes * 60 + seconds
+        return _seconds_from_hms(value)
 
     def _find_item_by_id(self, item_id: str) -> dict | None:
         for item in self._queue_items:
@@ -1500,7 +1509,28 @@ class MockBPClient:
         return rows
 
     def get_queue_configurations(self) -> list[dict]:
-        return [dict(c) for c in self._queue_configurations]
+        # Settles like every other read: the activity this reports (locked
+        # items, running sessions, busy workers) is exactly what _settle()
+        # advances, so skipping it would answer from before the drain that
+        # get_queues() has already published.
+        self._settle()
+        # Both nested blocks are copied, not just the row: a plain dict(c)
+        # leaves the caller holding the fixture's own activeQueueStats object,
+        # and a consumer normalising a stat in place would rewrite the estate.
+        # Both blocks are optional on the live schema (and a seeded fixture may
+        # leave either out — the tool layer sorts a missing stats block as
+        # zero), so each is copied only where it is present.
+        rows = []
+        for configuration in self._queue_configurations:
+            row = dict(configuration)
+            if "activeWorkQueueConfiguration" in row:
+                row["activeWorkQueueConfiguration"] = dict(row["activeWorkQueueConfiguration"])
+            if self._queue_stats_fn is not None:
+                row["activeQueueStats"] = self._queue_stats_fn(self, configuration)
+            elif "activeQueueStats" in row:
+                row["activeQueueStats"] = dict(row["activeQueueStats"])
+            rows.append(row)
+        return rows
 
     def get_resource_pools(self) -> list[dict]:
         return [dict(p) for p in self._resource_pools]
@@ -2078,10 +2108,14 @@ def _demo_pending_age_minutes(i: int, sla_minutes: int) -> int:
     return sla_minutes * (i % 20) // 16
 
 
+def _parse_ts(timestamp: str) -> datetime:
+    """An ISO ``...Z`` fixture timestamp back as an aware datetime."""
+    return datetime.strptime(timestamp, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+
+
 def _minutes_since(timestamp: str) -> int:
     """Whole minutes from an ISO ``...Z`` timestamp to the captured now."""
-    moment = datetime.strptime(timestamp, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
-    return int((_NOW - moment).total_seconds() // 60)
+    return int((_NOW - _parse_ts(timestamp)).total_seconds() // 60)
 
 
 def _demo_item(
@@ -2549,8 +2583,84 @@ def _hms(seconds: int) -> str:
 
 
 def _seconds_from_hms(value: str) -> int:
+    """``HH:MM:SS`` back to whole seconds — the inverse of _hms, and the one
+    reading of that format in this module (MockBPClient._parse_hms defers to
+    it rather than carrying a second copy)."""
     hours, minutes, seconds = (int(part) for part in value.split(":"))
     return hours * 3600 + minutes * 60 + seconds
+
+
+def _demo_queue_stats(
+    queue: dict,
+    worker_names: list[str],
+    resources: list[dict],
+    sessions: list[dict],
+    queue_items: list[dict],
+    now: datetime,
+) -> dict:
+    """The activeQueueStats block for one queue, counted off estate state.
+
+    Every figure here is a statement about the estate *at ``now``*, so it is a
+    function of the collections rather than an authored constant — the demo
+    client re-runs it on each read (see MockBPClient.get_queue_configurations)
+    because a session started after construction locks an item, drains the
+    backlog and ends, and a block counted once would go on describing a queue
+    that has since emptied.
+
+    * ``activeSessions`` — the running sessions holding a Locked item **on this
+      queue**, not every run of the assigned process. Scoping it to the queue is
+      what stops a configuration reading ``activeSessions: 1`` beside a summary
+      reading ``lockedItemCount: 0`` — which is exactly Payments, whose process
+      runs elsewhere while the queue itself deliberately drains nothing.
+    * ``availableResources`` — the queue's workers that are neither offline nor
+      already holding a run.
+    * ``timeRemaining``/``ETA`` — the pending backlog at the queue's own
+      averageWorkTime, shared across the workers that could drain it.
+    * ``elapsedRemaining`` — how long the current pass has been going, i.e. the
+      age of the newest session working this queue (00:00:00 when none is).
+    """
+    offline = {r["name"] for r in resources if r["databaseStatus"] == "Offline"}
+    running = {s["sessionId"]: s for s in sessions if s["status"] == "Running"}
+    occupied = {s["resourceName"] for s in running.values()}
+
+    working = {
+        item["sessionId"]
+        for item in queue_items
+        if item["queue"] == queue["id"]
+        and item["state"] == "Locked"
+        and item["sessionId"] in running
+    }
+    available = sum(1 for n in worker_names if n not in offline and n not in occupied)
+    # A backlog still takes one worker's time when none is free right now.
+    drainers = max(len(working) + available, 1)
+    remaining = queue["pendingItemCount"] * _seconds_from_hms(queue["averageWorkTime"]) // drainers
+    newest = min(
+        (int((now - _parse_ts(running[s]["startTime"])).total_seconds()) for s in working),
+        default=0,
+    )
+    return {
+        "activeSessions": len(working),
+        "availableResources": available,
+        "timeRemaining": _hms(remaining),
+        "elapsedRemaining": _hms(newest),
+        "ETA": (now + timedelta(seconds=remaining)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+
+
+def _demo_queue_stats_now(client: MockBPClient, configuration: dict) -> dict:
+    """Re-count one demo configuration's stats against the settled estate."""
+    queue = client._find_queue(configuration["id"])
+    if queue is None:  # pragma: no cover — a configuration always has its queue
+        return dict(configuration["activeQueueStats"])
+    _prefix, _process_name, worker_names = _DEMO_QUEUE_ITEM_SHAPE[queue["id"]]
+    return _demo_queue_stats(
+        queue,
+        worker_names,
+        client._resources,
+        client._sessions,
+        client._queue_items,
+        client._now(),
+    )
 
 
 def _demo_process_groups(processes: list[dict]) -> list[dict]:
@@ -2597,44 +2707,14 @@ def _demo_queue_configurations(
     configuration. The assigned process is the one _DEMO_QUEUE_ITEM_SHAPE
     already stamps on that queue's items and the assigned resource group is the
     group those same workers belong to — so the configuration says exactly what
-    the item rows say. The live stats are counted off this estate's own items,
-    sessions and workers rather than authored:
-
-    * ``activeSessions`` — the running sessions holding a Locked item **on this
-      queue**, not every run of the assigned process. Scoping it to the queue is
-      what stops a configuration reading ``activeSessions: 1`` beside a summary
-      reading ``lockedItemCount: 0`` — which is exactly Payments, whose process
-      runs elsewhere while the queue itself deliberately drains nothing.
-    * ``availableResources`` — the queue's workers that are neither offline nor
-      already holding a run.
-    * ``timeRemaining``/``ETA`` — the pending backlog at the queue's own
-      averageWorkTime, shared across the workers that could drain it.
-    * ``elapsedRemaining`` — how long the current pass has been going, i.e. the
-      age of the newest session working this queue (00:00:00 when none is).
+    the item rows say. Only that link is authored here; the activity block is
+    counted by _demo_queue_stats, and re-counted on every read.
     """
     process_ids = {p["processName"]: p["processId"] for p in processes}
     worker_groups = {r["name"]: r["groupName"] for r in resources}
-    offline = {r["name"] for r in resources if r["databaseStatus"] == "Offline"}
-    running = {s["sessionId"]: s for s in sessions if s["status"] == "Running"}
-    occupied = {s["resourceName"] for s in running.values()}
-
     configurations = []
     for queue in queues:
         _prefix, process_name, worker_names = _DEMO_QUEUE_ITEM_SHAPE[queue["id"]]
-        working = {
-            item["sessionId"]
-            for item in queue_items
-            if item["queue"] == queue["id"]
-            and item["state"] == "Locked"
-            and item["sessionId"] in running
-        }
-        available = sum(1 for n in worker_names if n not in offline and n not in occupied)
-        # A backlog still takes one worker's time when none is free right now.
-        drainers = max(len(working) + available, 1)
-        remaining = (
-            queue["pendingItemCount"] * _seconds_from_hms(queue["averageWorkTime"]) // drainers
-        )
-        newest = min((_minutes_since(running[s]["startTime"]) for s in working), default=0)
         configurations.append(
             {
                 "id": queue["id"],
@@ -2645,13 +2725,9 @@ def _demo_queue_configurations(
                         worker_groups[worker_names[0]]
                     ],
                 },
-                "activeQueueStats": {
-                    "activeSessions": len(working),
-                    "availableResources": available,
-                    "timeRemaining": _hms(remaining),
-                    "elapsedRemaining": _hms(newest * 60),
-                    "ETA": _recent(-(remaining // 60)),
-                },
+                "activeQueueStats": _demo_queue_stats(
+                    queue, worker_names, resources, sessions, queue_items, _NOW
+                ),
             }
         )
     return configurations
@@ -3726,4 +3802,7 @@ def demo_estate() -> MockBPClient:
         queue_configurations=_demo_queue_configurations(
             queues, processes, resources, sessions, queue_items
         ),
+        # The stats half of a configuration describes the estate as it stands,
+        # so it is re-counted per read rather than frozen at construction.
+        queue_stats_fn=_demo_queue_stats_now,
     )
