@@ -7,6 +7,77 @@ additive endpoint is a minor bump.
 
 ## [Unreleased]
 
+## [0.20.1] — 2026-07-28
+
+Closes the gap v0.20.0's coherence pass left behind: the demo estate grew its
+**queue** side without growing its **process catalogue**, so four of its nine
+queues stamped a process name on thousands of items that existed nowhere else in
+the estate. Expenses, Vendor Setup, Mailroom and Account Closures carried
+backlogs, SLAs, exceptions and worker attributions while having no catalogue
+entry, no run history, no duration baseline and no utilisation contribution — a
+consumer joining a queue to the process that works it reached nothing.
+
+The root cause was one shape: enrichment that adds to one collection and not to
+the ones that have to agree with it. `demo_estate()` also silently fell back to
+the lean two-queue fixtures for three collections it never passed, so a
+nine-queue estate reported **one** queue configuration and a process tree holding
+two of its five processes.
+
+**This release touches `mock.py` only** (plus tests). The live-estate code path is
+byte-for-byte unchanged, so an upgrade cannot alter what the server does against a
+real Blue Prism instance. It is a patch rather than a minor because no tool, no
+signature and no envelope changes — only the fixture's own internal consistency.
+
+### Added
+- **Four published processes** — Expense Processing, Vendor Setup, Mailroom
+  Triage and Account Closure — so every queue in the estate is worked by a process
+  the catalogue actually holds. Each gets ~180 days of finished-run history and its
+  own duration baseline, distinct from the others: a per-process duration
+  percentile needs shape to take, and one flat figure gives it none.
+- **Three schedules** — Daily Expense Run, Hourly Mailroom Triage, and Daily
+  Account Closures (a two-task chain: validate, then close) — with their task
+  chains, task sessions and run logs kept in step.
+- **A process tree and a queue configuration for the whole estate.** Both are now
+  derived from the estate rather than authored: every process becomes an Item under
+  its own folder, and every queue gets a configuration naming the process that
+  works it, the resource group that drains it, and live stats counted off the
+  estate's own items, sessions and workers.
+- **Catalogue-coherence invariants** in `tests/test_demo_estate.py`. These are the
+  durable half of the release. They assert relationships — every item's and every
+  session's process name resolves to a catalogue row, every process has finished
+  runs behind it, every queue has a configuration whose assigned process matches
+  its items, every schedule chain resolves — rather than expected counts. The
+  orphan queues survived the previous coherence pass precisely because the tests of
+  the day asserted counts, and a count stays true while the thing it counts grows
+  incoherent.
+
+### Changed
+- **`publishedProcessesUsed` is derived from the catalogue** instead of hardcoded
+  to `5`, matching the `concurrentSessionsUsed` and `runtimeResourcesUsed`
+  alongside it. Adding a process used to silently falsify it.
+
+### Fixed
+- **A queue configuration's activity block is re-counted on every read**, not
+  frozen at construction. The derived stats are a claim about live state, and this
+  estate settles: a session started after the fixture was built locked an item,
+  drained the backlog and ended while the configuration went on reporting the
+  queue as it was — a fully drained queue still advertising a backlog and an ETA,
+  and `activeSessions: 0` beside `lockedItemCount: 1` the instant a run began.
+  `get_queue_configurations()` now settles first, like every other read.
+- **A returned configuration can no longer rewrite the fixture.** The read copied
+  the row but not its two nested blocks, so a caller normalising a stat in place
+  was mutating the estate's own configuration.
+- A demo-estate test pinned to the literal date `2026-07-27` went stale the
+  following morning. It now anchors to the fixture's own captured today — the
+  fixture is relative-dated, so a literal date in a test of it has a one-day
+  shelf life.
+
+### Preserved deliberately
+Vendor Setup stays unscheduled, as do Payroll Run and Customer Onboarding: real
+estates run some published processes by hand or off a queue trigger, and a uniform
+queue → process → schedule estate reads synthetic. The retired schedule and the
+two offline workers stay for the same reason, each now saying so at its own site.
+
 ## [0.20.0] — 2026-07-27
 
 Demo-estate coherence: the bundled demo estate now behaves like an estate rather
@@ -865,7 +936,8 @@ First runnable release — the foundation, built in eight phases (see
 - FastMCP stdio server, a first-class mock run mode, console entrypoint, and
   deployment / day-one verification docs.
 
-[Unreleased]: https://github.com/Lewis-Nield/blue-prism-v7-mcp/compare/v0.20.0...HEAD
+[Unreleased]: https://github.com/Lewis-Nield/blue-prism-v7-mcp/compare/v0.20.1...HEAD
+[0.20.1]: https://github.com/Lewis-Nield/blue-prism-v7-mcp/compare/v0.20.0...v0.20.1
 [0.20.0]: https://github.com/Lewis-Nield/blue-prism-v7-mcp/compare/v0.19.0...v0.20.0
 [0.19.0]: https://github.com/Lewis-Nield/blue-prism-v7-mcp/compare/v0.18.0...v0.19.0
 [0.18.0]: https://github.com/Lewis-Nield/blue-prism-v7-mcp/compare/v0.17.0...v0.18.0

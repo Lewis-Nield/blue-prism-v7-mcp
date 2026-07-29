@@ -805,6 +805,7 @@ class MockBPClient:
         deferred_by_queue: dict[str, int] | None = None,
         permissions: list[str] | None = None,
         queue_configurations: list[dict] | None = None,
+        queue_stats_fn: Callable[[MockBPClient, dict], dict] | None = None,
         resource_pools: list[dict] | None = None,
         environment_variables: list[dict] | None = None,
         process_groups: list[dict] | None = None,
@@ -874,6 +875,15 @@ class MockBPClient:
             if queue_configurations is not None
             else [dict(c) for c in _DEFAULT_QUEUE_CONFIGURATIONS]
         )
+        # Optional recompute for a configuration's activeQueueStats block.
+        # Authored fixtures hold still, but stats DERIVED from live estate
+        # state (see _demo_queue_stats) are only true at the moment they were
+        # counted: this estate settles, so a session started after
+        # construction locks an item, drains the backlog and retires itself
+        # while a frozen block goes on reporting the queue as it was. A hook
+        # rather than unconditional derivation, because the lean fixture's
+        # stats are authored and asserted as authored.
+        self._queue_stats_fn = queue_stats_fn
         self._resource_pools = (
             resource_pools
             if resource_pools is not None
@@ -974,8 +984,7 @@ class MockBPClient:
         )
 
     def _parse_hms(self, value: str) -> int:
-        hours, minutes, seconds = (int(part) for part in value.split(":"))
-        return hours * 3600 + minutes * 60 + seconds
+        return _seconds_from_hms(value)
 
     def _find_item_by_id(self, item_id: str) -> dict | None:
         for item in self._queue_items:
@@ -1500,7 +1509,28 @@ class MockBPClient:
         return rows
 
     def get_queue_configurations(self) -> list[dict]:
-        return [dict(c) for c in self._queue_configurations]
+        # Settles like every other read: the activity this reports (locked
+        # items, running sessions, busy workers) is exactly what _settle()
+        # advances, so skipping it would answer from before the drain that
+        # get_queues() has already published.
+        self._settle()
+        # Both nested blocks are copied, not just the row: a plain dict(c)
+        # leaves the caller holding the fixture's own activeQueueStats object,
+        # and a consumer normalising a stat in place would rewrite the estate.
+        # Both blocks are optional on the live schema (and a seeded fixture may
+        # leave either out — the tool layer sorts a missing stats block as
+        # zero), so each is copied only where it is present.
+        rows = []
+        for configuration in self._queue_configurations:
+            row = dict(configuration)
+            if "activeWorkQueueConfiguration" in row:
+                row["activeWorkQueueConfiguration"] = dict(row["activeWorkQueueConfiguration"])
+            if self._queue_stats_fn is not None:
+                row["activeQueueStats"] = self._queue_stats_fn(self, configuration)
+            elif "activeQueueStats" in row:
+                row["activeQueueStats"] = dict(row["activeQueueStats"])
+            rows.append(row)
+        return rows
 
     def get_resource_pools(self) -> list[dict]:
         return [dict(p) for p in self._resource_pools]
@@ -1938,10 +1968,17 @@ _D_BOT_O01 = "5d2c8e0a-71b4-4a8e-9f30-0000000d0006"
 _D_BOT_O02 = "5d2c8e0a-71b4-4a8e-9f30-0000000d0007"
 _D_BOT_O03 = "5d2c8e0a-71b4-4a8e-9f30-0000000d0008"
 
-# Process ids (the two lean ones are reused; three are net-new to the demo).
+# Process ids (the two lean ones are reused; seven are net-new to the demo).
+# Every queue in this estate is worked by one of these: a queue whose items
+# name a process the catalogue does not hold is an orphan no consumer can join
+# to run history, a duration baseline or a utilisation contribution.
 _D_PROC_PAYMENTS = "7c0e4f2b-93d1-4b66-a2af-0000000d0203"
 _D_PROC_PAYROLL = "7c0e4f2b-93d1-4b66-a2af-0000000d0204"
 _D_PROC_COMPLIANCE = "7c0e4f2b-93d1-4b66-a2af-0000000d0205"
+_D_PROC_EXPENSES = "7c0e4f2b-93d1-4b66-a2af-0000000d0206"
+_D_PROC_VENDOR = "7c0e4f2b-93d1-4b66-a2af-0000000d0207"
+_D_PROC_MAILROOM = "7c0e4f2b-93d1-4b66-a2af-0000000d0208"
+_D_PROC_CLOSURES = "7c0e4f2b-93d1-4b66-a2af-0000000d0209"
 
 # Queue ids (Invoices/Onboarding reuse the lean ids; the rest are demo-only).
 _D_QUEUE_PAYMENTS = "9b6f3a1c-2e45-4d07-8c11-0000000d0103"
@@ -2006,11 +2043,12 @@ _DEMO_QUEUE_LIVE_LOCKS: dict[str, list[tuple[str, str, str]]] = {
 _DEMO_DEFERRED_BY_QUEUE: dict[str, int] = {_QUEUE_INVOICES: 6, _D_QUEUE_PAYMENTS: 2}
 
 # queue id -> (keyValue prefix, processName, resource pool to draw
-# completed/exceptioned items from). processName tracks a real startable
-# process where this estate has one (Invoices, Payments, Onboarding, Payroll,
-# Compliance) — the link A6 will later use to lock a queue item when a session
-# starts. The remaining queues have no process in this estate; they still get a
-# plausible processName label, they simply never drain via A6.
+# completed/exceptioned items from). Every processName here names a published
+# process this estate's catalogue actually holds — the link that lets a session
+# start lock a queue item, and the join a consumer needs to reach a queue's run
+# history, duration baseline and worker utilisation. A name with no catalogue
+# row behind it strands the whole queue, so this table and _DEMO_PROCESSES are
+# asserted against each other in tests/test_demo_estate.py.
 _DEMO_QUEUE_ITEM_SHAPE: dict[str, tuple[str, str, list[str]]] = {
     _QUEUE_INVOICES: ("INV", "Invoice Processing", ["BOT-F01", "BOT-F02", "BOT-F03"]),
     _D_QUEUE_PAYMENTS: ("PAY", "Payment Run", ["BOT-F01", "BOT-F02", "BOT-F03"]),
@@ -2070,10 +2108,14 @@ def _demo_pending_age_minutes(i: int, sla_minutes: int) -> int:
     return sla_minutes * (i % 20) // 16
 
 
+def _parse_ts(timestamp: str) -> datetime:
+    """An ISO ``...Z`` fixture timestamp back as an aware datetime."""
+    return datetime.strptime(timestamp, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+
+
 def _minutes_since(timestamp: str) -> int:
     """Whole minutes from an ISO ``...Z`` timestamp to the captured now."""
-    moment = datetime.strptime(timestamp, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
-    return int((_NOW - moment).total_seconds() // 60)
+    return int((_NOW - _parse_ts(timestamp)).total_seconds() // 60)
 
 
 def _demo_item(
@@ -2400,12 +2442,19 @@ def _session(
 # The published process / worker pairs the historical backlog cycles through.
 # Every processName matches the demo catalogue so throughput_summary buckets the
 # generated runs and the downstream daily zero-fill lines up with a real process.
+# Each pair's worker is drawn from the pool _DEMO_QUEUE_ITEM_SHAPE already
+# attributes that process's queue items to, so a run's worker and its items'
+# worker are the same population.
 _DEMO_HISTORY_PROCESSES = [
     (_PROC_INVOICES, "Invoice Processing", _D_BOT_F01, "BOT-F01"),
     (_D_PROC_PAYMENTS, "Payment Run", _D_BOT_F02, "BOT-F02"),
     (_D_PROC_PAYROLL, "Payroll Run", _D_BOT_H01, "BOT-H01"),
     (_PROC_ONBOARDING, "Customer Onboarding", _D_BOT_O01, "BOT-O01"),
     (_D_PROC_COMPLIANCE, "Compliance Screening", _D_BOT_O02, "BOT-O02"),
+    (_D_PROC_EXPENSES, "Expense Processing", _D_BOT_F03, "BOT-F03"),
+    (_D_PROC_VENDOR, "Vendor Setup", _D_BOT_O01, "BOT-O01"),
+    (_D_PROC_MAILROOM, "Mailroom Triage", _D_BOT_O02, "BOT-O02"),
+    (_D_PROC_CLOSURES, "Account Closure", _D_BOT_O01, "BOT-O01"),
 ]
 
 # Each process's typical completed-run length in minutes — distinct per
@@ -2415,12 +2464,18 @@ _DEMO_HISTORY_PROCESSES = [
 # take the best part of two hours) — everything else is a normal few-minute
 # transactional process. Only Completed runs use these; Terminated runs stay
 # short (a failure, not a full run) regardless of process.
+# Every value stays clear of the flat 4-minute terminated length below, so a
+# short baseline can never be mistaken for the failure duration.
 _DEMO_HISTORY_BASE_MINUTES = {
     "Invoice Processing": 12,
     "Payment Run": 90,
     "Payroll Run": 20,
     "Customer Onboarding": 8,
     "Compliance Screening": 6,
+    "Expense Processing": 9,
+    "Vendor Setup": 15,
+    "Mailroom Triage": 5,
+    "Account Closure": 25,
 }
 
 # How many complete days of finished-session history the demo backlog spans. The
@@ -2503,6 +2558,181 @@ def _demo_history() -> list[dict]:
     return sessions
 
 
+# Process-tree folder ids for the demo estate. The tree itself is derived from
+# the catalogue (see _demo_process_groups) — only the folder identities are
+# authored, because a folder has no other source to derive an id from.
+_DEMO_PROCESS_GROUP_IDS = {
+    "Finance": "8f0a2c4e-5b69-4d31-a2c5-0000000d0701",
+    "Operations": "8f0a2c4e-5b69-4d31-a2c5-0000000d0702",
+    "HR": "8f0a2c4e-5b69-4d31-a2c5-0000000d0703",
+}
+
+# Resource-group ids for the demo estate's three worker groups (the groupName
+# on each _worker row), named by the queue configurations below.
+_DEMO_RESOURCE_GROUP_IDS = {
+    "Finance": "1f8b6c4d-0a23-4e91-9d77-0000000d0401",
+    "HR": "1f8b6c4d-0a23-4e91-9d77-0000000d0402",
+    "Onboarding": "1f8b6c4d-0a23-4e91-9d77-0000000d0403",
+}
+
+
+def _hms(seconds: int) -> str:
+    """Whole seconds as the ``HH:MM:SS`` string the queue endpoints return."""
+    seconds = max(0, seconds)
+    return f"{seconds // 3600:02d}:{seconds // 60 % 60:02d}:{seconds % 60:02d}"
+
+
+def _seconds_from_hms(value: str) -> int:
+    """``HH:MM:SS`` back to whole seconds — the inverse of _hms, and the one
+    reading of that format in this module (MockBPClient._parse_hms defers to
+    it rather than carrying a second copy)."""
+    hours, minutes, seconds = (int(part) for part in value.split(":"))
+    return hours * 3600 + minutes * 60 + seconds
+
+
+def _demo_queue_stats(
+    queue: dict,
+    worker_names: list[str],
+    resources: list[dict],
+    sessions: list[dict],
+    queue_items: list[dict],
+    now: datetime,
+) -> dict:
+    """The activeQueueStats block for one queue, counted off estate state.
+
+    Every figure here is a statement about the estate *at ``now``*, so it is a
+    function of the collections rather than an authored constant — the demo
+    client re-runs it on each read (see MockBPClient.get_queue_configurations)
+    because a session started after construction locks an item, drains the
+    backlog and ends, and a block counted once would go on describing a queue
+    that has since emptied.
+
+    * ``activeSessions`` — the running sessions holding a Locked item **on this
+      queue**, not every run of the assigned process. Scoping it to the queue is
+      what stops a configuration reading ``activeSessions: 1`` beside a summary
+      reading ``lockedItemCount: 0`` — which is exactly Payments, whose process
+      runs elsewhere while the queue itself deliberately drains nothing.
+    * ``availableResources`` — the queue's workers that are neither offline nor
+      already holding a run.
+    * ``timeRemaining``/``ETA`` — the pending backlog at the queue's own
+      averageWorkTime, shared across the workers that could drain it.
+    * ``elapsedRemaining`` — how long the current pass has been going, i.e. the
+      age of the newest session working this queue (00:00:00 when none is).
+    """
+    offline = {r["name"] for r in resources if r["databaseStatus"] == "Offline"}
+    running = {s["sessionId"]: s for s in sessions if s["status"] == "Running"}
+    occupied = {s["resourceName"] for s in running.values()}
+
+    working = {
+        item["sessionId"]
+        for item in queue_items
+        if item["queue"] == queue["id"]
+        and item["state"] == "Locked"
+        and item["sessionId"] in running
+    }
+    available = sum(1 for n in worker_names if n not in offline and n not in occupied)
+    # A backlog still takes one worker's time when none is free right now.
+    drainers = max(len(working) + available, 1)
+    remaining = queue["pendingItemCount"] * _seconds_from_hms(queue["averageWorkTime"]) // drainers
+    newest = min(
+        (int((now - _parse_ts(running[s]["startTime"])).total_seconds()) for s in working),
+        default=0,
+    )
+    return {
+        "activeSessions": len(working),
+        "availableResources": available,
+        "timeRemaining": _hms(remaining),
+        "elapsedRemaining": _hms(newest),
+        "ETA": (now + timedelta(seconds=remaining)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+
+
+def _demo_queue_stats_now(client: MockBPClient, configuration: dict) -> dict:
+    """Re-count one demo configuration's stats against the settled estate."""
+    queue = client._find_queue(configuration["id"])
+    if queue is None:  # pragma: no cover — a configuration always has its queue
+        return dict(configuration["activeQueueStats"])
+    _prefix, _process_name, worker_names = _DEMO_QUEUE_ITEM_SHAPE[queue["id"]]
+    return _demo_queue_stats(
+        queue,
+        worker_names,
+        client._resources,
+        client._sessions,
+        client._queue_items,
+        client._now(),
+    )
+
+
+def _demo_process_groups(processes: list[dict]) -> list[dict]:
+    """The flat descendant list of the demo estate's process tree.
+
+    Derived from the catalogue rather than hand-listed, so a process added to
+    the estate can never go missing from the tree that is supposed to contain
+    it: every process becomes an Item, and every ``groupName`` a process names
+    becomes a Group. Group rows carry v7's unset-date sentinel (a folder has no
+    published version of its own); Item rows are spread across the past year so
+    a listing sorted by date has real shape.
+    """
+    groups = [
+        {
+            "id": _DEMO_PROCESS_GROUP_IDS[name],
+            "name": name,
+            "nodeType": "Group",
+            "lastModified": "0001-01-01T00:00:00Z",
+        }
+        for name in dict.fromkeys(p["groupName"] for p in processes)
+    ]
+    items = [
+        {
+            "id": process["processId"],
+            "name": process["processName"],
+            "nodeType": "Item",
+            "lastModified": _ts(30 + index * 37, "09:05:10"),
+        }
+        for index, process in enumerate(processes)
+    ]
+    return groups + items
+
+
+def _demo_queue_configurations(
+    queues: list[dict],
+    processes: list[dict],
+    resources: list[dict],
+    sessions: list[dict],
+    queue_items: list[dict],
+) -> list[dict]:
+    """One WorkQueueConfigurationSummary per queue, derived from the estate.
+
+    Every queue here is worked by a published process, so every queue has a
+    configuration. The assigned process is the one _DEMO_QUEUE_ITEM_SHAPE
+    already stamps on that queue's items and the assigned resource group is the
+    group those same workers belong to — so the configuration says exactly what
+    the item rows say. Only that link is authored here; the activity block is
+    counted by _demo_queue_stats, and re-counted on every read.
+    """
+    process_ids = {p["processName"]: p["processId"] for p in processes}
+    worker_groups = {r["name"]: r["groupName"] for r in resources}
+    configurations = []
+    for queue in queues:
+        _prefix, process_name, worker_names = _DEMO_QUEUE_ITEM_SHAPE[queue["id"]]
+        configurations.append(
+            {
+                "id": queue["id"],
+                "name": queue["name"],
+                "activeWorkQueueConfiguration": {
+                    "assignedProcessId": process_ids[process_name],
+                    "assignedResourceGroupId": _DEMO_RESOURCE_GROUP_IDS[
+                        worker_groups[worker_names[0]]
+                    ],
+                },
+                "activeQueueStats": _demo_queue_stats(
+                    queue, worker_names, resources, sessions, queue_items, _NOW
+                ),
+            }
+        )
+    return configurations
+
+
 def demo_estate() -> MockBPClient:
     """A populated, relative-dated MockBPClient for end-to-end evaluation.
 
@@ -2518,7 +2748,19 @@ def demo_estate() -> MockBPClient:
     (limits_and_usage, below) is derived from this same resources/sessions
     data rather than hand-picked, so it can't drift from what the estate
     actually holds.
+
+    The catalogue invariant is the other half: every process name this estate
+    stamps on a queue item or a session must resolve to a row in ``processes``,
+    every process must have finished runs behind it, and every queue must have
+    a configuration naming the process that works it — otherwise a consumer
+    joining a queue to its process reaches nothing, which is what four of these
+    nine queues used to do. Both halves are asserted as invariants rather than
+    counts in tests/test_demo_estate.py, because a count stays true while the
+    thing it counts grows incoherent.
     """
+    # BOT-H02 and BOT-O03 are deliberately Offline, and deliberately kept: an
+    # estate where every worker is available has nothing for a licence or
+    # capacity reading to be about.
     resources = [
         _worker(_D_BOT_F01, "BOT-F01", "Finance Pool", "Finance", "Working", active=1),
         _worker(_D_BOT_F02, "BOT-F02", "Finance Pool", "Finance", "Idle"),
@@ -2844,6 +3086,34 @@ def demo_estate() -> MockBPClient:
             "groupName": "Operations",
             "attributes": ["Published"],
         },
+        {
+            "processId": _D_PROC_EXPENSES,
+            "processName": "Expense Processing",
+            "processDescription": "Employee expense validation and reimbursement",
+            "groupName": "Finance",
+            "attributes": ["Published"],
+        },
+        {
+            "processId": _D_PROC_VENDOR,
+            "processName": "Vendor Setup",
+            "processDescription": "New supplier due diligence and master-data creation",
+            "groupName": "Operations",
+            "attributes": ["Published"],
+        },
+        {
+            "processId": _D_PROC_MAILROOM,
+            "processName": "Mailroom Triage",
+            "processDescription": "Classify inbound correspondence and route to a team",
+            "groupName": "Operations",
+            "attributes": ["Published"],
+        },
+        {
+            "processId": _D_PROC_CLOSURES,
+            "processName": "Account Closure",
+            "processDescription": "Close accounts and issue final statements",
+            "groupName": "Operations",
+            "attributes": ["Published"],
+        },
     ]
 
     sessions = [
@@ -3054,6 +3324,9 @@ def demo_estate() -> MockBPClient:
             "timeZoneId": "GMT Standard Time",
             "dailyDetails": {"period": 1, "calendarId": 1},
         },
+        # Deliberately retired, and deliberately the only one: a real estate
+        # carries schedules nobody has deleted, and a console needs one to
+        # prove it filters retired work out of its active view.
         {
             "id": 3,
             "name": "Weekly Reconciliation",
@@ -3080,7 +3353,56 @@ def demo_estate() -> MockBPClient:
             "timeZoneId": "GMT Standard Time",
             "hourlyDetails": {"period": 1, "start": "07:00", "end": "19:00", "calendarId": 2},
         },
+        {
+            "id": 5,
+            "name": "Daily Expense Run",
+            "description": "Clears the expense backlog each afternoon",
+            "isRetired": False,
+            "tasksCount": 1,
+            "initialTaskId": 51,
+            "initialTaskName": "Process Expenses",
+            "intervalType": "Day",
+            "calendarName": "Working Week",
+            "startDate": _ts(180, "14:00:00"),
+            "endDate": None,
+            "timeZoneId": "GMT Standard Time",
+            "dailyDetails": {"period": 1, "calendarId": 1},
+        },
+        {
+            "id": 6,
+            "name": "Hourly Mailroom Triage",
+            "description": "Classifies inbound post through the working day",
+            "isRetired": False,
+            "tasksCount": 1,
+            "initialTaskId": 61,
+            "initialTaskName": "Triage Inbound Mail",
+            "intervalType": "Hour",
+            "calendarName": "All Days",
+            "startDate": _ts(180, "00:00:00"),
+            "endDate": None,
+            "timeZoneId": "GMT Standard Time",
+            "hourlyDetails": {"period": 1, "start": "08:00", "end": "18:00", "calendarId": 2},
+        },
+        {
+            "id": 7,
+            "name": "Daily Account Closures",
+            "description": "Validates then closes the day's account-closure requests",
+            "isRetired": False,
+            "tasksCount": 2,
+            "initialTaskId": 71,
+            "initialTaskName": "Validate Closures",
+            "intervalType": "Day",
+            "calendarName": "Working Week",
+            "startDate": _ts(180, "17:00:00"),
+            "endDate": None,
+            "timeZoneId": "GMT Standard Time",
+            "dailyDetails": {"period": 1, "calendarId": 1},
+        },
     ]
+    # Vendor Setup is deliberately left unscheduled: a real estate always has
+    # published processes started by hand or by a queue trigger rather than the
+    # scheduler, and a uniform queue->process->schedule estate reads synthetic.
+    # Payroll Run and Customer Onboarding are unscheduled for the same reason.
 
     # Task chains for the demo schedules. The headline: the failed Nightly
     # Payment Run is a real branching chain — Build BACS File runs Payment Run
@@ -3181,6 +3503,60 @@ def demo_estate() -> MockBPClient:
                 "sessionsCount": 2,
             },
         ],
+        "5": [
+            {
+                "id": 51,
+                "name": "Process Expenses",
+                "description": "Work the Expenses queue",
+                "failFastOnError": True,
+                "delayAfterEnd": 0,
+                "onSuccessTaskId": None,
+                "onSuccessTaskName": None,
+                "onFailureTaskId": None,
+                "onFailureTaskName": None,
+                "sessionsCount": 1,
+            },
+        ],
+        "6": [
+            {
+                "id": 61,
+                "name": "Triage Inbound Mail",
+                "description": "Classify and route the Mailroom queue",
+                "failFastOnError": False,
+                "delayAfterEnd": 0,
+                "onSuccessTaskId": None,
+                "onSuccessTaskName": None,
+                "onFailureTaskId": None,
+                "onFailureTaskName": None,
+                "sessionsCount": 1,
+            },
+        ],
+        "7": [
+            {
+                "id": 71,
+                "name": "Validate Closures",
+                "description": "Check the day's closure requests are complete",
+                "failFastOnError": True,
+                "delayAfterEnd": 2,
+                "onSuccessTaskId": 72,
+                "onSuccessTaskName": "Close Accounts",
+                "onFailureTaskId": None,
+                "onFailureTaskName": None,
+                "sessionsCount": 1,
+            },
+            {
+                "id": 72,
+                "name": "Close Accounts",
+                "description": "Close the validated accounts and issue statements",
+                "failFastOnError": True,
+                "delayAfterEnd": 0,
+                "onSuccessTaskId": None,
+                "onSuccessTaskName": None,
+                "onFailureTaskId": None,
+                "onFailureTaskName": None,
+                "sessionsCount": 1,
+            },
+        ],
     }
 
     task_sessions = {
@@ -3213,6 +3589,18 @@ def demo_estate() -> MockBPClient:
                 "resourceName": "BOT-O01",
                 "taskSessionId": 412,
             },
+        ],
+        "51": [
+            {"processName": "Expense Processing", "resourceName": "BOT-F03", "taskSessionId": 511},
+        ],
+        "61": [
+            {"processName": "Mailroom Triage", "resourceName": "BOT-O02", "taskSessionId": 611},
+        ],
+        "71": [
+            {"processName": "Account Closure", "resourceName": "BOT-O01", "taskSessionId": 711},
+        ],
+        "72": [
+            {"processName": "Account Closure", "resourceName": "BOT-O01", "taskSessionId": 721},
         ],
     }
 
@@ -3250,6 +3638,42 @@ def demo_estate() -> MockBPClient:
                 "startTime": _ts(0, "08:00:00"),
                 "endTime": _ts(0, "08:01:10"),
                 "duration": "00:01:10",
+                "status": "completed",
+                "serverName": "BP-APP-01",
+            },
+        ],
+        "5": [
+            {
+                "scheduleLogId": 34,
+                "scheduleId": 5,
+                "scheduleName": "Daily Expense Run",
+                "startTime": _ts(1, "14:00:00"),
+                "endTime": _ts(1, "14:09:30"),
+                "duration": "00:09:30",
+                "status": "completed",
+                "serverName": "BP-APP-01",
+            },
+        ],
+        "6": [
+            {
+                "scheduleLogId": 35,
+                "scheduleId": 6,
+                "scheduleName": "Hourly Mailroom Triage",
+                "startTime": _ts(0, "09:00:00"),
+                "endTime": _ts(0, "09:05:20"),
+                "duration": "00:05:20",
+                "status": "completed",
+                "serverName": "BP-APP-02",
+            },
+        ],
+        "7": [
+            {
+                "scheduleLogId": 36,
+                "scheduleId": 7,
+                "scheduleName": "Daily Account Closures",
+                "startTime": _ts(1, "17:00:00"),
+                "endTime": _ts(1, "17:26:15"),
+                "duration": "00:26:15",
                 "status": "completed",
                 "serverName": "BP-APP-01",
             },
@@ -3342,10 +3766,11 @@ def demo_estate() -> MockBPClient:
     # slot in real BP even though the resource reads Idle).
     concurrent_sessions_used = sum(1 for s in sessions if s["status"] == "Running")
     runtime_resources_used = sum(1 for r in resources if r["databaseStatus"] != "Offline")
+    published_processes_used = sum(1 for p in processes if "Published" in p["attributes"])
 
     limits_and_usage = {
         "publishedProcessesLimit": None,
-        "publishedProcessesUsed": 5,
+        "publishedProcessesUsed": published_processes_used,
         "concurrentSessionsLimit": 10,
         "concurrentSessionsUsed": concurrent_sessions_used,
         "runtimeResourcesLimit": 8,
@@ -3369,4 +3794,15 @@ def demo_estate() -> MockBPClient:
         deferred_by_queue=deferred_by_queue,
         limits_and_usage=limits_and_usage,
         resource_utilization=resource_utilization,
+        # Both derived from the estate above. Omitting them silently fell back
+        # to the lean two-queue _DEFAULT_* fixtures, which left this estate
+        # declaring one configuration for nine queues and a process tree
+        # holding two of its processes.
+        process_groups=_demo_process_groups(processes),
+        queue_configurations=_demo_queue_configurations(
+            queues, processes, resources, sessions, queue_items
+        ),
+        # The stats half of a configuration describes the estate as it stands,
+        # so it is re-counted per read rather than frozen at construction.
+        queue_stats_fn=_demo_queue_stats_now,
     )
