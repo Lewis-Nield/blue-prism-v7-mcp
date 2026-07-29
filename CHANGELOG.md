@@ -19,7 +19,7 @@ consumer joining a queue to the process that works it reached nothing.
 
 The root cause was one shape: enrichment that adds to one collection and not to
 the ones that have to agree with it. `demo_estate()` also silently fell back to
-the lean two-queue fixtures for three collections it never passed, so a
+the lean two-queue fixtures for two collections it never passed, so a
 nine-queue estate reported **one** queue configuration and a process tree holding
 two of its five processes.
 
