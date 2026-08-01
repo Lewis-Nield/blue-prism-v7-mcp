@@ -38,7 +38,7 @@ classifiers = [
 # environment over transitive versions. Lower bounds are the versions this is
 # developed and tested against; upper bounds stop the next major.
 dependencies = [
-    "mcp>=1.27,<2",
+    "mcp>=1.27,<3",
     "requests>=2.32,<3",
 ]
 
