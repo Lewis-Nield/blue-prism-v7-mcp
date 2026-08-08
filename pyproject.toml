@@ -56,7 +56,7 @@ dev = [
     "pytest-cov==7.1.0",
     # Pinned exact now that ruff format --check gates CI: a new ruff's
     # formatter-style changes must not break every open branch overnight.
-    "ruff==0.16.0",
+    "ruff==0.16.1",
     # Same reasoning: a stricter mypy or fresher requests stubs must land as a
     # deliberate bump, not a surprise CI failure.
     "mypy==2.3.0",
