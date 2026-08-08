@@ -63,7 +63,7 @@ dev = [
     "types-requests==2.33.0.20260712",
     # Mutation testing — a periodic "are my tests real?" audit, not a per-commit
     # gate. See CONTRIBUTING.md. Pinned because the config schema is version-tied.
-    "mutmut==3.6.0",
+    "mutmut==3.7.0",
 ]
 
 [project.urls]
